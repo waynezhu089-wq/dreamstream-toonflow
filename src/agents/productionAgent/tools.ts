@@ -293,6 +293,62 @@ export default (toolCpnfig: ToolConfig) => {
         return true;
       },
     }),
+    replace_flowData_storyboard: tool({
+      description:
+        "整套替换当前制作单元的分镜面板。仅在用户明确要求修订/清理已有分镜，并且需要让分镜面板与已确认的分镜表一一对应时使用。该工具是幂等修订入口，不用于普通新增。",
+      inputSchema: jsonSchema<{
+        items: Array<{
+          videoDesc: string;
+          prompt: string | null;
+          track: string;
+          duration: number;
+          associateAssetsIds: number[] | null;
+          shouldGenerateImage: "true" | "false";
+        }>;
+      }>(
+        z
+          .object({
+            items: z
+              .array(
+                z.object({
+                  videoDesc: z.string().describe("画面描述、场景、动作、台词、音效等"),
+                  prompt: z.string().nullable().describe("分镜图片提示词"),
+                  track: z.string().describe("分组"),
+                  duration: z.number().positive().describe("视频推荐时间"),
+                  associateAssetsIds: z.array(z.number()).nullable().describe("真实存在的关联资产ID；无资产时传空数组"),
+                  shouldGenerateImage: z.enum(["true", "false"]).describe("是否需要生成分镜图片"),
+                }),
+              )
+              .min(1)
+              .max(50)
+              .describe("最终完整分镜列表，顺序即最终镜头顺序"),
+          })
+          .toJSONSchema(),
+      ),
+      execute: async ({ items }) => {
+        const thinking = msg.thinking("正在整套替换分镜面板...");
+        try {
+          const res = await socketQueue(
+            () =>
+              new Promise<any>((resolve, reject) =>
+                socket.emit("replaceStoryboard", { items }, (result: any) => {
+                  if (!result?.success) return reject(new Error(result?.error || result?.message || "整套替换分镜失败"));
+                  resolve(result);
+                }),
+              ),
+          );
+          thinking.appendText(`已将当前分镜面板替换为 ${items.length} 条最终分镜。\n`);
+          thinking.updateTitle("整套替换分镜完成");
+          thinking.complete();
+          return res?.message ?? `已替换为 ${items.length} 条分镜`;
+        } catch (e) {
+          thinking.appendText("整套替换分镜失败:\n" + u.error(e).message);
+          thinking.updateTitle("整套替换分镜失败");
+          thinking.complete();
+          throw e;
+        }
+      },
+    }),
   };
 
   return toolsNames ? Object.fromEntries(Object.entries(tools).filter(([n]) => toolsNames.includes(n))) : tools;
