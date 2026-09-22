@@ -33,9 +33,10 @@ export default router.post(
     base64Data: z.string(),
     type: z.string().optional().default("clip"),
     name: z.string(),
+    scriptId: z.number().optional().nullable(),
   }),
   async (req, res) => {
-    const { base64Data, projectId, type = "clip", name } = req.body;
+    const { base64Data, projectId, type = "clip", name, scriptId } = req.body;
     const ext = getExtFromBase64(base64Data);
     const savePath = `/${projectId}/assets/${uuid()}.${ext}`;
 
@@ -55,6 +56,10 @@ export default router.post(
     await u.db("o_assets").where("id", id).update({
       imageId: imageId,
     });
-    res.status(200).send(success("上传成功"));
+    if (scriptId) {
+      const exists = await u.db("o_scriptAssets").where({ scriptId, assetId: id }).first();
+      if (!exists) await u.db("o_scriptAssets").insert({ scriptId, assetId: id });
+    }
+    res.status(200).send(success({ message: "上传成功", id }));
   },
 );
