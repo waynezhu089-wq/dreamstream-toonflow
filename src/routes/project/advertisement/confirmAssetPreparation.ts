@@ -3,7 +3,7 @@ import u from "@/utils";
 import { z } from "zod";
 import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
-import { STATE_KEY, readState } from "./getWorkflowState";
+import { STATE_KEY, readState } from "@/services/advertisementGate";
 
 const router = express.Router();
 
@@ -11,12 +11,13 @@ export default router.post(
   "/",
   validateFields({
     projectId: z.number(),
+    scriptId: z.number().int().positive().optional(),
     confirmed: z.boolean(),
   }),
   async (req, res) => {
-    const { projectId, confirmed } = req.body;
+    const { projectId, scriptId, confirmed } = req.body;
     try {
-      const current = await readState(projectId);
+      const current = await readState(projectId, scriptId);
       if (confirmed) {
         if (current.assetCount === 0) {
           return res.status(400).send(error("请先建立并关联广告基础资产"));
@@ -59,7 +60,7 @@ export default router.post(
         });
       }
 
-      const next = await readState(projectId);
+      const next = await readState(projectId, current.scriptId);
       return res.status(200).send(success(next));
     } catch (e: any) {
       return res.status(400).send(error(e?.message || "更新广告工作流状态失败"));

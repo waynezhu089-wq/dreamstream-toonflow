@@ -8,6 +8,7 @@ import useTools from "@/agents/productionAgent/tools";
 import { getProductionSkillPathSegments, ProductionProfile, resolveProductionProfile } from "@/agents/productionAgent/profile";
 import ResTool from "@/socket/resTool";
 import * as fs from "fs";
+import { assertProductionReady } from "@/services/advertisementGate";
 
 export interface AgentContext {
   socket: Socket;
@@ -41,6 +42,8 @@ function buildMemPrompt(mem: Awaited<ReturnType<Memory["get"]>>): string {
 }
 
 export async function runDecisionAI(ctx: AgentContext) {
+  await assertProductionReady(ctx.resTool.data.projectId, ctx.resTool.data.scriptId);
+  ctx.abortSignal?.throwIfAborted();
   const { isolationKey, text, abortSignal } = ctx;
   const memory = new Memory("productionAgent", isolationKey);
   await memory.add("user", text);

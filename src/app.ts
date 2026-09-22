@@ -15,6 +15,7 @@ import jwt from "jsonwebtoken";
 import socketInit from "@/socket/index";
 import { isEletron } from "@/utils/getPath";
 import { ensureThumbnail, ThumbnailSize } from "@/utils/image";
+import { registerProductionGate } from "@/middleware/productionGate";
 
 const app = express();
 const server = http.createServer(app);
@@ -169,6 +170,7 @@ export default async function startServe(randomPort: Boolean = false) {
     }
   });
 
+  registerProductionGate(app);
   const router = await import("@/router");
   await router.default(app);
 
