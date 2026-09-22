@@ -5,9 +5,9 @@ import u from "@/utils";
 import Memory from "@/utils/agent/memory";
 import { createSkillTools, parseFrontmatter, scanSkills, useSkill } from "@/utils/agent/skillsTools";
 import useTools from "@/agents/productionAgent/tools";
+import { getProductionSkillPathSegments, ProductionProfile, resolveProductionProfile } from "@/agents/productionAgent/profile";
 import ResTool from "@/socket/resTool";
 import * as fs from "fs";
-import path from "path";
 
 export interface AgentContext {
   socket: Socket;
@@ -45,11 +45,11 @@ export async function runDecisionAI(ctx: AgentContext) {
   const memory = new Memory("productionAgent", isolationKey);
   await memory.add("user", text);
 
-  const skill = path.join(u.getPath("skills"), "production_agent_decision.md");
-  const prompt = await fs.promises.readFile(skill, "utf-8");
-
   const projectInfo = await u.db("o_project").where("id", ctx.resTool.data.projectId).first();
   if (!projectInfo) throw new Error(`项目不存在，ID: ${ctx.resTool.data.projectId}`);
+  const profile = resolveProductionProfile(projectInfo);
+  const skill = u.getPath(getProductionSkillPathSegments(profile, "production_agent_decision.md"));
+  const prompt = await fs.promises.readFile(skill, "utf-8");
   const [_, imageModelName] = projectInfo.imageModel!.split(/:(.+)/);
   const [id, videoModelName] = projectInfo.videoModel!.split(/:(.+)/);
   const models = await u.vendor.getModelList(id);
@@ -145,7 +145,9 @@ async function createSubAgent(parentCtx: AgentContext) {
 
   const projectInfo = await u.db("o_project").where("id", resTool.data.projectId).first();
   if (!projectInfo) throw new Error(`项目不存在，ID: ${resTool.data.projectId}`);
-  const artSkills = await createArtSkills(projectInfo?.artStyle!, projectInfo?.directorManual!);
+  const profile = resolveProductionProfile(projectInfo);
+  const skillPath = (fileName: string) => u.getPath(getProductionSkillPathSegments(profile, fileName));
+  const artSkills = await createArtSkills(projectInfo?.artStyle!, projectInfo?.directorManual!, profile);
 
   const [_, imageModelName] = projectInfo.imageModel!.split(/:(.+)/);
   const [id, videoModelName] = projectInfo.videoModel!.split(/:(.+)/);
@@ -198,7 +200,7 @@ async function createSubAgent(parentCtx: AgentContext) {
     description: "运行执行subAgent来完成衍生资产分析与信息写入相关任务",
     inputSchema: jsonSchema<{ prompt: string }>(promptInput),
     execute: async ({ prompt }) => {
-      const skill = path.join(u.getPath("skills"), "production_execution_derive_assets.md");
+      const skill = skillPath("production_execution_derive_assets.md");
       const systemPrompt = await fs.promises.readFile(skill, "utf-8");
       return runAgent({
         key: "productionAgent:deriveAssetsAgent",
@@ -220,7 +222,7 @@ async function createSubAgent(parentCtx: AgentContext) {
     description: "运行执行subAgent来完成衍生资产图片生成相关任务",
     inputSchema: jsonSchema<{ prompt: string }>(promptInput),
     execute: async ({ prompt }) => {
-      const skill = path.join(u.getPath("skills"), "production_execution_generate_assets.md");
+      const skill = skillPath("production_execution_generate_assets.md");
       const systemPrompt = await fs.promises.readFile(skill, "utf-8");
       return runAgent({
         key: "productionAgent:generateAssetsAgent",
@@ -242,7 +244,7 @@ async function createSubAgent(parentCtx: AgentContext) {
     description: "运行执行subAgent来完成导演规划相关任务",
     inputSchema: jsonSchema<{ prompt: string }>(promptInput),
     execute: async ({ prompt }) => {
-      const skill = path.join(u.getPath("skills"), "production_execution_director_plan.md");
+      const skill = skillPath("production_execution_director_plan.md");
       const systemPrompt = await fs.promises.readFile(skill, "utf-8");
 
       const addPrompt = "\n你必须使用如下XML格式写入工作区：\n```\n<scriptPlan>内容</scriptPlan>\n```";
@@ -267,7 +269,7 @@ async function createSubAgent(parentCtx: AgentContext) {
     description: "运行执行subAgent来完成分镜图生成相关任务",
     inputSchema: jsonSchema<{ prompt: string }>(promptInput),
     execute: async ({ prompt }) => {
-      const skill = path.join(u.getPath("skills"), "production_execution_storyboard_gen.md");
+      const skill = skillPath("production_execution_storyboard_gen.md");
       const systemPrompt = await fs.promises.readFile(skill, "utf-8");
       return runAgent({
         key: "productionAgent:storyboardGenAgent",
@@ -294,14 +296,14 @@ async function createSubAgent(parentCtx: AgentContext) {
   //   mainSkills.push({ path: skillPath, ...parsed });
   // }
 
-  const productionSkills = await useProductionSkills(projectInfo?.artStyle!, projectInfo?.directorManual!);
+  const productionSkills = await useProductionSkills(projectInfo?.artStyle!, projectInfo?.directorManual!, profile);
 
   //分镜面板写入
   const run_sub_agent_storyboard_panel = tool({
     description: "运行执行subAgent来完成分镜面板写入相关任务",
     inputSchema: jsonSchema<{ prompt: string }>(promptInput),
     execute: async ({ prompt }) => {
-      const skill = path.join(u.getPath("skills"), "production_execution_storyboard_panel.md");
+      const skill = skillPath("production_execution_storyboard_panel.md");
       const systemPrompt = await fs.promises.readFile(skill, "utf-8");
 
       const addPrompt =
@@ -327,7 +329,7 @@ async function createSubAgent(parentCtx: AgentContext) {
     description: "运行执行subAgent来完成分镜表构建相关任务",
     inputSchema: jsonSchema<{ prompt: string }>(promptInput),
     execute: async ({ prompt }) => {
-      const skill = path.join(u.getPath("skills"), "production_execution_storyboard_table.md");
+      const skill = skillPath("production_execution_storyboard_table.md");
       const systemPrompt = await fs.promises.readFile(skill, "utf-8");
 
       const addPrompt = "\n你必须使用如下XML格式写入工作区：\n```\n<storyboardTable>内容</storyboardTable>\n```";
@@ -351,7 +353,7 @@ async function createSubAgent(parentCtx: AgentContext) {
     description: "运行监督层subAgent执行独立任务，完成后返回结果",
     inputSchema: jsonSchema<{ prompt: string }>(promptInput),
     execute: async ({ prompt }) => {
-      const skill = path.join(u.getPath("skills"), "production_agent_supervision.md");
+      const skill = skillPath("production_agent_supervision.md");
       const systemPrompt = await fs.promises.readFile(skill, "utf-8");
       return runAgent({
         key: "productionAgent:supervisionAgent",
@@ -374,10 +376,13 @@ async function createSubAgent(parentCtx: AgentContext) {
   };
 }
 
-async function createArtSkills(artName: string, storyName: string) {
+async function createArtSkills(artName: string, storyName: string, profile: ProductionProfile) {
   const artWorkerPath = u.getPath(["skills", "art_skills", artName, "driector_skills"]);
   const storyWorkerPath = u.getPath(["skills", "story_skills", storyName, "driector_skills"]);
-  const skillList = [...(await scanSkills(artWorkerPath + "/*.md")), ...(await scanSkills(storyWorkerPath + "/*.md"))];
+  const skillList = [
+    ...(await scanSkills(artWorkerPath + "/*.md")),
+    ...(profile.includeStorySkills ? await scanSkills(storyWorkerPath + "/*.md") : []),
+  ];
   const mainSkills: { path: string; name: string; description: string }[] = [];
   for (const skillPath of skillList) {
     if (!fs.existsSync(skillPath)) throw new Error(`主技能文件不存在: ${skillPath}`);
@@ -463,14 +468,18 @@ ${skillEntries}
 </available_skills>`;
 }
 
-async function useProductionSkills(artName: string, storyName: string) {
+async function useProductionSkills(artName: string, storyName: string, profile: ProductionProfile) {
   const artWorkerPath = u.getPath(["skills", "art_skills", artName, "driector_skills"]);
   const storyWorkerPath = u.getPath(["skills", "story_skills", storyName, "driector_skills"]);
   const productionPath = u.getPath(["skills", "production_skills"]);
+  const profileProductionPath = profile.productionSkillRoot
+    ? u.getPath(["skills", ...profile.productionSkillRoot])
+    : null;
   const skillList = [
     ...(await scanSkills(artWorkerPath + "/*.md")),
-    ...(await scanSkills(storyWorkerPath + "/*.md")),
+    ...(profile.includeStorySkills ? await scanSkills(storyWorkerPath + "/*.md") : []),
     ...(await scanSkills(productionPath + "/*.md")),
+    ...(profileProductionPath ? await scanSkills(profileProductionPath + "/*.md") : []),
   ];
   const mainSkills: { path: string; name: string; description: string }[] = [];
   for (const skillPath of skillList) {
