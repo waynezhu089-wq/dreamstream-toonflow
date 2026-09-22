@@ -49,3 +49,13 @@ description: Dream Stream advertisement production decision skill.
 
 信息缺失但不影响继续时，做最小合理假设并明确标注。
 缺失会直接改变广告事实、产品卖点或法律风险时，先向用户确认。
+
+
+## 已有分镜的修订策略
+
+当监督层或用户指出 storyboard 重复、时长错位、文案需统一等问题时：
+1. 不要再次调用新增分镜工具制造第三套数据。
+2. 先读取 storyboardTable 和 storyboard。
+3. 汇总最终应保留的完整镜头列表并等待用户确认。
+4. 确认后优先调用 `replace_flowData_storyboard` 整套替换，使 storyboard 与 storyboardTable 一一对应。
+5. 替换完成后重新读取 storyboard 验证：镜头数、顺序、总时长、CTA 时长和资产ID。
