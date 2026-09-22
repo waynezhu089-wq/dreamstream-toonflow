@@ -40,7 +40,7 @@ if (-not $ready) {
 }
 
 Write-Host "Starting isolated Dream Stream Toonflow Electron test app..." -ForegroundColor Cyan
-$appCommand = "$env:TOONFLOW_DEV_USER_DATA='$TestUserData'; Set-Location -LiteralPath '$AppRepo'; npx.cmd -y yarn@1.22.22 dev:gui-vite"
+$appCommand = "`$env:TOONFLOW_DEV_USER_DATA='$TestUserData'; Set-Location -LiteralPath '$AppRepo'; npx.cmd -y yarn@1.22.22 dev:gui-vite"
 Start-Process powershell.exe -ArgumentList "-NoExit", "-NoProfile", "-Command", $appCommand | Out-Null
 
 Write-Host ""
