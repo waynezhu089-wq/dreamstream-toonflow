@@ -4,6 +4,7 @@ import { success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
+import { recordAssetUpload } from "@/services/assetUploadSource";
 const router = express.Router();
 
 // 根据 base64 头部获取文件扩展名
@@ -41,25 +42,30 @@ export default router.post(
     const savePath = `/${projectId}/assets/${uuid()}.${ext}`;
 
     await u.oss.writeFile(savePath, Buffer.from(base64Data.match(/base64,([A-Za-z0-9+/=]+)/)[1] ?? "", "base64"));
-    const [id] = await u.db("o_assets").insert({
-      type: type,
-      projectId: projectId,
-      name,
-      startTime: Date.now(),
+    const id = await u.db.transaction(async (trx) => {
+      const [id] = await trx("o_assets").insert({
+        type: type,
+        projectId: projectId,
+        name,
+        startTime: Date.now(),
+      });
+      const [imageId] = await trx("o_image").insert({
+        filePath: savePath,
+        type,
+        assetsId: id,
+        state: "已完成",
+      });
+      await trx("o_assets").where("id", id).update({
+        imageId: imageId,
+      });
+      if (scriptId) {
+        const exists = await trx("o_scriptAssets").where({ scriptId, assetId: id }).first();
+        if (!exists) await trx("o_scriptAssets").insert({ scriptId, assetId: id });
+      }
+
+      await recordAssetUpload(trx, { projectId, assetId: id, imageId, filePath: savePath });
+      return id;
     });
-    const [imageId] = await u.db("o_image").insert({
-      filePath: savePath,
-      type,
-      assetsId: id,
-      state: "已完成",
-    });
-    await u.db("o_assets").where("id", id).update({
-      imageId: imageId,
-    });
-    if (scriptId) {
-      const exists = await u.db("o_scriptAssets").where({ scriptId, assetId: id }).first();
-      if (!exists) await u.db("o_scriptAssets").insert({ scriptId, assetId: id });
-    }
     res.status(200).send(success({ message: "上传成功", id }));
   },
 );

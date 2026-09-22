@@ -16,6 +16,8 @@ import socketInit from "@/socket/index";
 import { isEletron } from "@/utils/getPath";
 import { ensureThumbnail, ThumbnailSize } from "@/utils/image";
 import { registerProductionGate } from "@/middleware/productionGate";
+import { initializeAssetPlanSchema } from "@/lib/advertisementAssetPlanSchema";
+import assetPlan from "@/routes/project/advertisement/assetPlan";
 
 const app = express();
 const server = http.createServer(app);
@@ -46,6 +48,7 @@ async function checkPermissions() {
 
 export default async function startServe(randomPort: Boolean = false) {
   await checkPermissions();
+  await initializeAssetPlanSchema(u.db);
 
   await u.writeVersion();
   const io = new Server(server, { cors: { origin: "*" } });
@@ -171,6 +174,7 @@ export default async function startServe(randomPort: Boolean = false) {
   });
 
   registerProductionGate(app);
+  app.use("/api/project/advertisement/assetPlan", assetPlan);
   const router = await import("@/router");
   await router.default(app);
 

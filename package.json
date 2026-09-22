@@ -25,6 +25,7 @@
     "start": "cross-env NODE_ENV=prod node data/serve/app.js",
     "lint": "tsc --noEmit",
     "test:production-workspace": "node --test tests/production-workspace.test.cjs",
+    "test:advertisement-asset-plan": "node --test tests/advertisement-asset-plan.test.cjs",
     "test:advertisement-gate": "node --test tests/advertisement-production-gate.test.cjs",
     "build": "cross-env NODE_ENV=prod tsx scripts/build.ts",
     "pack": "electron-builder --dir",
