@@ -1,3 +1,4 @@
+import { productionSpec } from "@/services/storyboardProduction";
 import express from "express";
 import u from "@/utils";
 import { z } from "zod";
@@ -86,7 +87,7 @@ export default router.post(
       return res.status(200).send(success(flowData));
     } else {
       try {
-        const storyboardData = await u.db("o_storyboard").where("scriptId", episodesId);
+        const storyboardData = await u.db("o_storyboard").where({ scriptId: episodesId, projectId });
 
         await Promise.all(
           storyboardData.map(async (i) => {
@@ -141,6 +142,7 @@ export default router.post(
         );
         flowData.storyboard = storyboardData
           .map((i) => ({
+            ...productionSpec(i),
             id: i.id,
             index: i.index,
             duration: i.duration ? +i.duration : 0,

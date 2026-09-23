@@ -1,4 +1,5 @@
 import express from "express";
+import { productionSpec } from "@/services/storyboardProduction";
 import u from "@/utils";
 import { z } from "zod";
 import { success } from "@/lib/responseFormat";
@@ -67,6 +68,7 @@ export default router.post(
         );
         return {
           id: String(item.id),
+          ...productionSpec(item),
           createTime: item.createTime ?? undefined,
           duration: item.duration ? Number(item.duration) : undefined,
           filePath: item.filePath || undefined,

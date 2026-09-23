@@ -1,3 +1,4 @@
+import { productionFields, productionSpec, isAdvertisement, writeAdvertisementStoryboards } from "@/services/storyboardProduction";
 import express from "express";
 import u from "@/utils";
 import { z } from "zod";
@@ -7,6 +8,7 @@ import { validateFields } from "@/middleware/middleware";
 const router = express.Router();
 
 const storyboardItemSchema = z.object({
+  ...productionFields,
   videoDesc: z.string(),
   prompt: z.string().nullable(),
   track: z.string(),
@@ -23,6 +25,12 @@ export default router.post(
     projectId: z.number(),
   }),
   async (req, res) => {
+    if (await isAdvertisement(req.body.projectId)) {
+      try {
+        const result = await writeAdvertisementStoryboards(req.body.projectId, req.body.scriptId, req.body.data, "replace");
+        return res.status(200).send(success(result));
+      } catch (e: any) { return res.status(e.status ?? 400).send({ code: e.code ?? "STORYBOARD_PRODUCTION_INVALID", message: e.message }); }
+    }
     const { data, scriptId, projectId } = req.body as {
       data: z.infer<typeof storyboardItemSchema>[];
       scriptId: number;

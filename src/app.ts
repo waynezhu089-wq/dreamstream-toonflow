@@ -23,6 +23,8 @@ import { initializeModelPresetSchema } from "@/lib/modelPresetSchema";
 import modelPresets from "@/routes/modelSelect/presets";
 import { modelUseGate } from "@/middleware/modelUseGate";
 
+import { initializeStoryboardProductionSchema } from "@/lib/storyboardProductionSchema";
+
 const app = express();
 const server = http.createServer(app);
 
@@ -54,6 +56,7 @@ export default async function startServe(randomPort: Boolean = false) {
   await checkPermissions();
   await initializeAssetPlanSchema(u.db);
   await initializeModelPresetSchema(u.db);
+  await initializeStoryboardProductionSchema(u.db);
 
   await u.writeVersion();
   const io = new Server(server, { cors: { origin: "*" } });

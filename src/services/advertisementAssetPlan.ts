@@ -41,7 +41,7 @@ async function assertContext(trx: Knex.Transaction, context: Context) {
 
 // Validate against the CURRENT asset/image, not its historical name, file
 // extension, prompt or an earlier upload of a different image on the same asset.
-async function assertBinding(trx: Knex.Transaction, context: Context, item: Pick<Item, "assetId" | "sourcePolicy">) {
+export async function assertAssetPlanBinding(trx: Knex.Transaction, context: Context, item: Pick<Item, "assetId" | "sourcePolicy">) {
   const asset = await trx("o_assets").where({ id: item.assetId, projectId: context.projectId }).first();
   const linked = await trx("o_scriptAssets").where({ scriptId: context.scriptId, assetId: item.assetId }).first();
   if (!asset || !linked || (asset.scriptId != null && asset.scriptId !== context.scriptId)) {
@@ -64,7 +64,7 @@ async function view(trx: Knex.Transaction, context: Context) {
     const item: Item = { assetKey: row.assetKey, name: row.name, category: row.category, required: Boolean(row.required), sourcePolicy: row.sourcePolicy, assetId: row.assetId };
     let bindingIssue: string | null = item.assetId === null ? "UNBOUND" : null;
     if (item.assetId !== null) {
-      try { await assertBinding(trx, context, item); }
+      try { await assertAssetPlanBinding(trx, context, item); }
       catch (error) {
         if (!(error instanceof AssetPlanError)) throw error;
         bindingIssue = error.code;
@@ -96,7 +96,7 @@ export async function saveAssetPlan(input: unknown) {
   return database().transaction(async (trx) => {
     await assertContext(trx, context);
     // Validate every proposed binding before replacing any part of the plan.
-    for (const item of items) if (item.assetId !== null) await assertBinding(trx, context, item);
+    for (const item of items) if (item.assetId !== null) await assertAssetPlanBinding(trx, context, item);
     await trx(ASSET_PLAN_TABLE).where(context).whereNotIn("assetKey", items.map(item => item.assetKey)).delete();
     for (const [position, item] of items.entries()) {
       await trx<PlanRow>(ASSET_PLAN_TABLE)
@@ -114,7 +114,7 @@ export async function bindAssetPlanItem(input: unknown) {
     await assertContext(trx, context);
     const item = await trx<PlanRow>(ASSET_PLAN_TABLE).where({ ...context, assetKey }).first();
     if (!item) throw new AssetPlanError("当前制作单元中没有该计划项", "ASSET_PLAN_ITEM_NOT_FOUND", 404);
-    await assertBinding(trx, context, { assetId, sourcePolicy: item.sourcePolicy });
+    await assertAssetPlanBinding(trx, context, { assetId, sourcePolicy: item.sourcePolicy });
     await trx(ASSET_PLAN_TABLE).where({ ...context, assetKey }).update({ assetId });
     return view(trx, context);
   });

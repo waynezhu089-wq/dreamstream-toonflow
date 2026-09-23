@@ -79,7 +79,7 @@ test('legacy editor image change does not pin or overwrite inherited video confi
  await f.post('modelSelect/presets/save',{...p,slots:{...p.slots,video:'vendor:video2'}});assert.equal((await f.service.resolveModels(1)).models.video,'vendor:video2');
 });
 test('all advertisement generation boundaries reject missing models before writes or paid dispatch',async t=>{
- const f=await fixture(t);for(const route of ['assetsGenerate/generateAssets','assetsGenerate/batchGenerateImageAssets','production/editImage/generateFlowImage','production/assets/batchGenerateAssetsImage','production/storyboard/batchGenerateImage']) { const r=await f.post(route,{projectId:1,model:'fake:request'},409);assert.match(r.message,/请先配置图片生成模型/); }
+ const f=await fixture(t);for(const route of ['assetsGenerate/generateAssets','assetsGenerate/batchGenerateImageAssets','production/editImage/generateFlowImage','production/assets/batchGenerateAssetsImage']) { const r=await f.post(route,{projectId:1,model:'fake:request'},409);assert.match(r.message,/请先配置图片生成模型/); }
  for(const route of ['production/workbench/generateVideo','production/workbench/batchGenerateVideo']) { const r=await f.post(route,{projectId:1},409);assert.match(r.message,/请先配置视频生成模型/); }
  assert.equal(f.calls.length,0);assert.equal((await f.db('o_video')).length,0);
 });

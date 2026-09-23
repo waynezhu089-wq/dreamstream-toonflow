@@ -1,3 +1,4 @@
+import { productionFields } from "@/services/storyboardProduction";
 import { tool, jsonSchema, Tool } from "ai";
 import { z } from "zod";
 import _ from "lodash";
@@ -25,6 +26,7 @@ export const assetItemSchema = z.object({
   derive: z.array(deriveAssetSchema).describe("衍生资产列表"),
 });
 const storyboardSchema = z.object({
+  ...productionFields,
   id: z.number().describe("分镜ID，必须为真实id"),
   duration: z.number().describe("持续时长(秒)"),
   prompt: z.string().describe("生成提示词"),
@@ -236,7 +238,7 @@ export default (toolCpnfig: ToolConfig) => {
         )
           .then((res) => {
             thinking.appendText("生成的分镜数据:\n" + JSON.stringify(res, null, 2));
-            thinking.updateTitle("分镜生成完成");
+            thinking.updateTitle(toolCpnfig.advertisement ? "分镜生产请求已接收，请检查最终状态" : "分镜生成完成");
             thinking.complete();
           })
           .catch((e) => {
@@ -257,9 +259,17 @@ export default (toolCpnfig: ToolConfig) => {
         duration: number;
         associateAssetsIds: number[] | null;
         shouldGenerateImage: string;
+        productionMode?: "REAL_ASSET_DIRECT" | "AI_TEXT_TO_IMAGE" | "AI_REFERENCE_GENERATE" | "REAL_AI_COMPOSITE" | null;
+        primaryAssetId?: number | null;
+        referenceAssetIds?: number[];
+        referenceAssetGroupIds?: string[];
+        promptSkillId?: string | null;
+        promptSkillVersion?: string | null;
+        capabilityId?: string | null;
       }>(
         z
           .object({
+            ...productionFields,
             videoDesc: z.string().describe("画面描述、场景、关联资产名称、时长、景别、运镜、角色动作、情绪、光影氛围、台词、音效、关联资产ID"),
             prompt: z.string().nullable().describe("分镜图片提示词"),
             track: z.string().describe("分组"),
@@ -273,6 +283,7 @@ export default (toolCpnfig: ToolConfig) => {
         await assertAdvertisementAssetReferences(resTool.data.projectId, resTool.data.scriptId, raw.associateAssetsIds ?? []);
         const thinking = msg.thinking("正在新增 分镜面板 数据...");
         const data = {
+          ...Object.fromEntries(Object.keys(productionFields).filter(key => key in raw).map(key => [key, (raw as any)[key]])),
           videoDesc: raw.videoDesc,
           prompt: raw.prompt,
           track: raw.track,
@@ -320,6 +331,7 @@ export default (toolCpnfig: ToolConfig) => {
             items: z
               .array(
                 z.object({
+                  ...productionFields,
                   videoDesc: z.string().describe("画面描述、场景、动作、台词、音效等"),
                   prompt: z.string().nullable().describe("分镜图片提示词"),
                   track: z.string().describe("分组"),

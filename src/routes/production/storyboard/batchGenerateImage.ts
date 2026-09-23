@@ -1,3 +1,4 @@
+import { isAdvertisement, produceAdvertisementStoryboard } from "@/services/storyboardProduction";
 import express from "express";
 import u from "@/utils";
 import { z } from "zod";
@@ -33,6 +34,18 @@ export default router.post(
       compulsory: boolean;
     } = req.body;
     if (!storyboardIds || storyboardIds.length === 0) return res.status(400).send(error("storyboardIds不能为空"));
+    if (await isAdvertisement(projectId)) {
+      const ids = [...new Set(storyboardIds)];
+      const rows = await u.db("o_storyboard").where({projectId, scriptId}).whereIn("id", ids);
+      if (rows.length !== ids.length) return res.status(400).send({code:"STORYBOARD_SCOPE_INVALID",message:"分镜不存在或不属于当前制作单元"});
+      // Respond before slow model work, preserving the existing polling contract.
+      // All modes are dispatched explicitly; compulsory never overrides the mode.
+      await u.db("o_storyboard").where({projectId,scriptId}).whereIn("id",ids).update({state:"生成中",reason:""});
+      res.status(200).send(success(rows.map(row=>({id:row.id,state:"生成中",src:null}))));
+      const count = Math.max(1, Math.min(20, Math.floor(concurrentCount)));
+      for(let i=0;i<ids.length;i+=count) await Promise.all(ids.slice(i,i+count).map(id=>produceAdvertisementStoryboard(projectId,scriptId,id,req.body.model)));
+      return;
+    }
     // 当没有 storyboardIds 时，通过 AI 生成新的分镜面板数据
     let finalStoryboardIds: number[] = storyboardIds || [];
     // shouldGenerateImage === 0 的分镜标记为「未生成」，其余标记为「生成中」
