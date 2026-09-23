@@ -36,7 +36,8 @@
     "debug:ai": "npx @ai-sdk/devtools",
     "license": "node scripts/license.ts",
     "vendor2json": "node scripts/vendor2json.ts",
-    "test:database-adapter": "node --test tests/database-adapter.test.cjs"
+    "test:database-adapter": "node --test tests/database-adapter.test.cjs",
+    "test:model-presets": "node --test tests/model-presets.test.cjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.35",

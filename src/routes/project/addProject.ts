@@ -16,14 +16,15 @@ export default router.post(
     artStyle: z.string(),
     directorManual: z.string(),
     videoRatio: z.string(),
-    imageModel: z.string(),
-    videoModel: z.string(),
+    imageModel: z.string().optional(),
+    videoModel: z.string().optional(),
     imageQuality: z.string(),
     mode: z.string(),
   }),
   async (req, res) => {
     const { projectType, name, intro, type, directorManual, artStyle, videoRatio, imageModel, videoModel, imageQuality, mode } = req.body;
 
+    if (!(projectType === "general_video" && type === "advertisement") && (imageModel === undefined || videoModel === undefined)) return res.status(400).send({ message: "缺少项目模型参数" });
     await u.db("o_project").insert({
       id: Date.now(),
       projectType,
@@ -34,8 +35,8 @@ export default router.post(
       videoRatio,
       directorManual,
       userId: 1,
-      imageModel,
-      videoModel,
+      imageModel: imageModel ?? "",
+      videoModel: videoModel ?? "",
       createTime: Date.now(),
       imageQuality,
       mode,

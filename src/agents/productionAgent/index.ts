@@ -8,6 +8,7 @@ import useTools from "@/agents/productionAgent/tools";
 import { getProductionSkillPathSegments, ProductionProfile, resolveProductionProfile } from "@/agents/productionAgent/profile";
 import ResTool from "@/socket/resTool";
 import * as fs from "fs";
+import { resolveModels, textModelForProject } from "@/services/modelPreset";
 import { assertProductionReady } from "@/services/advertisementGate";
 
 export interface AgentContext {
@@ -53,10 +54,14 @@ export async function runDecisionAI(ctx: AgentContext) {
   const profile = resolveProductionProfile(projectInfo);
   const skill = u.getPath(getProductionSkillPathSegments(profile, "production_agent_decision.md"));
   const prompt = await fs.promises.readFile(skill, "utf-8");
-  const [_, imageModelName] = projectInfo.imageModel!.split(/:(.+)/);
-  const [id, videoModelName] = projectInfo.videoModel!.split(/:(.+)/);
-  const models = await u.vendor.getModelList(id);
-  if (!models.length) throw new Error(`项目使用的模型不存在，ID: ${projectInfo.videoModel}`);
+  if (profile.key === "advertisement") {
+    const { models } = await resolveModels(projectInfo.id!);
+    projectInfo.imageModel = models.image ?? ""; projectInfo.videoModel = models.video ?? "";
+  }
+  const [_, imageModelName] = (projectInfo.imageModel ?? "").split(/:(.+)/);
+  const [id, videoModelName] = (projectInfo.videoModel ?? "").split(/:(.+)/);
+  const models = profile.key === "advertisement" ? [] : id ? await u.vendor.getModelList(id) : [];
+  if (profile.key !== "advertisement" && !models.length) throw new Error(`项目使用的模型不存在，ID: ${projectInfo.videoModel}`);
   let videoMode = "";
   try {
     videoMode = JSON.parse(projectInfo.mode ?? "");
@@ -71,7 +76,7 @@ export async function runDecisionAI(ctx: AgentContext) {
 
   const mem = buildMemPrompt(await memory.get(text));
 
-  const { fullStream } = await u.Ai.Text("productionAgent:decisionAgent", ctx.thinkConfig.think, ctx.thinkConfig.thinlLevel).stream({
+  const { fullStream } = await u.Ai.Text(await textModelForProject(ctx.resTool.data.projectId, "productionAgent:decisionAgent") as Parameters<typeof u.Ai.Text>[0], ctx.thinkConfig.think, ctx.thinkConfig.thinlLevel).stream({
     messages: [
       { role: "system", content: prompt },
       { role: "assistant", content: mem + "\n" + modelInfo },
@@ -120,7 +125,7 @@ async function createSubAgent(parentCtx: AgentContext) {
     parentCtx.msg.complete();
     const subMsg = resTool.newMessage("assistant", name);
 
-    const { fullStream } = await u.Ai.Text(key, parentCtx.thinkConfig.think, parentCtx.thinkConfig.thinlLevel).stream({
+    const { fullStream } = await u.Ai.Text(await textModelForProject(parentCtx.resTool.data.projectId, key) as Parameters<typeof u.Ai.Text>[0], parentCtx.thinkConfig.think, parentCtx.thinkConfig.thinlLevel).stream({
       system,
       messages: messages ?? [{ role: "user", content: prompt }],
       abortSignal,
@@ -152,10 +157,14 @@ async function createSubAgent(parentCtx: AgentContext) {
   const skillPath = (fileName: string) => u.getPath(getProductionSkillPathSegments(profile, fileName));
   const artSkills = await createArtSkills(projectInfo?.artStyle!, projectInfo?.directorManual!, profile);
 
-  const [_, imageModelName] = projectInfo.imageModel!.split(/:(.+)/);
-  const [id, videoModelName] = projectInfo.videoModel!.split(/:(.+)/);
-  const models = await u.vendor.getModelList(id);
-  if (!models.length) throw new Error(`项目使用的模型不存在，ID: ${projectInfo.videoModel}`);
+  if (profile.key === "advertisement") {
+    const { models } = await resolveModels(projectInfo.id!);
+    projectInfo.imageModel = models.image ?? ""; projectInfo.videoModel = models.video ?? "";
+  }
+  const [_, imageModelName] = (projectInfo.imageModel ?? "").split(/:(.+)/);
+  const [id, videoModelName] = (projectInfo.videoModel ?? "").split(/:(.+)/);
+  const models = profile.key === "advertisement" ? [] : id ? await u.vendor.getModelList(id) : [];
+  if (profile.key !== "advertisement" && !models.length) throw new Error(`项目使用的模型不存在，ID: ${projectInfo.videoModel}`);
   // const findData = models.find((i: any) => i.modelName == videoModelName);
   //
   let videoMode = "";

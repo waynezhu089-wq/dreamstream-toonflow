@@ -19,6 +19,10 @@ import { registerProductionGate } from "@/middleware/productionGate";
 import { initializeAssetPlanSchema } from "@/lib/advertisementAssetPlanSchema";
 import assetPlan from "@/routes/project/advertisement/assetPlan";
 
+import { initializeModelPresetSchema } from "@/lib/modelPresetSchema";
+import modelPresets from "@/routes/modelSelect/presets";
+import { modelUseGate } from "@/middleware/modelUseGate";
+
 const app = express();
 const server = http.createServer(app);
 
@@ -49,6 +53,7 @@ async function checkPermissions() {
 export default async function startServe(randomPort: Boolean = false) {
   await checkPermissions();
   await initializeAssetPlanSchema(u.db);
+  await initializeModelPresetSchema(u.db);
 
   await u.writeVersion();
   const io = new Server(server, { cors: { origin: "*" } });
@@ -174,6 +179,8 @@ export default async function startServe(randomPort: Boolean = false) {
   });
 
   registerProductionGate(app);
+  app.use("/api/modelSelect/presets", modelPresets);
+  app.use(modelUseGate);
   app.use("/api/project/advertisement/assetPlan", assetPlan);
   const router = await import("@/router");
   await router.default(app);

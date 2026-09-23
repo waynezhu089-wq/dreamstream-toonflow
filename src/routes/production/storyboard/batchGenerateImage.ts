@@ -47,6 +47,7 @@ export default router.post(
     }
 
     const projectSettingData = await u.db("o_project").where("id", projectId).select("imageModel", "imageQuality", "artStyle", "videoRatio").first();
+    if (req.body.model && projectSettingData) projectSettingData.imageModel = req.body.model;
 
     // 按 rowid 顺序查出每个 storyboard 关联的 assetId 有序列表
     const assets2StoryboardRows = await u
