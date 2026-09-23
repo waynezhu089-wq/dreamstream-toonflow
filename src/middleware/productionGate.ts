@@ -8,6 +8,7 @@ import confirmAssets from "@/routes/project/advertisement/confirmAssetPreparatio
 // available under /api/assets*, outside this downstream production boundary.
 const readOnly = new Set([
   "/getstoryboarddata", "/assets/pollingimage", "/editimage/getimagedefaultmodle", "/editimage/getimageflow",
+  "/storyboard/composite/read",
   "/storyboard/getstoryboarddata", "/storyboard/pollingimage", "/storyboard/downpreviewimage", "/storyboard/previewimage",
   "/workbench/checkvideoprompt", "/workbench/checkvideostatelist", "/workbench/getaudiobindassetslist",
   "/workbench/getfileurl", "/workbench/getgeneratedata", "/workbench/getvideolist",
@@ -74,6 +75,11 @@ export const productionGate: RequestHandler = async (req, res, next) => {
     }
     if (requestedScript !== undefined) await addScript(requestedScript, requestedProject);
     switch (route) {
+      case "/storyboard/composite/start":
+      case "/storyboard/composite/finish":
+        if (requestedProject === undefined || requestedScript === undefined) throw new ProductionGateError("缺少当前项目或制作单元");
+        await records("o_storyboard", [body.storyboardId]);
+        break;
       case "/getflowdata":
       case "/saveflowdata":
       case "/storyboard/addstoryboard":

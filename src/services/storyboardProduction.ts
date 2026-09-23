@@ -147,7 +147,7 @@ export async function produceAdvertisementStoryboard(projectId: number, scriptId
         fail("CAPABILITY_INPUT_UNSUPPORTED：当前未实现参考图/组生成；真实 UI、Logo、标签不得由 AI 重画冒充原素材", "CAPABILITY_INPUT_UNSUPPORTED");
         break;
       case "REAL_AI_COMPOSITE":
-        fail("需要 Composite Capability，当前尚未实现", "CAPABILITY_NOT_IMPLEMENTED");
+        fail("请使用“背景 + 真实素材合成”单镜入口：先生成背景，再人工确认四角；普通批量生成不接受合成输入", "CAPABILITY_INPUT_UNSUPPORTED");
         break;
       default:
         fail("请先为该镜头指定 productionMode，不能从 shouldGenerateImage 推测", "PRODUCTION_MODE_REQUIRED");
