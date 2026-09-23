@@ -7,7 +7,7 @@ import { readState } from "@/services/advertisementGate";
 const router = express.Router();
 export default router.post(
   "/",
-  validateFields({ projectId: z.number(), scriptId: z.number().int().positive().optional() }),
+  validateFields({ projectId: z.number(), scriptId: z.number().int().positive() }),
   async (req, res) => {
     try {
       return res.status(200).send(success(await readState(req.body.projectId, req.body.scriptId)));

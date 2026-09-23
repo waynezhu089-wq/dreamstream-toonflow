@@ -77,7 +77,7 @@ async function fixture(t) {
     table.integer('imageId'); table.string('name'); table.string('type');
   });
   await utils.db.schema.createTable('o_image', table => {
-    table.integer('id').primary(); table.string('state'); table.string('filePath'); table.string('errorReason');
+    table.integer('id').primary(); table.integer('assetsId'); table.string('state'); table.string('filePath'); table.string('errorReason');
   });
   await utils.db.schema.createTable('o_storyboard', table => {
     table.integer('id').primary(); table.integer('scriptId'); table.integer('index'); table.string('filePath');
@@ -88,9 +88,13 @@ async function fixture(t) {
   await utils.db('o_project').insert({ id: 1, projectType: 'general_video', type: 'advertisement' });
   await utils.db('o_script').insert({ id: 10, projectId: 1, content: 'Brief', createTime: 1 });
   await utils.db('o_assets').insert({ id: 100, projectId: 1, imageId: 200, name: 'Logo', type: 'prop' });
-  await utils.db('o_image').insert({ id: 200, state: '已完成', filePath: 'fixture-logo.png' });
+  await utils.db('o_image').insert({ id: 200, assetsId: 100, state: '已完成', filePath: 'fixture-logo.png' });
   await utils.db('o_scriptAssets').insert({ scriptId: 10, assetId: 100 });
   const load = routeLoader(utils);
+  await load(path.join(root, 'src/lib/advertisementAssetPlanSchema.ts')).initializeAssetPlanSchema(utils.db);
+  await load(path.join(root, 'src/services/advertisementAssetPlan.ts')).saveAssetPlan({ projectId: 1, scriptId: 10, items: [
+    { assetKey: 'brand', name: 'Brand', category: 'brand', required: true, sourcePolicy: 'AI_ALLOWED', assetId: 100 },
+  ] });
   const app = express();
   app.use(express.json());
   app.use('/confirm', load(path.join(root, 'src/routes/project/advertisement/confirmAssetPreparation.ts')).default);
@@ -124,7 +128,7 @@ const request = data => ({ projectId: 1, episodesId: 10, data });
 
 test('Gate-only record is not returned as the production workspace', async t => {
   const h = await fixture(t);
-  await h.post('/confirm', { projectId: 1, confirmed: true });
+  await h.post('/confirm', { projectId: 1, scriptId: 10, confirmed: true });
   const gate = await h.row(GATE_KEY);
   const flow = await h.post('/get', request());
   assert.equal(flow.script, 'Brief');
@@ -138,7 +142,7 @@ test('Gate-only record is not returned as the production workspace', async t => 
 
 test('confirm assets, save first workspace, reopen SQLite and read persisted fields', async t => {
   const h = await fixture(t);
-  const state = await h.post('/confirm', { projectId: 1, confirmed: true });
+  const state = await h.post('/confirm', { projectId: 1, scriptId: 10, confirmed: true });
   assert.equal(state.ready, true);
   const gate = await h.row(GATE_KEY);
   const data = workspace('first');
@@ -158,7 +162,7 @@ test('confirm assets, save first workspace, reopen SQLite and read persisted fie
 
 test('repeat saves update one workspace without modifying Gate or other keys', async t => {
   const h = await fixture(t);
-  await h.post('/confirm', { projectId: 1, confirmed: true });
+  await h.post('/confirm', { projectId: 1, scriptId: 10, confirmed: true });
   await h.db('o_agentWorkData').insert({ projectId: 1, episodesId: 10, key: 'otherAgent', data: '{"keep":true}' });
   const untouched = await h.db('o_agentWorkData').orderBy('id');
   await h.post('/save', request(workspace('first')));

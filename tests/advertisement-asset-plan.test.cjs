@@ -37,7 +37,7 @@ async function fixture(t) {
   await db.schema.createTable('o_assets', t => { t.increments('id'); t.integer('projectId'); t.integer('scriptId'); t.integer('imageId'); t.integer('assetsId'); t.string('name'); t.string('type'); t.string('prompt'); t.bigInteger('startTime'); });
   await db.schema.createTable('o_image', t => { t.increments('id'); t.integer('assetsId'); t.string('filePath'); t.string('state'); t.string('model'); t.string('type'); });
   await db.schema.createTable('o_scriptAssets', t => { t.integer('scriptId'); t.integer('assetId'); t.primary(['scriptId', 'assetId']); });
-  await db.schema.createTable('o_agentWorkData', t => { t.increments('id'); t.integer('projectId'); t.integer('episodesId'); t.string('key'); t.text('data'); t.integer('updateTime'); });
+  await db.schema.createTable('o_agentWorkData', t => { t.increments('id'); t.integer('projectId'); t.integer('episodesId'); t.string('key'); t.text('data'); t.integer('updateTime'); t.integer('createTime'); });
   await db('o_project').insert([{ id: 1, projectType: 'general_video', type: 'advertisement' }, { id: 2, projectType: 'general_video', type: 'advertisement' }, { id: 3, projectType: 'short_drama', type: 'story' }]);
   await db('o_script').insert([{ id: 10, projectId: 1 }, { id: 11, projectId: 1 }, { id: 20, projectId: 2 }, { id: 30, projectId: 3 }]);
   await db('o_assets').insert([{ id: 1, projectId: 1, imageId: 1 }, { id: 2, projectId: 1, imageId: 2 }, { id: 3, projectId: 2, imageId: 3 }]);
@@ -50,6 +50,7 @@ async function fixture(t) {
   const app = express(); app.use(express.json());
   load('middleware/productionGate').registerProductionGate(app);
   app.use('/api/project/advertisement/assetPlan', load('routes/project/advertisement/assetPlan').default);
+  app.use('/api/production', (req, res) => res.json({ code: 200, data: 'dispatched' }));
   app.use('/upload', load('routes/assets/uploadClip').default);
   app.use('/save-image', load('routes/assets/saveAssets').default);
   app.use((err, req, res, next) => res.status(500).json({ error: err.message }));
@@ -156,11 +157,11 @@ test('read detects removed unit relation and cannot accept proof for changed fil
   await db('o_scriptAssets').where({ scriptId: 10, assetId }).delete();
   assert.equal((await post('/plan/read', ctx)).items[0].bindingIssue, 'ASSET_PLAN_ASSET_SCOPE_MISMATCH');
 });
-test('Asset Plan has no effect on current Gate state or confirmation records', async t => {
+test('Gate reads the latest Asset Plan without mutating confirmation records', async t => {
   const { db, ctx, item, save, load } = await fixture(t);
   await db('o_agentWorkData').insert({ projectId: 1, episodesId: 10, key: 'advertisement:asset-preparation', data: '{"confirmed":true}', updateTime: 1 });
-  const gate = load('services/advertisementGate'); const before = await gate.readState(1, 10); assert.equal(before.ready, true);
-  await save([item()]); assert.deepEqual(await gate.readState(1, 10), before);
+  const gate = load('services/advertisementGate'); const before = await gate.readState(1, 10); assert.equal(before.ready, false);
+  await save([item()]); const after = await gate.readState(1, 10); assert.equal(after.ready, false); assert.equal(after.confirmed, true); assert.equal(after.incompleteAssets[0].reason, 'UNBOUND');
   assert.equal((await db('o_agentWorkData')).length, 1);
 });
 
@@ -172,4 +173,87 @@ test('committed plans and upload receipts are visible through a reopened SQLite 
     const read = await loader({ db: reopened })('services/advertisementAssetPlan').readAssetPlan(ctx);
     assert.equal(read.items[0].assetId, assetId); assert.equal(read.items[0].bindingValid, true);
   } finally { await reopened.destroy(); }
+});
+
+const gateStatus = (f, context = f.ctx) => f.post('/api/project/advertisement/getWorkflowState', context);
+const confirmPlan = (f, status = 200, context = f.ctx) => f.post('/api/project/advertisement/confirmAssetPreparation', { ...context, confirmed: true }, status);
+const production = (f, status, context = f.ctx) => f.post('/api/production/getFlowData', { projectId: context.projectId, episodesId: context.scriptId }, status);
+
+test('DS-BE-004: empty plan and unbound required item deny confirmation and Production; preparation remains reachable', async t => {
+  const f = await fixture(t);
+  assert.equal((await gateStatus(f)).prepared, false); await confirmPlan(f, 400); await production(f, 409);
+  await f.save([f.item()]); await confirmPlan(f, 400); await production(f, 409);
+  assert.equal((await gateStatus(f)).incompleteAssets[0].reason, 'UNBOUND');
+  const assetId = await f.upload();
+  await f.post('/plan/bind', { ...f.ctx, assetKey: 'brand-mark', assetId });
+  const prepared = await gateStatus(f); assert.equal(prepared.prepared, true); assert.equal(prepared.confirmed, false); assert.equal(prepared.ready, false);
+  await production(f, 409); assert.equal((await confirmPlan(f)).ready, true); await production(f, 200);
+  await f.post('/plan/unbind', { ...f.ctx, assetKey: 'brand-mark' }); await production(f, 409);
+  await f.save([]); await confirmPlan(f, 400);
+});
+test('DS-BE-004: all required images must belong to their asset, be complete and have a nonblank path', async t => {
+  const f = await fixture(t); await f.save([f.item({ sourcePolicy: 'AI_ALLOWED', assetId: 1 })]); await confirmPlan(f);
+  for (const update of [{ state: '生成中' }, { state: '失败' }, { state: '已完成', filePath: '' }, { filePath: '  ' }, { filePath: '/image', assetsId: 2 }]) {
+    await f.db('o_image').where({ id: 1 }).update(update); assert.equal((await gateStatus(f)).prepared, false); await confirmPlan(f, 400); await production(f, 409);
+  }
+  await f.db('o_image').where({ id: 1 }).update({ assetsId: 1, state: '已完成', filePath: '/image' });
+  assert.equal((await gateStatus(f)).ready, true);
+  await f.db('o_image').where({ id: 1 }).delete(); await production(f, 409);
+});
+test('DS-BE-004: deleted/relinked assets and foreign project/unit bindings cannot pass Gate', async t => {
+  const f = await fixture(t); await f.save([f.item({ sourcePolicy: 'AI_ALLOWED', assetId: 1 })]); await confirmPlan(f);
+  await f.db('o_scriptAssets').where({ scriptId: 10, assetId: 1 }).delete(); await production(f, 409); await confirmPlan(f, 400);
+  await f.db('o_scriptAssets').insert({ scriptId: 10, assetId: 1 });
+  for (const update of [{ scriptId: 11 }, { scriptId: null, projectId: 2 }]) {
+    await f.db('o_assets').where({ id: 1 }).update(update); await production(f, 409);
+  }
+  await f.db('o_assets').where({ id: 1 }).update({ projectId: 1 });
+  for (const assetId of [2, 3, 999]) {
+    await f.db('o_advertisementAssetPlan').where(f.ctx).update({ assetId });
+    assert.equal((await gateStatus(f)).incompleteAssets[0].reason, 'ASSET_PLAN_ASSET_SCOPE_MISMATCH'); await production(f, 409);
+  }
+  await f.db('o_advertisementAssetPlan').where(f.ctx).update({ assetId: 1 });
+  await f.db('o_assets').where({ id: 1 }).delete(); await production(f, 409);
+});
+test('DS-BE-004: REAL_REQUIRED rechecks current upload evidence after confirmation', async t => {
+  const f = await fixture(t); const assetId = await f.upload(); await f.save([f.item({ assetId })]); await confirmPlan(f);
+  const asset = await f.db('o_assets').where({ id: assetId }).first();
+  await f.db('o_image').where({ id: asset.imageId }).update({ model: 'ai-model' });
+  assert.equal((await gateStatus(f)).incompleteAssets[0].reason, 'ASSET_PLAN_REAL_SOURCE_REQUIRED'); await production(f, 409);
+  await f.db('o_image').where({ id: asset.imageId }).update({ model: null }); assert.equal((await gateStatus(f)).ready, true);
+  await f.db('o_assetUploadSource').where({ assetId }).delete(); await confirmPlan(f, 400); await production(f, 409);
+});
+test('DS-BE-004: missing, invalid and incomplete optional items never block required completion', async t => {
+  const f = await fixture(t);
+  await f.save([f.item({ sourcePolicy: 'AI_ALLOWED', assetId: 1 }), f.item({ assetKey: 'optional', required: false })]);
+  assert.equal((await confirmPlan(f)).ready, true);
+  await f.db('o_advertisementAssetPlan').where({ ...f.ctx, assetKey: 'optional' }).update({ assetId: 2 });
+  let state = await gateStatus(f); assert.equal(state.ready, true); assert.equal(state.incompleteAssets.length, 0); assert.equal(state.planItems[1].ready, false);
+  await f.db('o_scriptAssets').insert({ scriptId: 10, assetId: 2 });
+  await f.save([f.item({ sourcePolicy: 'AI_ALLOWED', assetId: 1 }), f.item({ assetKey: 'optional', sourcePolicy: 'AI_ALLOWED', required: false, assetId: 2 })]);
+  await f.db('o_image').where({ id: 2 }).update({ state: '生成中', filePath: null });
+  state = await gateStatus(f); assert.equal(state.ready, true); assert.equal(state.planItems[1].issue, 'ASSET_PLAN_IMAGE_INCOMPLETE');
+  // An optional-only nonempty plan has no required obligations.
+  await f.save([f.item({ required: false })]); assert.equal((await gateStatus(f)).ready, true);
+  await f.save([]); assert.equal((await gateStatus(f)).ready, false);
+});
+test('DS-BE-004: Gate is strictly unit scoped and never falls back when IDs are absent or mismatched', async t => {
+  const f = await fixture(t); await f.save([f.item({ sourcePolicy: 'AI_ALLOWED', assetId: 1 })]); await confirmPlan(f);
+  const other = { projectId: 1, scriptId: 11 };
+  await confirmPlan(f, 400, other); await production(f, 409, other);
+  await f.save([f.item({ sourcePolicy: 'AI_ALLOWED', assetId: 2 })], other); await confirmPlan(f, 200, other);
+  await f.save([]); await production(f, 409); await production(f, 200, other);
+  for (const ctx of [{ projectId: 1 }, { projectId: 1, scriptId: 20 }, { projectId: 2, scriptId: 10 }]) {
+    await f.post('/api/project/advertisement/getWorkflowState', ctx, 400); await confirmPlan(f, 400, ctx);
+  }
+  await production(f, 200, { projectId: 3, scriptId: 30 });
+});
+test('DS-BE-004: adding/changing/removing required items immediately reevaluates previously confirmed Gate', async t => {
+  const f = await fixture(t); const ready = f.item({ sourcePolicy: 'AI_ALLOWED', assetId: 1 });
+  await f.save([ready]); await confirmPlan(f);
+  const pending = f.item({ assetKey: 'new-required', sourcePolicy: 'AI_ALLOWED' });
+  await f.save([ready, pending]); let state = await gateStatus(f); assert.equal(state.confirmed, true); assert.equal(state.ready, false); await production(f, 409);
+  await f.save([ready, { ...pending, required: false }]); await production(f, 200);
+  await f.save([{ ...ready, sourcePolicy: 'REAL_REQUIRED', assetId: null }]); await production(f, 409);
+  await f.save([ready]); await production(f, 200);
 });

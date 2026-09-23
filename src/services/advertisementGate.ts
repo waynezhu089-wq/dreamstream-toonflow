@@ -1,4 +1,5 @@
 import u from "@/utils";
+import { readAssetPlanInTransaction } from "@/services/advertisementAssetPlan";
 import { resolveProductionProfile } from "@/agents/productionAgent/profile";
 
 export const STATE_KEY = "advertisement:asset-preparation";
@@ -27,47 +28,46 @@ export function gateFailure(error: unknown) {
   };
 }
 
-// Optional scriptId is only for older status/confirmation clients. Production
-// entry points use assertProductionReady and never fall back to the first unit.
-export async function readState(projectId: number, scriptId?: number) {
+// Every caller must identify the current unit; no first-unit fallback.
+// Read plan, current bindings/images and confirmation in one SQLite snapshot.
+export async function readState(projectId: number, scriptId: number) {
   projectId = productionId(projectId);
-  const project = await u.db("o_project").where("id", projectId).first();
-  if (!project) throw new ProductionGateError("项目不存在", "PRODUCTION_CONTEXT_INVALID", 404);
-  if (resolveProductionProfile(project).key !== "advertisement") {
-    throw new ProductionGateError("当前项目不是广告视频项目");
-  }
-  const scripts = u.db("o_script").where("projectId", projectId);
-  const script = scriptId === undefined
-    ? await scripts.orderBy("createTime", "asc").first()
-    : await scripts.where("id", productionId(scriptId)).first();
-  if (!script?.id) throw new ProductionGateError("当前广告制作单元不存在或不属于该项目");
-
-  const assets = await u
-    .db("o_scriptAssets")
-    .join("o_assets", "o_scriptAssets.assetId", "o_assets.id")
-    .leftJoin("o_image", "o_assets.imageId", "o_image.id")
-    .where("o_scriptAssets.scriptId", script.id)
-    .where("o_assets.projectId", projectId)
-    .whereNull("o_assets.assetsId")
-    .select("o_assets.id", "o_assets.name", "o_assets.type", "o_assets.imageId", "o_image.state as imageState", "o_image.filePath as filePath");
-  const incompleteAssets = assets
-    .filter((item) => !item.imageId || item.imageState !== "已完成" || !item.filePath)
-    .map((item) => ({ id: item.id, name: item.name, type: item.type, state: item.imageState ?? "未生成" }));
-  const stateRow = await u
-    .db("o_agentWorkData")
-    .where({ projectId, episodesId: script.id, key: STATE_KEY })
-    .orderBy("updateTime", "desc")
-    .first();
-  let confirmed = false;
-  if (stateRow?.data) {
-    try { confirmed = JSON.parse(stateRow.data).confirmed === true; } catch {}
-  }
-  return {
-    projectId, scriptId: script.id,
-    assetCount: assets.length, readyAssetCount: assets.length - incompleteAssets.length,
-    incompleteAssets, confirmed,
-    ready: confirmed && assets.length > 0 && incompleteAssets.length === 0,
-  };
+  scriptId = productionId(scriptId);
+  return u.db.transaction(async (trx) => {
+    const project = await trx("o_project").where("id", projectId).first();
+    if (!project) throw new ProductionGateError("项目不存在", "PRODUCTION_CONTEXT_INVALID", 404);
+    if (resolveProductionProfile(project).key !== "advertisement") {
+      throw new ProductionGateError("当前项目不是广告视频项目");
+    }
+    const script = await trx("o_script").where({ id: scriptId, projectId }).first();
+    if (!script) throw new ProductionGateError("当前广告制作单元不存在或不属于该项目");
+    const plan = await readAssetPlanInTransaction(trx, { projectId, scriptId });
+    const planItems = [];
+    for (const item of plan.items) {
+      const asset = item.bindingValid ? await trx("o_assets").where({ id: item.assetId, projectId }).first() : undefined;
+      const image = asset?.imageId == null ? undefined : await trx("o_image").where({ id: asset.imageId, assetsId: asset.id }).first();
+      const imageReady = image?.state === "已完成" && typeof image.filePath === "string" && image.filePath.trim().length > 0;
+      const issue = item.bindingIssue ?? (imageReady ? null : "ASSET_PLAN_IMAGE_INCOMPLETE");
+      planItems.push({ ...item, ready: issue === null, issue, imageState: image?.state ?? "未生成" });
+    }
+    const incompleteAssets = planItems.filter(item => item.required && !item.ready).map(item => ({
+      id: item.assetId, assetKey: item.assetKey, name: item.name, type: item.category, state: item.imageState, reason: item.issue,
+    }));
+    const prepared = planItems.length > 0 && incompleteAssets.length === 0;
+    const stateRow = await trx("o_agentWorkData")
+      .where({ projectId, episodesId: scriptId, key: STATE_KEY }).orderBy("updateTime", "desc").first();
+    let confirmed = false;
+    if (stateRow?.data) {
+      try { confirmed = JSON.parse(stateRow.data).confirmed === true; } catch {}
+    }
+    return {
+      projectId, scriptId, assetCount: planItems.length,
+      readyAssetCount: planItems.filter(item => item.ready).length,
+      requiredAssetCount: planItems.filter(item => item.required).length,
+      planItems, incompleteAssets, prepared, confirmed,
+      ready: confirmed && prepared,
+    };
+  });
 }
 
 export async function assertProductionReady(projectId: unknown, scriptId: unknown) {

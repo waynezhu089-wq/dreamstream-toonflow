@@ -11,25 +11,18 @@ export default router.post(
   "/",
   validateFields({
     projectId: z.number(),
-    scriptId: z.number().int().positive().optional(),
+    scriptId: z.number().int().positive(),
     confirmed: z.boolean(),
   }),
   async (req, res) => {
     const { projectId, scriptId, confirmed } = req.body;
     try {
       const current = await readState(projectId, scriptId);
-      if (confirmed) {
-        if (current.assetCount === 0) {
-          return res.status(400).send(error("请先建立并关联广告基础资产"));
-        }
-        if (current.incompleteAssets.length) {
-          return res.status(400).send(
-            error(
-              "仍有未准备完成的资产：" +
-                current.incompleteAssets.map((item: any) => item.name || String(item.id)).join("、"),
-            ),
-          );
-        }
+      if (confirmed && !current.prepared) {
+        const message = current.assetCount === 0
+          ? "请先建立当前制作单元的广告 Asset Plan"
+          : "仍有未准备完成的必需素材：" + current.incompleteAssets.map(item => item.name || item.assetKey).join("、");
+        return res.status(400).send(error(message));
       }
 
       const now = Date.now();

@@ -117,7 +117,7 @@ async function fixture(t) {
     table.integer('imageId'); table.integer('flowId'); table.string('name'); table.string('type');
   });
   await db.schema.createTable('o_scriptAssets', table => { table.integer('scriptId'); table.integer('assetId'); });
-  await db.schema.createTable('o_image', table => { table.integer('id').primary(); table.string('state'); table.string('filePath'); table.string('errorReason'); });
+  await db.schema.createTable('o_image', table => { table.integer('id').primary(); table.integer('assetsId'); table.string('state'); table.string('filePath'); table.string('errorReason'); });
   await db.schema.createTable('o_storyboard', table => {
     table.integer('id').primary(); table.integer('projectId'); table.integer('scriptId'); table.integer('flowId');
     table.integer('index'); table.string('filePath'); table.string('prompt'); table.string('videoDesc');
@@ -141,7 +141,7 @@ async function fixture(t) {
   ]);
   for (const [scriptId, projectId] of [[10, 1], [11, 1], [20, 2], [30, 3]]) {
     await db('o_assets').insert({ id: scriptId + 100, projectId, imageId: scriptId + 200, name: 'Logo', type: 'prop' });
-    await db('o_image').insert({ id: scriptId + 200, state: '已完成', filePath: `logo-${scriptId}.png` });
+    await db('o_image').insert({ id: scriptId + 200, assetsId: scriptId + 100, state: '已完成', filePath: `logo-${scriptId}.png` });
     await db('o_scriptAssets').insert({ scriptId, assetId: scriptId + 100 });
     await db('o_storyboard').insert({ id: scriptId + 300, projectId, scriptId, prompt: 'unchanged', flowId: scriptId + 600 });
     await db('o_videoTrack').insert({ id: scriptId + 400, projectId, scriptId, prompt: 'unchanged' });
@@ -159,6 +159,12 @@ async function fixture(t) {
     '@/utils/agent/skillsTools': {}, '@/agents/productionAgent/tools': () => ({}),
   };
   const load = moduleLoader(utils, overrides);
+  await load(path.join(root, 'src/lib/advertisementAssetPlanSchema.ts')).initializeAssetPlanSchema(db);
+  for (const [scriptId, projectId] of [[10, 1], [11, 1], [30, 3]]) {
+    await load(path.join(root, 'src/services/advertisementAssetPlan.ts')).saveAssetPlan({ projectId, scriptId, items: [
+      { assetKey: 'brand', name: 'Brand', category: 'brand', required: true, sourcePolicy: 'AI_ALLOWED', assetId: scriptId + 100 },
+    ] });
+  }
   const service = load(path.join(root, 'src/services/advertisementGate.ts'));
   const app = express();
   app.use(express.json());
@@ -210,10 +216,11 @@ async function fixture(t) {
   };
 }
 
-test('status and confirmation use the selected unit, with old status calls still compatible', async t => {
+test('status and confirmation use the selected unit, with missing-unit calls rejected', async t => {
   const h = await fixture(t);
   const status = scriptId => h.post('project/advertisement/getWorkflowState', { projectId: 1, ...(scriptId === undefined ? {} : { scriptId }) });
-  assert.equal((await status()).body.data.scriptId, 10);
+  assert.equal((await status()).status, 400);
+  assert.equal((await h.confirm(undefined)).status, 400);
   assert.equal((await status(11)).body.data.ready, false);
   assert.equal((await h.confirm(11)).body.data.scriptId, 11);
   assert.equal((await status(11)).body.data.ready, true);
@@ -431,4 +438,21 @@ test('legacy Socket starts normally and invalid authentication is rejected befor
   await legacy.ready();
   assert.equal((await legacy.ack('chat', { content: 'legacy-production' })).success, true);
   assert.deepEqual(h.effects.agent, [{ projectId: 2, scriptId: 20 }]);
+});
+
+test('DS-BE-004: plan edits revoke the same HTTP, Socket and direct Agent Gate without new model work', async t => {
+  const h = await fixture(t); const client = h.socket(); await client.ready();
+  assert.equal((await client.ack('updateContext', { projectId: 1, scriptId: 10, isolationKey: 'unit-10' })).success, true);
+  const plans = h.load(path.join(root, 'src/services/advertisementAssetPlan.ts'));
+  await plans.saveAssetPlan({ projectId: 1, scriptId: 10, items: [
+    { assetKey: 'brand', name: 'Brand', category: 'brand', required: true, sourcePolicy: 'AI_ALLOWED', assetId: 110 },
+    { assetKey: 'new', name: 'New required', category: 'scene', required: true, sourcePolicy: 'AI_ALLOWED', assetId: null },
+  ] });
+  assert.equal((await h.service.readState(1, 10)).confirmed, true);
+  assert.equal((await h.post('production/getFlowData', { projectId: 1, episodesId: 10 })).status, 409);
+  assert.equal((await client.ack('chat', { content: 'must-not-start' })).code, 'ADVERTISEMENT_ASSET_GATE_BLOCKED');
+  const denied = h.socket(); assert.equal((await denied.event('connect_error')).code, 'ADVERTISEMENT_ASSET_GATE_BLOCKED');
+  const agent = h.load(path.join(root, 'src/agents/productionAgent/index.ts'));
+  await assert.rejects(agent.runDecisionAI({ resTool: { data: { projectId: 1, scriptId: 10 } } }), { code: 'ADVERTISEMENT_ASSET_GATE_BLOCKED' });
+  assert.deepEqual(h.effects.agent, []); assert.equal(h.effects.memory, 0); assert.deepEqual(h.effects.dispatch, []);
 });

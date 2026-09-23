@@ -79,9 +79,16 @@ async function view(trx: Knex.Transaction, context: Context) {
 
 function database() { return u.db as Knex; }
 
+// Gate shares the exact binding validation in the same SQLite read transaction.
+export async function readAssetPlanInTransaction(trx: Knex.Transaction, input: unknown) {
+  const context = contextSchema.parse(input);
+  await assertContext(trx, context);
+  return view(trx, context);
+}
+
 export async function readAssetPlan(input: unknown) {
   const context = contextSchema.parse(input);
-  return database().transaction(async (trx) => { await assertContext(trx, context); return view(trx, context); });
+  return database().transaction(trx => readAssetPlanInTransaction(trx, context));
 }
 
 export async function saveAssetPlan(input: unknown) {

@@ -1,4 +1,4 @@
-# Advertisement Asset Plan (DS-BE-003)
+# Advertisement Asset Plan (DS-BE-003 / DS-BE-004)
 
 Asset Plans belong to one advertisement project and production unit (`projectId + scriptId`). There is no first-unit fallback or project-specific asset template. This API is registered behind the existing application authentication middleware and is available during preparation, before the existing Production Gate passes.
 
@@ -44,7 +44,19 @@ No origin inference from names, file paths or client assertions. Historical asse
 
 Startup additively initializes `o_advertisementAssetPlan` (primary key: projectId, scriptId, assetKey) and `o_assetUploadSource` (primary key: assetId, imageId). Existing tables, plans and Gate records are preserved; initialization is idempotent. No inferred provenance backfill.
 
-This task does **not** connect Asset Plan to Advertisement Gate. Existing Gate confirmation/readiness semantics remain unchanged. No frontend changes, Brief versions, asset version locks, AI planning or paid-model calls. A future task will make Gate check required items against the current unit's plan.
+DS-BE-004 connects the existing unified Advertisement Gate to the latest Asset Plan. No frontend changes, Brief versions, asset version locks, AI planning or paid-model calls.
+
+## Advertisement Gate (DS-BE-004)
+
+Both status and confirmation now require explicit positive projectId and scriptId; omission no longer falls back to the first unit. Endpoints remain POST /api/project/advertisement/getWorkflowState and /api/project/advertisement/confirmAssetPreparation (the latter also takes confirmed: boolean).
+
+A plan must be nonempty. Every required item must have a valid current-unit binding, a completed current image owned by that asset and a nonblank filePath; REAL_REQUIRED must still have matching real-upload evidence. Optional items, and assets not in the plan, do not block readiness. A nonempty optional-only plan has no required obligations.
+
+The shared readState reads the plan, source/scope validity, current images and confirmation within one SQLite read transaction. Status adds prepared (nonempty plan with all required items satisfied), requiredAssetCount and planItems with ready/issue diagnostics. assetCount counts all plan items; readyAssetCount counts complete plan items, including optional ones. incompleteAssets contains only unsatisfied required items. Consumers must use prepared/ready rather than comparing those total counters.
+
+Confirmation true is rejected with HTTP 400 unless prepared is true. Revocation remains possible for an incomplete/empty plan. Production ready requires both confirmed and prepared. Existing HTTP Production, Socket and direct Agent boundaries continue using that same result, returning the existing blocked error when false. Status, plan read/save/bind/unbind and asset preparation upload interfaces remain accessible before Gate passes.
+
+Every check uses the current plan; adding an unfinished required item, invalidating a binding/image/source or clearing the plan closes Gate even while confirmed remains true. Completing/removing the blocking requirement can restore readiness under the existing confirmation flag. There is no approval snapshot/version lock, background cancellation or rollback of already-running work.
 
 ## Regression
 
