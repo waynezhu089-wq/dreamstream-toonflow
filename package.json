@@ -37,7 +37,8 @@
     "license": "node scripts/license.ts",
     "vendor2json": "node scripts/vendor2json.ts",
     "test:database-adapter": "node --test tests/database-adapter.test.cjs",
-    "test:model-presets": "node --test tests/model-presets.test.cjs"
+    "test:model-presets": "node --test tests/model-presets.test.cjs",
+    "test:advertisement-production-context": "node --test tests/advertisement-production-context.test.cjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.35",

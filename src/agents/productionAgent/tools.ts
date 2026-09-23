@@ -4,6 +4,8 @@ import _ from "lodash";
 import ResTool from "@/socket/resTool";
 import u from "@/utils";
 
+import { advertisementProductionContext, assertAdvertisementAssetReferences } from "@/services/advertisementProductionContext";
+
 const deriveAssetSchema = z.object({
   id: z.number().describe("衍生资产ID,如果新增则为空"),
   assetsId: z.number().describe("关联的资产ID"),
@@ -58,6 +60,8 @@ const flowDataKeyLabels = Object.fromEntries(
 ) as Record<keyof FlowData, string>;
 
 interface ToolConfig {
+  advertisement?: boolean;
+  storyboardGeneration?: boolean;
   resTool: ResTool;
   toolsNames?: string[];
   msg: ReturnType<ResTool["newMessage"]>;
@@ -96,6 +100,10 @@ export default (toolCpnfig: ToolConfig) => {
           .toJSONSchema(),
       ),
       execute: async ({ key }) => {
+        if (key === "assets") {
+          const context = await advertisementProductionContext(resTool.data.projectId, resTool.data.scriptId);
+          if (context) return context.assets;
+        }
         const thinking = msg.thinking(`正在获取${flowDataKeyLabels[key]}工作区数据...`);
 
         const flowData: FlowData = await new Promise((resolve) => socket.emit("getFlowData", { key }, (res: any) => resolve(res)));
@@ -262,6 +270,7 @@ export default (toolCpnfig: ToolConfig) => {
           .toJSONSchema(),
       ),
       execute: async (raw) => {
+        await assertAdvertisementAssetReferences(resTool.data.projectId, resTool.data.scriptId, raw.associateAssetsIds ?? []);
         const thinking = msg.thinking("正在新增 分镜面板 数据...");
         const data = {
           videoDesc: raw.videoDesc,
@@ -326,6 +335,7 @@ export default (toolCpnfig: ToolConfig) => {
           .toJSONSchema(),
       ),
       execute: async ({ items }) => {
+        await assertAdvertisementAssetReferences(resTool.data.projectId, resTool.data.scriptId, items.flatMap(item => item.associateAssetsIds ?? []));
         const thinking = msg.thinking("正在整套替换分镜面板...");
         try {
           const res = await socketQueue(
@@ -351,5 +361,16 @@ export default (toolCpnfig: ToolConfig) => {
     }),
   };
 
+  if (toolCpnfig.advertisement) {
+    // Text planning and review cannot directly dispatch storyboard images.
+    if (!toolCpnfig.storyboardGeneration) delete tools.generate_storyboard;
+    // Auxiliary asset creation belongs to Asset Preparation, not Production planning.
+    for (const name of ["add_deriveAsset", "del_deriveAsset", "generate_deriveAsset"]) delete tools[name];
+    tools.get_advertisementAssetPlan = tool({
+      description: "读取当前项目/制作单元已确认 Asset Plan 的有效生产资产语义（含真实 assetId）",
+      inputSchema: jsonSchema(z.object({}).toJSONSchema()),
+      execute: async () => advertisementProductionContext(resTool.data.projectId, resTool.data.scriptId),
+    });
+  }
   return toolsNames ? Object.fromEntries(Object.entries(tools).filter(([n]) => toolsNames.includes(n))) : tools;
 };

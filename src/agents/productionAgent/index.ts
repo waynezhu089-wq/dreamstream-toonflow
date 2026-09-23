@@ -9,6 +9,7 @@ import { getProductionSkillPathSegments, ProductionProfile, resolveProductionPro
 import ResTool from "@/socket/resTool";
 import * as fs from "fs";
 import { resolveModels, textModelForProject } from "@/services/modelPreset";
+import { advertisementProductionPrompt } from "@/services/advertisementProductionContext";
 import { assertProductionReady } from "@/services/advertisementGate";
 
 export interface AgentContext {
@@ -78,14 +79,14 @@ export async function runDecisionAI(ctx: AgentContext) {
 
   const { fullStream } = await u.Ai.Text(await textModelForProject(ctx.resTool.data.projectId, "productionAgent:decisionAgent") as Parameters<typeof u.Ai.Text>[0], ctx.thinkConfig.think, ctx.thinkConfig.thinlLevel).stream({
     messages: [
-      { role: "system", content: prompt },
+      { role: "system", content: prompt + await advertisementProductionPrompt(ctx.resTool.data.projectId, ctx.resTool.data.scriptId) },
       { role: "assistant", content: mem + "\n" + modelInfo },
       { role: "user", content: text },
     ],
     abortSignal,
     tools: {
       ...memory.getTools(),
-      ...useTools({ resTool: ctx.resTool, msg: ctx.msg }),
+      ...useTools({ resTool: ctx.resTool, msg: ctx.msg, advertisement: profile.key === "advertisement" }),
       ...(await createSubAgent(ctx)),
     },
     onFinish: async (completion) => {
@@ -126,10 +127,10 @@ async function createSubAgent(parentCtx: AgentContext) {
     const subMsg = resTool.newMessage("assistant", name);
 
     const { fullStream } = await u.Ai.Text(await textModelForProject(parentCtx.resTool.data.projectId, key) as Parameters<typeof u.Ai.Text>[0], parentCtx.thinkConfig.think, parentCtx.thinkConfig.thinlLevel).stream({
-      system,
+      system: system + await advertisementProductionPrompt(resTool.data.projectId, resTool.data.scriptId),
       messages: messages ?? [{ role: "user", content: prompt }],
       abortSignal,
-      tools: { ...extraTools, ...useTools({ resTool, msg: subMsg }) },
+      tools: { ...extraTools, ...useTools({ resTool, msg: subMsg, advertisement: profile.key === "advertisement", storyboardGeneration: key === "productionAgent:storyboardGenAgent" }) },
     });
 
     const fullResponse = await consumeFullStream(fullStream, subMsg);
@@ -378,8 +379,7 @@ async function createSubAgent(parentCtx: AgentContext) {
   });
 
   return {
-    run_sub_agent_derive_assets,
-    run_sub_agent_generate_assets,
+    ...(profile.key === "advertisement" ? {} : { run_sub_agent_derive_assets, run_sub_agent_generate_assets }),
     run_sub_agent_director_plan,
     run_sub_agent_storyboard_gen,
     run_sub_agent_storyboard_panel,
