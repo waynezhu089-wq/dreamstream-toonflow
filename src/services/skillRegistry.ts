@@ -49,6 +49,8 @@ export async function createDraft(input: { skillId: string; sourceVersion?: stri
   const skillId = skillIdSchema.parse(input.skillId);
   return db().transaction(async trx => {
     const family = await requireFamily(trx, skillId);
+    const unfinished = await trx("o_skillVersion").where({ skillId, status: "DRAFT" }).orderBy("version", "desc").first();
+    if (unfinished) throw new SkillError("SKILL_DRAFT_NOT_ALLOWED", `已有 Draft ${versionLabel(Number(unfinished.version))} 正在编辑，请继续编辑它`, 409);
     const latest = await trx("o_skillVersion").where({ skillId }).orderBy("version", "desc").first();
     const next = latest ? Number(latest.version) + 1 : 1;
     const source = input.sourceVersion ? await requireVersion(trx, skillId, input.sourceVersion) : latest;
@@ -60,6 +62,19 @@ export async function createDraft(input: { skillId: string; sourceVersion?: stri
     await trx("o_skillVersion").insert({ skillId, version: next, status: "DRAFT", templateId, content: JSON.stringify(content), sourceType, sourceData: JSON.stringify(sourceData), definitionHash: definitionHash(templateId, content), createdAt: now, activatedAt: null, updatedAt: now });
     return versionView(await trx("o_skillVersion").where({ skillId, version: next }).first());
   });
+}
+export async function saveBuilderDraft(input: { family: unknown; content: unknown; sourceType: "MANUAL" | "PROJECT_DERIVED"; sourceData?: Record<string, unknown> }, transaction?: Knex.Transaction) {
+  const family = familyInput.parse(input.family);
+  const templateId = templateFor(family.skillType);
+  const content = validateContent(family.skillType, templateId, input.content);
+  const save = async (trx: Knex.Transaction) => {
+    if (await trx("o_skillRegistry").where({ skillId: family.skillId }).first()) throw new SkillError("SKILL_BINDING_INVALID", "Skill ID 已存在，请确认建议的新 ID", 409);
+    const now = Date.now();
+    await trx("o_skillRegistry").insert({ ...family, tags: JSON.stringify(family.tags), createdAt: now, updatedAt: now });
+    await trx("o_skillVersion").insert({ skillId: family.skillId, version: 1, status: "DRAFT", templateId, content: JSON.stringify(content), sourceType: input.sourceType, sourceData: JSON.stringify(input.sourceData ?? {}), definitionHash: definitionHash(templateId, content), createdAt: now, activatedAt: null, updatedAt: now });
+    return { family: familyView(await requireFamily(trx, family.skillId)), version: versionView(await requireVersion(trx, family.skillId, "v1")) };
+  };
+  return transaction ? save(transaction) : db().transaction(save);
 }
 export async function editDraft(input: { skillId: string; version: string; content: unknown }) {
   const skillId = skillIdSchema.parse(input.skillId);
@@ -209,33 +224,37 @@ export async function copySkill(input: { sourceSkillId: string; sourceVersion: s
   });
 }
 
-function sanitize(value: string, projectName: string, assetNames: string[]) {
+export function sanitizeSelectedSource(value: string, projectName: string, assetNames: string[]) {
   let result = value.replace(/[A-Za-z]:\\[^\s"'，。]+|\/(?:[^\s"'，。\/]+\/){2,}[^\s"'，。]*/g, "[文件路径]")
     .replace(/\b(?:projectId|scriptId|storyboardId|assetId)\s*[:=]\s*\d+/gi, "[项目内部 ID]")
     .replace(/\b(?:SKU|sku)\s*[:=]?\s*[A-Za-z0-9_-]+/g, "[产品型号]");
   for (const name of [projectName, ...assetNames].filter(Boolean).sort((a, b) => b.length - a.length)) result = result.split(name).join("[项目特有名称]");
   return result;
 }
-export async function buildFromSelectedSource(input: { family: unknown; projectId: number; scriptId: number; sourceType: "STORYBOARD_PROMPT" | "DIRECTOR_OUTPUT_SNAPSHOT" | "PRODUCTION_TEXT_RESULT"; sourceId: number }) {
-  const family = familyInput.parse(input.family);
+export async function readAndSanitizeSelectedSource(input: { projectId: number; scriptId: number; sourceType: "STORYBOARD_PROMPT" | "DIRECTOR_OUTPUT_SNAPSHOT" | "PRODUCTION_TEXT_RESULT"; sourceId: number }, q: Knex | Knex.Transaction = db()) {
   const ids = z.object({ projectId: positive, scriptId: positive, sourceId: positive }).parse(input);
-  const script = await db()("o_script").where({ id: ids.scriptId, projectId: ids.projectId }).first();
-  const project = await db()("o_project").where({ id: ids.projectId }).first();
+  const script = await q("o_script").where({ id: ids.scriptId, projectId: ids.projectId }).first();
+  const project = await q("o_project").where({ id: ids.projectId }).first();
   if (!project || !script) throw new SkillError("SKILL_SOURCE_INVALID", "来源制作单元不存在", 404);
   let snapshot: string;
   if (input.sourceType === "STORYBOARD_PROMPT") {
-    const shot = await db()("o_storyboard").where({ id: ids.sourceId, projectId: ids.projectId, scriptId: ids.scriptId }).first();
+    const shot = await q("o_storyboard").where({ id: ids.sourceId, projectId: ids.projectId, scriptId: ids.scriptId }).first();
     if (!shot?.prompt) throw new SkillError("SKILL_SOURCE_INVALID", "指定镜头没有 Prompt", 404);
     snapshot = shot.prompt;
   } else if (["DIRECTOR_OUTPUT_SNAPSHOT", "PRODUCTION_TEXT_RESULT"].includes(input.sourceType)) {
-    const row = await db()("o_agentWorkData").where({ id: ids.sourceId, projectId: ids.projectId, episodesId: ids.scriptId, key: "productionAgent" }).first();
+    const row = await q("o_agentWorkData").where({ id: ids.sourceId, projectId: ids.projectId, episodesId: ids.scriptId, key: "productionAgent" }).first();
     if (!row) throw new SkillError("SKILL_SOURCE_INVALID", "指定生产工作区不存在", 404);
     let flow: any; try { flow = parseJson(row.data); } catch { throw new SkillError("SKILL_SOURCE_INVALID", "生产工作区内容不可读取"); }
     snapshot = input.sourceType === "DIRECTOR_OUTPUT_SNAPSHOT" ? flow.scriptPlan : flow.storyboardTable;
     if (typeof snapshot !== "string" || !snapshot.trim()) throw new SkillError("SKILL_SOURCE_INVALID", "所选来源没有文本内容", 404);
   } else throw new SkillError("SKILL_SOURCE_INVALID", "不支持的来源类型");
-  const names = (await db()("o_assets").where({ projectId: ids.projectId }).pluck("name")).filter((v: any): v is string => typeof v === "string");
-  const safe = sanitize(snapshot, String(project.name ?? ""), names);
+  const assetNames = (await q("o_assets").where({ projectId: ids.projectId }).pluck("name")).filter((v: any): v is string => typeof v === "string");
+  const projectName = String(project.name ?? "");
+  return { snapshot, safe: sanitizeSelectedSource(snapshot, projectName, assetNames), sourceHash: sourceHash(snapshot), projectName, assetNames };
+}
+export async function buildFromSelectedSource(input: { family: unknown; projectId: number; scriptId: number; sourceType: "STORYBOARD_PROMPT" | "DIRECTOR_OUTPUT_SNAPSHOT" | "PRODUCTION_TEXT_RESULT"; sourceId: number }) {
+  const family = familyInput.parse(input.family);
+  const { snapshot, safe } = await readAndSanitizeSelectedSource(input);
   const content = emptyTemplate(family.skillType);
   content.purpose = `从已选 ${input.sourceType} 提炼可复用的 ${family.skillType} 方法，需人工审阅后激活`;
   content.inputs = ["当前项目与镜头语义", "当前素材及真实性约束"];
@@ -249,7 +268,7 @@ export async function buildFromSelectedSource(input: { family: unknown; projectI
   return db().transaction(async trx => {
     if (await trx("o_skillRegistry").where({ skillId: family.skillId }).first()) throw new SkillError("SKILL_BINDING_INVALID", "目标 Skill ID 已存在", 409);
     await trx("o_skillRegistry").insert({ ...family, tags: JSON.stringify(family.tags), createdAt: now, updatedAt: now });
-    await trx("o_skillVersion").insert({ skillId: family.skillId, version: 1, status: "DRAFT", templateId: templateFor(family.skillType), content: JSON.stringify(content), sourceType: "PROJECT_DERIVED", sourceData: JSON.stringify({ sourceType: input.sourceType, sourceId: ids.sourceId, sourceHash: sourceHash(snapshot), sourceSnapshot: snapshot, generatedAt: now }), definitionHash: definitionHash(templateFor(family.skillType), content), createdAt: now, activatedAt: null, updatedAt: now });
+    await trx("o_skillVersion").insert({ skillId: family.skillId, version: 1, status: "DRAFT", templateId: templateFor(family.skillType), content: JSON.stringify(content), sourceType: "PROJECT_DERIVED", sourceData: JSON.stringify({ sourceType: input.sourceType, sourceId: input.sourceId, sourceHash: sourceHash(snapshot), sourceSnapshot: snapshot, generatedAt: now }), definitionHash: definitionHash(templateFor(family.skillType), content), createdAt: now, activatedAt: null, updatedAt: now });
     return { family: familyView(await requireFamily(trx, family.skillId)), version: versionView(await requireVersion(trx, family.skillId, "v1")) };
   });
 }

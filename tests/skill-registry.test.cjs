@@ -8,7 +8,7 @@ async function setup(t){
  await f.raw.schema.createTable('o_setting',table=>{table.string('key').primary();table.string('value');});
  await f.raw.schema.createTable('o_agentDeploy',table=>{table.string('key').primary();table.string('modelName');});
  await f.db('o_agentDeploy').insert({key:'productionAgent:storyboardGenAgent',modelName:'vendor:text'});
- const registry=f.load('services/skillRegistry'),compiler=f.load('services/skillCompiler'),contract=f.load('services/skillContract');
+ const registry=f.load('services/skillRegistry'),compiler=f.load('services/skillCompiler'),contract=f.load('services/skillContract'),builder=f.load('services/skillBuilder');
  const app=express();app.use(express.json());app.use('/api/skills',f.load('routes/skills/index').default);
  const server=app.listen(0,'127.0.0.1');await require('node:events').once(server,'listening');
  t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));});
@@ -16,8 +16,67 @@ async function setup(t){
  const family=(skillId='image-prompt.tech-product-cinematic')=>({skillId,displayName:'Tech Product Image Prompt',skillType:'IMAGE_PROMPT',description:'Reusable image prompt method',tags:['product']});
  const content=(overrides={})=>({...contract.emptyTemplate('IMAGE_PROMPT'),purpose:'Create a cinematic product image prompt',rules:['Preserve real product UI pixels'],outputRequirements:['One complete prompt'],lighting:'Soft side light',...overrides});
  async function active(skillId='image-prompt.tech-product-cinematic'){await registry.createSkillFamily(family(skillId));await registry.createDraft({skillId,content:content()});await registry.activateDraft({skillId,version:'v1'});return skillId;}
- return {...f,registry,compiler,contract,post,family,content,active};
+ return {...f,registry,compiler,contract,builder,post,family,content,active};
 }
+
+test('UX1 quick preview is read-only, normalizes IDs, saves Family and Draft V1 atomically, and rolls back on failed V1 insert',async t=>{
+ const f=await setup(t),calls=[];
+ f.utils.Ai.Text=key=>({invoke:async input=>{calls.push({key,input});return{text:JSON.stringify({suggestedSlug:'tech-product-cinematic',displayName:'Tech Product',description:'Reusable',tags:['product'],content:f.content()})};}});
+ const candidate=await f.builder.quickPreview({skillType:'IMAGE_PROMPT',instruction:'Cinematic product imagery with real UI preserved'});
+ assert.equal(calls[0].key,'universalAi');assert.equal(candidate.skillId,'image-prompt.tech-product-cinematic');
+ assert.equal((await f.db('o_skillRegistry')).length,0);assert.equal((await f.db('o_skillVersion')).length,0);
+ const saved=await f.builder.quickSave({family:{skillId:candidate.skillId,displayName:candidate.displayName,skillType:'IMAGE_PROMPT',description:candidate.description,tags:candidate.tags},candidateContent:candidate.candidateContent});
+ assert.equal(saved.version.version,'v1');assert.equal(saved.version.status,'DRAFT');
+ const again=await f.builder.quickPreview({skillType:'IMAGE_PROMPT',instruction:'Cinematic product imagery with real UI preserved'});assert.equal(again.skillId,'image-prompt.tech-product-cinematic-2');
+ await f.raw.raw("CREATE TRIGGER fail_skill_v1 BEFORE INSERT ON o_skillVersion BEGIN SELECT RAISE(FAIL, 'fail'); END");
+ await assert.rejects(f.builder.quickSave({family:f.family('image-prompt.rollback'),candidateContent:f.content()}));
+ assert.equal((await f.db('o_skillRegistry').where({skillId:'image-prompt.rollback'})).length,0);
+});
+
+test('UX1 draft preview edits same Draft only after confirmation; Active improvement is a field diff and an existing Draft blocks another version',async t=>{
+ const f=await setup(t),id='image-prompt.tech';await f.registry.createSkillFamily(f.family(id));await f.registry.createDraft({skillId:id,content:f.content()});
+ f.utils.Ai.Text=()=>({invoke:async()=>({text:JSON.stringify({suggestedSlug:'tech',displayName:'Tech',description:'Reusable',tags:[],content:f.content({lighting:'Natural daylight'})})})});
+ const preview=await f.builder.draftPreview({skillId:id,version:'v1',instruction:'Use brighter natural light'});
+ assert.equal(preview.candidateContent.lighting,'Natural daylight');assert.equal((await f.registry.getSkill({skillId:id})).versions.length,1);
+ assert.equal((await f.registry.getSkill({skillId:id,version:'v1'})).versions[0].content.lighting,'Soft side light');
+ await f.registry.editDraft({skillId:id,version:'v1',content:preview.candidateContent});
+ assert.equal((await f.registry.getSkill({skillId:id,version:'v1'})).versions[0].content.lighting,'Natural daylight');
+ await f.registry.activateDraft({skillId:id,version:'v1'});
+ f.utils.Ai.Text=()=>({invoke:async()=>({text:JSON.stringify({suggestedSlug:'tech',displayName:'Tech',description:'Reusable',tags:[],content:f.content({lighting:'Bright outdoor light'})})})});
+ const improved=await f.builder.improvePreview({skillId:id,version:'v1',instruction:'More natural light'});
+ assert.equal(improved.changes.find(row=>row.field==='lighting').changeType,'MODIFIED');assert.equal(improved.changes.find(row=>row.field==='lighting').accepted,false);
+ assert.equal((await f.registry.getSkill({skillId:id,version:'v1'})).versions[0].status,'ACTIVE');
+ await f.registry.createDraft({skillId:id,sourceVersion:'v1',content:improved.candidateContent});
+ await assert.rejects(f.registry.createDraft({skillId:id,sourceVersion:'v1'}),e=>e.code==='SKILL_DRAFT_NOT_ALLOWED');
+ assert.equal((await f.registry.getSkill({skillId:id})).versions.length,2);
+});
+
+test('UX1 Builder limits invalid JSON to one repair, fails second invalid output, and normalizes missing model errors',async t=>{
+ const f=await setup(t);let count=0;
+ f.utils.Ai.Text=()=>({invoke:async()=>{count++;return{text:count===1?'bad JSON':JSON.stringify({suggestedSlug:'director-guide',displayName:'Director',description:'General',tags:[],content:{...f.contract.emptyTemplate('DIRECTOR'),purpose:'Plan shots'}})};}});
+ const result=await f.builder.quickPreview({skillType:'DIRECTOR',instruction:'Plan a clear visual narrative'});assert.equal(result.skillId,'director.director-guide');assert.equal(count,2);
+ f.utils.Ai.Text=()=>({invoke:async()=>{count++;return{text:'bad JSON'};}});count=0;
+ await assert.rejects(f.builder.quickPreview({skillType:'DIRECTOR',instruction:'Plan a clear visual narrative'}),e=>e.code==='SKILL_BUILDER_INVALID_OUTPUT');assert.equal(count,2);
+ f.utils.Ai.Text=()=>({invoke:async()=>{throw Error('未找到部署配置');}});
+ await assert.rejects(f.builder.quickPreview({skillType:'DIRECTOR',instruction:'Plan a clear visual narrative'}),e=>e.code==='SKILL_BUILDER_MODEL_UNAVAILABLE');
+});
+
+test('UX1 contextual Project Derived preview uses the real scoped source, saves unchanged hash and provenance, rejects changed source',async t=>{
+ const f=await setup(t);await f.raw.schema.alterTable('o_project',table=>table.string('name'));await f.db('o_project').where({id:1}).update({name:'睿译读'});
+ const shot=await f.create({productionMode:'AI_TEXT_TO_IMAGE',primaryAssetId:null,associateAssetsIds:[],prompt:'睿译读 product screen; lighting: soft blue; projectId:1'});let inputText='';
+ f.utils.Ai.Text=()=>({invoke:async input=>{inputText=JSON.stringify(input);return{text:JSON.stringify({suggestedSlug:'product-light',displayName:'睿译读 Visual Method',description:'Reusable',tags:[],content:f.content({lighting:'睿译读 cool light'})})};}});
+ const preview=await f.builder.projectDerivedPreview({projectId:1,scriptId:10,storyboardId:shot.id,skillType:'IMAGE_PROMPT'});
+ assert.equal((await f.db('o_skillRegistry')).length,0);assert.equal(inputText.includes('projectId:1'),false);assert.equal(preview.sourceHash.length,64);
+ const family={skillId:preview.skillId,displayName:preview.displayName,skillType:'IMAGE_PROMPT',description:preview.description,tags:preview.tags};
+ await f.db('o_storyboard').where({id:shot.id}).update({prompt:'new source'});
+ await assert.rejects(f.builder.projectDerivedSave({projectId:1,scriptId:10,storyboardId:shot.id,expectedSourceHash:preview.sourceHash,family,candidateContent:preview.candidateContent}),e=>e.code==='SKILL_SOURCE_CHANGED');
+ assert.equal((await f.db('o_skillRegistry')).length,0);
+ await f.db('o_storyboard').where({id:shot.id}).update({prompt:'睿译读 product screen; lighting: soft blue; projectId:1'});
+ const saved=await f.builder.projectDerivedSave({projectId:1,scriptId:10,storyboardId:shot.id,expectedSourceHash:preview.sourceHash,family,candidateContent:preview.candidateContent});
+ assert.equal(saved.version.sourceType,'PROJECT_DERIVED');assert.equal(saved.version.sourceData.sourceId,shot.id);assert.equal(saved.version.sourceData.sourceHash,preview.sourceHash);
+ assert.match(saved.version.sourceData.sourceSnapshot,/projectId:1/);assert.equal(JSON.stringify(saved.version.content).includes('睿译读'),false);
+ await assert.rejects(f.builder.projectDerivedPreview({projectId:1,scriptId:11,storyboardId:shot.id,skillType:'IMAGE_PROMPT'}),e=>e.code==='SKILL_SOURCE_INVALID');
+});
 
 test('additive schema, family, Draft V1, Active V1 immutability, Draft V2, Active V2 and historical exact V1',async t=>{
  const f=await setup(t),id=await f.active();

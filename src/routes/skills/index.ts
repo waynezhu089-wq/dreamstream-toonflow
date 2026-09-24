@@ -4,6 +4,7 @@ import { success } from "@/lib/responseFormat";
 import { emptyTemplate, SkillError, skillTypeSchema, templateFor } from "@/services/skillContract";
 import { activateDraft, buildFromSelectedSource, checkReversePromptCompatibility, copySkill, createDraft, createSkillFamily, deprecateVersion, editDraft, getSkill, listBindings, listSkills, loadSkill, previewVersion, recommendSkills, removeBinding, requireReversePromptExecution, resolveSkill, saveBinding } from "@/services/skillRegistry";
 import { applyCompile, compileImagePrompt, readCompile } from "@/services/skillCompiler";
+import { draftPreview, improvePreview, projectDerivedPreview, projectDerivedSave, quickPreview, quickSave } from "@/services/skillBuilder";
 
 const router = express.Router();
 function route(path: string, action: (body: any) => Promise<any>) {
@@ -32,6 +33,12 @@ route("/binding/list", listBindings);
 route("/resolve", resolveSkill);
 route("/recommend", recommendSkills);
 route("/builder/copy", copySkill);
+route("/builder/quick-preview", quickPreview);
+route("/builder/quick-save", quickSave);
+route("/builder/draft-preview", draftPreview);
+route("/builder/improve-preview", improvePreview);
+route("/builder/project-derived-preview", projectDerivedPreview);
+route("/builder/project-derived-save", projectDerivedSave);
 route("/builder/project-derived", buildFromSelectedSource);
 route("/builder/reverse-compatibility", checkReversePromptCompatibility);
 route("/builder/reverse-prompt", requireReversePromptExecution);
