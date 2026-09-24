@@ -66,6 +66,8 @@ export async function readCompositeAttempt(input: CompositeScope & { attemptId?:
 export async function createCompositeAttempt(input: CompositeScope & BackgroundInput & { primaryAssetId: number }) {
   const scope = scopeSchema.parse(input); validateBackground(input);
   const real = await source(scope, input.primaryAssetId);
+  const pinnedCapability = productionSpec(real.row).capabilityId;
+  if (pinnedCapability && pinnedCapability !== input.backgroundCapabilityId) throw new CompositeError("BACKGROUND_CAPABILITY_UNSUPPORTED", "请求的背景 Capability 与分镜锁定版本不一致");
   const id = await db().transaction(async trx => {
     const [id] = await trx("o_compositeAttempt").insert({ ...scope, primaryAssetId: input.primaryAssetId,
       sourceImageId: real.image.id, sourcePath: real.image.filePath, sourceHash: real.hash, productionSpec: real.row.productionSpec,

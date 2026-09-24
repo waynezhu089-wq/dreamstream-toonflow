@@ -24,10 +24,23 @@ async function setup(t) {
     requests.push({url,body:init?.body});
     if(providerFails)return new Response('offline',{status:503});
     if(String(url).endsWith('/prompt'))return Response.json({prompt_id:'fixture-run',node_errors:{}});
-    if(String(url).includes('/history/'))return Response.json({'fixture-run':{status:{completed:true},outputs:{'9':{images:[{filename:'bg.png',type:'output'}]}}}});
+    if(String(url).includes('/history/'))return Response.json({'fixture-run':{status:{completed:true},outputs:{'9':{images:[{filename:'bg.png',subfolder:'',type:'output'}]}}}});
     return new Response(background);
   };
   t.after(()=>{global.fetch=previousFetch;});
+  await f.load('lib/capabilitySchema').initializeCapabilitySchema(f.db);
+  const registry=f.load('services/capabilityRegistry');
+  const endpoint=await registry.saveEndpoint({name:'Mock Comfy',baseUrl:'http://127.0.0.1:8188',enabled:true});
+  await registry.createFamily({familyKey:'comfy.z-image-turbo.txt2img',displayName:'Mock Z-Image',description:'',category:'image',provider:'ComfyUI',executorType:'COMFY_UI'});
+  const workflowJson=require('node:fs').readFileSync(require('node:path').resolve(__dirname,'../examples/z-image-turbo-v1.api.json'),'utf8');
+  const version=await registry.createVersion({familyKey:'comfy.z-image-turbo.txt2img',definition:{endpointId:endpoint.id,workflowJson,
+    inputPorts:[{name:'prompt',type:'text',required:true,label:'Prompt'},{name:'width',type:'number',required:true,label:'Width'},{name:'height',type:'number',required:true,label:'Height'},{name:'seed',type:'number',required:true,label:'Seed'}],
+    outputPorts:[{name:'image',type:'image',label:'Image'}],
+    inputMappings:[{portName:'prompt',nodeId:'57:27',inputKey:'text'},{portName:'width',nodeId:'57:13',inputKey:'width'},{portName:'height',nodeId:'57:13',inputKey:'height'},{portName:'seed',nodeId:'57:3',inputKey:'seed'}],
+    outputMappings:[{portName:'image',nodeId:'9',field:'images'}],runtimeConfig:{timeoutMs:1000,pollIntervalMs:10}}});
+  await f.load('services/executeCapability').testCapability(version.capabilityId,{prompt:'test',width:256,height:256,seed:1});
+  await registry.verifyVersion({capabilityId:version.capabilityId});
+  requests.length=0;
   async function start(){const a=await service.createCompositeAttempt(input);return service.runCompositeBackground({...input,attemptId:a.id});}
   const finish=a=>service.finishCompositeAttempt({...input,attemptId:a.id,screenQuad:quad,confirmed:true});
   return {...f,service,input,shot,untouched,files,source,background,requests,start,finish,setFailure:()=>{providerFails=true;}};
@@ -77,6 +90,12 @@ test('cross-unit/project and nonexistent primary assets reject; unsupported capa
   await f.db('o_storyboard').where({id:f.shot.id}).update({productionSpec:JSON.stringify({productionMode:'REAL_AI_COMPOSITE',primaryAssetId:999})});
   await assert.rejects(f.service.createCompositeAttempt({...f.input,primaryAssetId:999}),e=>e.code==='PRIMARY_ASSET_NOT_FOUND');
   await assert.rejects(f.service.createCompositeAttempt({...f.input,backgroundCapabilityId:'unknown'}),e=>e.code==='BACKGROUND_CAPABILITY_UNSUPPORTED');
+  assert.equal(f.requests.length,0);
+});
+test('Storyboard capabilityId pins the exact background version; mismatched request cannot substitute it',async t=>{
+  const f=await setup(t),row=await f.db('o_storyboard').where({id:f.shot.id}).first();
+  await f.db('o_storyboard').where({id:f.shot.id}).update({productionSpec:JSON.stringify({...JSON.parse(row.productionSpec),capabilityId:'comfy.other.txt2img.v2'})});
+  await assert.rejects(f.service.createCompositeAttempt(f.input),e=>e.code==='BACKGROUND_CAPABILITY_UNSUPPORTED');
   assert.equal(f.requests.length,0);
 });
 test('provider failure is explicit and never falls back; retry has no inherited quad and obsolete attempt cannot overwrite',async t=>{

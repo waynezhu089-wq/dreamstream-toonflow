@@ -26,6 +26,8 @@ import { modelUseGate } from "@/middleware/modelUseGate";
 import { initializeStoryboardProductionSchema } from "@/lib/storyboardProductionSchema";
 import { initializeCompositeAttemptSchema } from "@/lib/compositeAttemptSchema";
 import composite from "@/routes/production/storyboard/composite";
+import { initializeCapabilitySchema } from "@/lib/capabilitySchema";
+import capabilities from "@/routes/capabilities";
 
 const app = express();
 const server = http.createServer(app);
@@ -60,6 +62,7 @@ export default async function startServe(randomPort: Boolean = false) {
   await initializeModelPresetSchema(u.db);
   await initializeStoryboardProductionSchema(u.db);
   await initializeCompositeAttemptSchema(u.db);
+  await initializeCapabilitySchema(u.db);
 
   await u.writeVersion();
   const io = new Server(server, { cors: { origin: "*" } });
@@ -186,6 +189,7 @@ export default async function startServe(randomPort: Boolean = false) {
 
   registerProductionGate(app);
   app.use("/api/production/storyboard/composite", composite);
+  app.use("/api/capabilities", capabilities);
   app.use("/api/modelSelect/presets", modelPresets);
   app.use(modelUseGate);
   app.use("/api/project/advertisement/assetPlan", assetPlan);

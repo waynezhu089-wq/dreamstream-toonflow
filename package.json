@@ -40,7 +40,8 @@
     "test:model-presets": "node --test tests/model-presets.test.cjs",
     "test:advertisement-production-context": "node --test tests/advertisement-production-context.test.cjs",
     "test:storyboard-production": "node --test tests/storyboard-production.test.cjs",
-    "test:composite": "node --test tests/composite-attempt.test.cjs"
+    "test:composite": "node --test tests/composite-attempt.test.cjs",
+    "test:capabilities": "node --test tests/capability-registry.test.cjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.35",

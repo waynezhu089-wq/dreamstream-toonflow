@@ -92,6 +92,7 @@ async function fixture(t) {
   app.use('/api/production/getStoryboardData',load('routes/production/getStoryboardData').default);
   app.use('/api/production/saveFlowData',load('routes/production/saveFlowData').default);
   app.use('/api/production/storyboard/composite',load('routes/production/storyboard/composite').default);
+  app.use('/api/capabilities',load('routes/capabilities/index').default);
   app.use((e,req,res,next)=>res.status(500).json({message:e.message}));
   const server=app.listen(0,'127.0.0.1');await require('events').once(server,'listening');
   t.after(async()=>{server.closeAllConnections();await new Promise(r=>server.close(r));});
@@ -101,7 +102,8 @@ async function fixture(t) {
   const create=async overrides=>post('storyboard/addStoryboard',{...ctx,...item(overrides)});
   async function generate(ids,context=ctx){await post('storyboard/batchGenerateImage',{...context,storyboardIds:ids,compulsory:true});for(let i=0;i<100;i++){const rows=await db('o_storyboard').whereIn('id',ids);if(rows.every(r=>r.state!=='生成中'))return rows;await new Promise(r=>setTimeout(r,10));}throw Error('generation timed out');}
   const config=async()=>load('services/modelPreset').patchProject({projectId:1,slots:{image:'vendor:image'}});
-  return {db,raw,load,ctx,post,item,create,generate,config,calls,writes,probe,plan,utils};
+  async function postCapability(route,body,status=200){const response=await fetch('http://127.0.0.1:'+server.address().port+'/api/capabilities/'+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const json=await response.json();assert.equal(response.status,status,JSON.stringify(json));return json.data??json;}
+  return {db,raw,load,ctx,post,postCapability,item,create,generate,config,calls,writes,probe,plan,utils};
 }
 
 
