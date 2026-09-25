@@ -4,7 +4,7 @@ import { NoObjectGeneratedError, Output } from "ai";
 import { z } from "zod";
 import u from "@/utils";
 import { textModelForProject } from "@/services/modelPreset";
-import { SkillError, genericTemplate, imagePromptTemplate, skillIdSchema, skillTypeSchema, templateFor, validateContent, type SkillContent, type SkillType } from "./skillContract";
+import { SkillError, emptyTemplate, genericTemplate, imagePromptTemplate, skillIdSchema, skillTypeSchema, templateFor, validateContent, type SkillContent, type SkillType } from "./skillContract";
 import { getSkill, readAndSanitizeSelectedSource, sanitizeSelectedSource, saveBuilderDraft } from "./skillRegistry";
 
 const db = () => u.db as Knex;
@@ -90,7 +90,8 @@ function cleanProjectContent(value: unknown, source: Source): unknown {
 async function generateCandidate(skillType: SkillType, userInput: Record<string, unknown>, projectId?: number, source?: Source) {
   const modelReference = await modelFor(projectId);
   const schema = candidateSchema(skillType);
-  const system = `你是 Dream Stream Skill Builder。根据自然语言经验生成可复用的 ${skillType} Skill 候选，遵循提供的结构化输出 Schema，填齐 content 中所有字段；不适用的文字字段用空字符串，列表字段用空数组。Return a valid JSON object only. The JSON must conform to the provided schema. Do not output markdown or any text outside the JSON object. 不得复制项目 ID、内部文件路径、客户/产品专有名称或 SKU。suggestedSlug 只是可选建议，不确定时省略。IMAGE_PROMPT 必须保留真实 UI、Logo、包装文字、产品标签和产品文字不得由 AI 重画、改字或伪造的约束。`;
+  const skeleton = JSON.stringify({ suggestedSlug: "", displayName: "", description: "", tags: [], content: emptyTemplate(skillType) }, null, 2);
+  const system = `你是 Dream Stream Skill Builder。根据自然语言经验生成可复用的 ${skillType} Skill 候选，遵循提供的结构化输出 Schema，填齐 content 中所有字段；不适用的文字字段用空字符串，列表字段用空数组。Return a valid JSON object only. The JSON must conform to the provided schema. Do not output markdown or any text outside the JSON object. Use exactly this JSON structure:\n${skeleton}\nEnd JSON structure. Fill relevant empty values with useful content. Do not omit required fields. String fields must be strings. Array fields must be arrays. Do not add extra fields. 不得复制项目 ID、内部文件路径、客户/产品专有名称或 SKU。suggestedSlug 只是可选建议，不确定时省略。IMAGE_PROMPT 必须保留真实 UI、Logo、包装文字、产品标签和产品文字不得由 AI 重画、改字或伪造的约束。`;
   let feedback = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -109,7 +110,7 @@ async function generateCandidate(skillType: SkillType, userInput: Record<string,
         logStructuredOutputFailure(error, modelReference, attempt + 1);
         throw new SkillError("SKILL_BUILDER_FAILED", "Skill 候选生成失败，请稍后重试。", 502);
       }
-      feedback = `上次结构化候选未通过 Schema 或模板校验。请按相同 Schema 重新生成完整 JSON 对象。错误：${String((error as any)?.message ?? error).slice(0, 500)}`;
+      feedback = `上次结构化候选未通过 Schema 或模板校验。请按以下相同结构重新生成完整 JSON 对象，不得遗漏字段、用错类型或增加字段：\n${skeleton}\n错误：${String((error as any)?.message ?? error).slice(0, 500)}`;
     }
   }
   throw new SkillError("SKILL_BUILDER_INVALID_OUTPUT", "AI 两次返回的 Skill 结构仍不合法，请稍后重试。", 502);

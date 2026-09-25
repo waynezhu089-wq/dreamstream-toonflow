@@ -20,6 +20,11 @@ async function setup(t){
 }
 
 function structured(output){return{output};}
+function skeletonFromSystem(input){
+ const match=input.system.match(/Use exactly this JSON structure:\n([\s\S]*?)\nEnd JSON structure\./);
+ assert.ok(match,'Builder system prompt must include the generated JSON skeleton');
+ return JSON.parse(match[1]);
+}
 async function assertStructuredCall(input,type){
  assert.equal(input.output?.name,'object');
  assert.match(input.system,/Return a valid JSON object only\./);
@@ -27,6 +32,10 @@ async function assertStructuredCall(input,type){
  const format=await input.output.responseFormat;
  assert.equal(format.type,'json');
  const fields=format.schema.properties.content.properties;
+ const skeleton=skeletonFromSystem(input);
+ assert.deepEqual(Object.keys(skeleton).sort(),['suggestedSlug','displayName','description','tags','content'].sort());
+ assert.deepEqual(Object.keys(skeleton.content).sort(),Object.keys(fields).sort());
+ for(const value of Object.values(skeleton.content))assert.ok(value===''||Array.isArray(value));
  assert.deepEqual(Object.keys(fields).sort(),(type==='IMAGE_PROMPT'?
   ['purpose','inputs','rules','outputRequirements','prohibitions','applicableScenes','tags','subject','composition','cameraLens','lighting','color','material','spatialRelationship','style','detailDensity','background','motion','negativeConstraints']:
   ['purpose','inputs','rules','outputRequirements','prohibitions','applicableScenes','tags']).sort());
@@ -37,6 +46,7 @@ test('UX1 quick preview is read-only, normalizes IDs, saves Family and Draft V1 
  const f=await setup(t),calls=[];
  f.utils.Ai.Text=key=>({invoke:async input=>{calls.push({key,input});await assertStructuredCall(input,'IMAGE_PROMPT');return structured({suggestedSlug:'tech-product-cinematic',displayName:'Tech Product',description:'Reusable',tags:['product'],content:f.content()});}});
  const candidate=await f.builder.quickPreview({skillType:'IMAGE_PROMPT',instruction:'Cinematic product imagery with real UI preserved'});
+ assert.deepEqual(skeletonFromSystem(calls[0].input).content,f.contract.emptyTemplate('IMAGE_PROMPT'));
  assert.equal(calls[0].key,'universalAi');assert.equal(candidate.skillId,'image-prompt.tech-product-cinematic');
  assert.equal((await f.db('o_skillRegistry')).length,0);assert.equal((await f.db('o_skillVersion')).length,0);
  const saved=await f.builder.quickSave({family:{skillId:candidate.skillId,displayName:candidate.displayName,skillType:'IMAGE_PROMPT',description:candidate.description,tags:candidate.tags},candidateContent:candidate.candidateContent});
@@ -49,7 +59,7 @@ test('UX1 quick preview is read-only, normalizes IDs, saves Family and Draft V1 
 
 test('UX1 draft preview edits same Draft only after confirmation; Active improvement is a field diff and an existing Draft blocks another version',async t=>{
  const f=await setup(t),id='image-prompt.tech';await f.registry.createSkillFamily(f.family(id));await f.registry.createDraft({skillId:id,content:f.content()});
- f.utils.Ai.Text=()=>({invoke:async input=>{await assertStructuredCall(input,'IMAGE_PROMPT');return structured({suggestedSlug:'tech',displayName:'Tech',description:'Reusable',tags:[],content:f.content({lighting:'Natural daylight'})});}});
+ f.utils.Ai.Text=()=>({invoke:async input=>{await assertStructuredCall(input,'IMAGE_PROMPT');assert.deepEqual(skeletonFromSystem(input).content,f.contract.emptyTemplate('IMAGE_PROMPT'));return structured({suggestedSlug:'tech',displayName:'Tech',description:'Reusable',tags:[],content:f.content({lighting:'Natural daylight'})});}});
  const preview=await f.builder.draftPreview({skillId:id,version:'v1',instruction:'Use brighter natural light'});
  assert.equal(preview.candidateContent.lighting,'Natural daylight');assert.equal((await f.registry.getSkill({skillId:id})).versions.length,1);
  assert.equal((await f.registry.getSkill({skillId:id,version:'v1'})).versions[0].content.lighting,'Soft side light');
@@ -67,7 +77,7 @@ test('UX1 draft preview edits same Draft only after confirmation; Active improve
 
 test('HF2 structured Builder repairs one malformed output, rejects second invalid output, and normalizes model errors',async t=>{
  const f=await setup(t);let count=0;
- f.utils.Ai.Text=()=>({invoke:async input=>{await assertStructuredCall(input,'DIRECTOR');count++;if(count===2){assert.match(input.messages[0].content,/repair/);assert.match(input.messages[0].content,/JSON/);}return structured(count===1?{displayName:'bad',content:{}}:{suggestedSlug:'director-guide',displayName:'Director',description:'General',tags:[],content:{...f.contract.emptyTemplate('DIRECTOR'),purpose:'Plan shots'}});}});
+ f.utils.Ai.Text=()=>({invoke:async input=>{await assertStructuredCall(input,'DIRECTOR');assert.deepEqual(skeletonFromSystem(input).content,f.contract.emptyTemplate('DIRECTOR'));count++;if(count===2){const repair=JSON.parse(input.messages[0].content).repair;assert.match(repair,/JSON/);assert.ok(repair.includes(JSON.stringify(skeletonFromSystem(input),null,2)));}return structured(count===1?{displayName:'bad',content:{}}:{suggestedSlug:'director-guide',displayName:'Director',description:'General',tags:[],content:{...f.contract.emptyTemplate('DIRECTOR'),purpose:'Plan shots'}});}});
  const result=await f.builder.quickPreview({skillType:'DIRECTOR',instruction:'Plan a clear visual narrative'});assert.equal(result.skillId,'director.director-guide');assert.equal(count,2);
  f.utils.Ai.Text=()=>({invoke:async input=>{await assertStructuredCall(input,'DIRECTOR');count++;assert.ok(count<=2);return structured({displayName:'bad',content:{}});}});count=0;
  await assert.rejects(f.builder.quickPreview({skillType:'DIRECTOR',instruction:'Plan a clear visual narrative'}),e=>e.code==='SKILL_BUILDER_INVALID_OUTPUT');assert.equal(count,2);
