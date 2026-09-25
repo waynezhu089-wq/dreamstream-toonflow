@@ -22,6 +22,8 @@ async function setup(t){
 function structured(output){return{output};}
 async function assertStructuredCall(input,type){
  assert.equal(input.output?.name,'object');
+ assert.match(input.system,/Return a valid JSON object only\./);
+ assert.match(input.system,/The JSON must conform to the provided schema\./);
  const format=await input.output.responseFormat;
  assert.equal(format.type,'json');
  const fields=format.schema.properties.content.properties;
@@ -65,7 +67,7 @@ test('UX1 draft preview edits same Draft only after confirmation; Active improve
 
 test('HF2 structured Builder repairs one malformed output, rejects second invalid output, and normalizes model errors',async t=>{
  const f=await setup(t);let count=0;
- f.utils.Ai.Text=()=>({invoke:async input=>{await assertStructuredCall(input,'DIRECTOR');count++;if(count===2)assert.match(input.messages[0].content,/repair/);return structured(count===1?{displayName:'bad',content:{}}:{suggestedSlug:'director-guide',displayName:'Director',description:'General',tags:[],content:{...f.contract.emptyTemplate('DIRECTOR'),purpose:'Plan shots'}});}});
+ f.utils.Ai.Text=()=>({invoke:async input=>{await assertStructuredCall(input,'DIRECTOR');count++;if(count===2){assert.match(input.messages[0].content,/repair/);assert.match(input.messages[0].content,/JSON/);}return structured(count===1?{displayName:'bad',content:{}}:{suggestedSlug:'director-guide',displayName:'Director',description:'General',tags:[],content:{...f.contract.emptyTemplate('DIRECTOR'),purpose:'Plan shots'}});}});
  const result=await f.builder.quickPreview({skillType:'DIRECTOR',instruction:'Plan a clear visual narrative'});assert.equal(result.skillId,'director.director-guide');assert.equal(count,2);
  f.utils.Ai.Text=()=>({invoke:async input=>{await assertStructuredCall(input,'DIRECTOR');count++;assert.ok(count<=2);return structured({displayName:'bad',content:{}});}});count=0;
  await assert.rejects(f.builder.quickPreview({skillType:'DIRECTOR',instruction:'Plan a clear visual narrative'}),e=>e.code==='SKILL_BUILDER_INVALID_OUTPUT');assert.equal(count,2);
