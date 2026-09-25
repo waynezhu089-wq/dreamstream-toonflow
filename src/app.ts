@@ -30,6 +30,9 @@ import { initializeCapabilitySchema } from "@/lib/capabilitySchema";
 import capabilities from "@/routes/capabilities";
 import { initializeSkillSchema } from "@/lib/skillSchema";
 import skills from "@/routes/skills";
+import { initializeProductionProfileSchema } from "@/lib/productionProfileSchema";
+import productionProfiles from "@/routes/productionProfiles";
+import stageOrchestrator from "@/routes/stageOrchestrator";
 
 const app = express();
 const server = http.createServer(app);
@@ -66,6 +69,7 @@ export default async function startServe(randomPort: Boolean = false) {
   await initializeCompositeAttemptSchema(u.db);
   await initializeCapabilitySchema(u.db);
   await initializeSkillSchema(u.db);
+  await initializeProductionProfileSchema(u.db);
 
   await u.writeVersion();
   const io = new Server(server, { cors: { origin: "*" } });
@@ -194,6 +198,8 @@ export default async function startServe(randomPort: Boolean = false) {
   app.use("/api/production/storyboard/composite", composite);
   app.use("/api/capabilities", capabilities);
   app.use("/api/skills", skills);
+  app.use("/api/productionProfiles", productionProfiles);
+  app.use("/api/stageOrchestrator", stageOrchestrator);
   app.use("/api/modelSelect/presets", modelPresets);
   app.use(modelUseGate);
   app.use("/api/project/advertisement/assetPlan", assetPlan);
