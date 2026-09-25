@@ -24,7 +24,7 @@ async function fixture(t) {
       if (id === '@/utils/getPath') return name => path.join(dir, name);
       if (id === '@/lib/initDB' || id === '@/lib/fixDB') return async () => {};
       if(id==='@/utils')return utils;
-      if(id==='ai')return {tool:x=>x,jsonSchema:x=>x};
+      if(id==='ai')return {tool:x=>x,jsonSchema:x=>x,Output:require('ai').Output,NoObjectGeneratedError:require('ai').NoObjectGeneratedError};
       if(['axios','@ai-sdk/devtools','lodash'].includes(id))return {};
       if(id==='sucrase')return {transform:x=>({code:x})};
       if(id==='uuid')return {v4:require('node:crypto').randomUUID};

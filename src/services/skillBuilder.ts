@@ -1,8 +1,10 @@
 import type { Knex } from "knex";
+import { createHash } from "node:crypto";
+import { NoObjectGeneratedError, Output } from "ai";
 import { z } from "zod";
 import u from "@/utils";
 import { textModelForProject } from "@/services/modelPreset";
-import { SkillError, skillIdSchema, skillTypeSchema, templateFor, validateContent, type SkillContent, type SkillType } from "./skillContract";
+import { SkillError, genericTemplate, imagePromptTemplate, skillIdSchema, skillTypeSchema, templateFor, validateContent, type SkillContent, type SkillType } from "./skillContract";
 import { getSkill, readAndSanitizeSelectedSource, sanitizeSelectedSource, saveBuilderDraft } from "./skillRegistry";
 
 const db = () => u.db as Knex;
@@ -15,7 +17,15 @@ const prefixes: Record<SkillType, string> = {
   AUDIO_MUSIC: "audio-music", SUPERVISOR: "supervisor", QC: "qc", DISTRIBUTION: "distribution",
 };
 const familyMeta = z.object({ skillId: skillIdSchema, displayName: z.string().trim().min(1).max(256), skillType: skillTypeSchema, description: z.string().trim().max(4000).default(""), tags: z.array(z.string().trim().min(1).max(100)).max(50).default([]) }).strict();
-const candidateMeta = z.object({ suggestedSlug: slug, displayName: z.string().trim().min(1).max(256), description: z.string().trim().max(4000), tags: z.array(z.string().trim().min(1).max(100)).max(50), content: z.unknown() });
+function candidateSchema(skillType: SkillType) {
+  return z.object({
+    suggestedSlug: z.string().optional(),
+    displayName: z.string().trim().min(1).max(256),
+    description: z.string().trim().max(4000),
+    tags: z.array(z.string().trim().min(1).max(100)).max(50),
+    content: skillType === "IMAGE_PROMPT" ? imagePromptTemplate : genericTemplate,
+  }).strict();
+}
 const selectedSource = z.object({ projectId: positive, scriptId: positive, storyboardId: positive, skillType: z.literal("IMAGE_PROMPT"), instruction: instruction.optional() }).strict();
 type Source = Awaited<ReturnType<typeof readAndSanitizeSelectedSource>>;
 
@@ -28,9 +38,13 @@ async function modelFor(projectId?: number) {
   try { return await textModelForProject(projectId, "productionAgent:storyboardGenAgent"); }
   catch { throw new SkillError("SKILL_BUILDER_MODEL_UNAVAILABLE", "请先配置可用的文本模型。", 409); }
 }
-function parseObject(raw: unknown) {
-  const text = typeof raw === "string" ? raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "") : "";
-  return JSON.parse(text);
+function safeSlug(suggested: string | undefined, displayName: string, content: SkillContent) {
+  const valid = slug.safeParse(suggested);
+  if (valid.success) return valid.data;
+  const name = displayName.normalize("NFKD").toLowerCase();
+  const fromName = /^[\x00-\x7f]+$/.test(name) ? name.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 100).replace(/-$/, "") : "";
+  if (slug.safeParse(fromName).success) return fromName;
+  return `skill-${createHash("sha256").update(JSON.stringify({ displayName, content })).digest("hex").slice(0, 12)}`;
 }
 function cleanProjectContent(value: unknown, source: Source): unknown {
   if (typeof value === "string") return sanitizeSelectedSource(value, source.projectName, source.assetNames);
@@ -40,23 +54,28 @@ function cleanProjectContent(value: unknown, source: Source): unknown {
 }
 async function generateCandidate(skillType: SkillType, userInput: Record<string, unknown>, projectId?: number, source?: Source) {
   const modelReference = await modelFor(projectId);
-  const system = `你是 Dream Stream Skill Builder，不是 Agent。只输出一个 JSON 对象，不调用工具。基于给定经验提炼可复用方法，不能复制项目 ID、内部文件路径、客户/产品专有名称或 SKU。字段必须严格匹配 JSON 结构。IMAGE_PROMPT 必须保留真实 UI、Logo、包装文字、产品标签不能由 AI 重画的约束。输出字段：suggestedSlug（仅小写英文数字和连字符，不含类型前缀）、displayName、description、tags（字符串数组）、content。content 必须包含下列模板全部字段，数组字段必须是字符串数组，不要额外字段：${JSON.stringify({ skillType, template: templateFor(skillType), content: skillType === "IMAGE_PROMPT" ? { purpose: "", inputs: [], rules: [], outputRequirements: [], prohibitions: [], applicableScenes: [], tags: [], subject: "", composition: "", cameraLens: "", lighting: "", color: "", material: "", spatialRelationship: "", style: "", detailDensity: "", background: "", motion: "", negativeConstraints: "" } : { purpose: "", inputs: [], rules: [], outputRequirements: [], prohibitions: [], applicableScenes: [], tags: [] } })}`;
+  const schema = candidateSchema(skillType);
+  const system = `你是 Dream Stream Skill Builder。根据自然语言经验生成可复用的 ${skillType} Skill 候选，遵循提供的结构化输出 Schema，填齐 content 中所有字段；不适用的文字字段用空字符串，列表字段用空数组。不得复制项目 ID、内部文件路径、客户/产品专有名称或 SKU。suggestedSlug 只是可选建议，不确定时省略。IMAGE_PROMPT 必须保留真实 UI、Logo、包装文字、产品标签和产品文字不得由 AI 重画、改字或伪造的约束。`;
   let feedback = "";
   for (let attempt = 0; attempt < 2; attempt++) {
-    let result: any;
-    try { result = await u.Ai.Text(modelReference as Parameters<typeof u.Ai.Text>[0]).invoke({ system, messages: [{ role: "user", content: JSON.stringify({ ...userInput, repair: feedback || undefined }) }] }); }
-    catch (error) {
-      if (modelUnavailable(error)) throw new SkillError("SKILL_BUILDER_MODEL_UNAVAILABLE", "请先配置可用的文本模型。", 409);
-      throw new SkillError("SKILL_BUILDER_FAILED", "Skill 候选生成失败，请稍后重试。", 502);
-    }
     try {
-      const parsed = candidateMeta.parse(parseObject(result?.text ?? result?._output));
+      const result = await u.Ai.Text(modelReference as Parameters<typeof u.Ai.Text>[0]).invoke({
+        system,
+        messages: [{ role: "user", content: JSON.stringify({ ...userInput, repair: feedback || undefined }) }],
+        output: Output.object({ schema }),
+      });
+      const parsed = schema.parse(result.output);
       const content = validateContent(skillType, templateFor(skillType), source ? cleanProjectContent(parsed.content, source) : parsed.content);
-      const safeMeta = source ? cleanProjectContent({ displayName: parsed.displayName, description: parsed.description, tags: parsed.tags }, source) as Pick<z.infer<typeof candidateMeta>, "displayName" | "description" | "tags"> : parsed;
-      return { suggestedSlug: parsed.suggestedSlug, displayName: safeMeta.displayName, description: safeMeta.description, tags: safeMeta.tags, candidateContent: content, modelReference };
-    } catch (error) { feedback = `上次 JSON 无法通过模板验证；只修复 JSON 结构与字段类型，返回完整对象。错误：${String((error as any)?.message ?? error).slice(0, 500)}`; }
+      const safeMeta = source ? cleanProjectContent({ displayName: parsed.displayName, description: parsed.description, tags: parsed.tags }, source) as Pick<typeof parsed, "displayName" | "description" | "tags"> : parsed;
+      return { suggestedSlug: safeSlug(parsed.suggestedSlug, safeMeta.displayName, content), displayName: safeMeta.displayName, description: safeMeta.description, tags: safeMeta.tags, candidateContent: content, modelReference };
+    } catch (error) {
+      if (modelUnavailable(error)) throw new SkillError("SKILL_BUILDER_MODEL_UNAVAILABLE", "请先配置可用的文本模型。", 409);
+      if (!NoObjectGeneratedError.isInstance(error) && !(error instanceof z.ZodError) && !(error instanceof SkillError && error.code === "SKILL_TEMPLATE_INVALID"))
+        throw new SkillError("SKILL_BUILDER_FAILED", "Skill 候选生成失败，请稍后重试。", 502);
+      feedback = `上次结构化候选未通过 Schema 或模板校验。请按相同 Schema 重新生成完整对象。错误：${String((error as any)?.message ?? error).slice(0, 500)}`;
+    }
   }
-  throw new SkillError("SKILL_BUILDER_INVALID_OUTPUT", "AI 两次返回的 Skill 结构仍不合法，请调整描述后重试。", 502);
+  throw new SkillError("SKILL_BUILDER_INVALID_OUTPUT", "AI 两次返回的 Skill 结构仍不合法，请稍后重试。", 502);
 }
 async function availableId(skillType: SkillType, suggestedSlug: string) {
   const base = `${prefixes[skillType]}.${slug.parse(suggestedSlug)}`;
