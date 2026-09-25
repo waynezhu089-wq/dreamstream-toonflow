@@ -33,6 +33,41 @@ function modelUnavailable(error: unknown) {
   const message = String((error as any)?.message ?? error ?? "");
   return /未找到.*(?:模型|配置|部署)|模型.*(?:不可用|未配置|不存在)|provider.*(?:unavailable|not found)|请先配置|universalAi.*(?:not found|missing)/i.test(message);
 }
+function diagnosticText(value: unknown) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  return String(value)
+    .replace(/\b(?:Authorization|Cookie|Set-Cookie)\s*:\s*[^\r\n]+/gi, "[REDACTED_CREDENTIAL]")
+    .replace(/\b(?:Bearer|Basic)\s+\S+/gi, "[REDACTED_CREDENTIAL]")
+    .replace(/\b(?:authorization|cookie|set-cookie|x-api-key|api[_-]?key|access[_-]?token|secret|password)\b\s*[:=]\s*[^\s,;}]+/gi, "[REDACTED_CREDENTIAL]")
+    .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]+\b/gi, "[REDACTED_CREDENTIAL]")
+    .replace(/[A-Za-z0-9+/_=-]{32,}/g, "[REDACTED_CREDENTIAL]")
+    .slice(0, 1000);
+}
+function diagnosticCause(value: unknown, depth = 0): unknown {
+  if (depth > 2 || value === undefined || value === null) return null;
+  if (typeof value !== "object") return diagnosticText(value);
+  const error = value as Record<string, unknown>;
+  return {
+    name: diagnosticText(error.name), message: diagnosticText(error.message), code: diagnosticText(error.code),
+    statusCode: diagnosticText(error.statusCode), status: diagnosticText(error.status),
+    cause: depth < 2 ? diagnosticCause(error.cause, depth + 1) : null,
+  };
+}
+function logStructuredOutputFailure(error: unknown, modelReference: string, attempt: number) {
+  try {
+    const details = error && typeof error === "object" ? error as Record<string, any> : {};
+    const name = diagnosticText(details.name);
+    console.error("[SkillBuilder][StructuredOutputFailure]", {
+      modelReference: diagnosticText(modelReference), attempt,
+      name, message: diagnosticText(details.message ?? error), code: diagnosticText(details.code),
+      statusCode: diagnosticText(details.statusCode), status: diagnosticText(details.status),
+      cause: diagnosticCause(details.cause), responseStatus: diagnosticText(details.response?.status),
+      aiSdkErrorType: typeof name === "string" && name.startsWith("AI_") ? name : null,
+      provider: diagnosticText(details.provider), modelId: diagnosticText(details.modelId),
+    });
+  } catch { /* Diagnostics must never change the Builder error contract. */ }
+}
 async function modelFor(projectId?: number) {
   if (!projectId) return "universalAi";
   try { return await textModelForProject(projectId, "productionAgent:storyboardGenAgent"); }
@@ -70,8 +105,10 @@ async function generateCandidate(skillType: SkillType, userInput: Record<string,
       return { suggestedSlug: safeSlug(parsed.suggestedSlug, safeMeta.displayName, content), displayName: safeMeta.displayName, description: safeMeta.description, tags: safeMeta.tags, candidateContent: content, modelReference };
     } catch (error) {
       if (modelUnavailable(error)) throw new SkillError("SKILL_BUILDER_MODEL_UNAVAILABLE", "请先配置可用的文本模型。", 409);
-      if (!NoObjectGeneratedError.isInstance(error) && !(error instanceof z.ZodError) && !(error instanceof SkillError && error.code === "SKILL_TEMPLATE_INVALID"))
+      if (!NoObjectGeneratedError.isInstance(error) && !(error instanceof z.ZodError) && !(error instanceof SkillError && error.code === "SKILL_TEMPLATE_INVALID")) {
+        logStructuredOutputFailure(error, modelReference, attempt + 1);
         throw new SkillError("SKILL_BUILDER_FAILED", "Skill 候选生成失败，请稍后重试。", 502);
+      }
       feedback = `上次结构化候选未通过 Schema 或模板校验。请按相同 Schema 重新生成完整对象。错误：${String((error as any)?.message ?? error).slice(0, 500)}`;
     }
   }

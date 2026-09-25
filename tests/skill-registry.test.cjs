@@ -86,6 +86,28 @@ test('HF2 AI SDK no-object error receives one structured repair call',async t=>{
  assert.equal(result.skillId,'director.director-guide');assert.equal(calls,2);
 });
 
+test('HF2-DIAG provider failure logs redacted diagnostics while HTTP keeps the stable Builder error',async t=>{
+ const f=await setup(t),logs=[],original=console.error;
+ console.error=(...items)=>logs.push(items);t.after(()=>{console.error=original;});
+ const error=Object.assign(new Error('Provider rejected api_key=small-secret and Bearer sk-live-secret'),{
+  name:'AI_APICallError',code:'BAD_REQUEST',statusCode:400,status:400,provider:'example-provider',modelId:'text-model',
+  cause:Object.assign(new Error('Cookie: session=firstsecret; refresh=secondsecret'),{code:'UPSTREAM_REJECTED'}),
+  response:{status:400,headers:{authorization:'Bearer hidden-header-secret'}},
+  requestHeaders:{Authorization:'Bearer hidden-request-secret'},responseBody:'{"api_key":"hidden-body-secret"}',
+ });
+ let calls=0;f.utils.Ai.Text=()=>({invoke:async input=>{await assertStructuredCall(input,'IMAGE_PROMPT');calls++;throw error;}});
+ const response=await f.post('builder/quick-preview',{skillType:'IMAGE_PROMPT',instruction:'Produce a reusable product image method'},502);
+ assert.equal(response.reason,'SKILL_BUILDER_FAILED');assert.equal(calls,1);
+ assert.equal(logs.length,1);assert.equal(logs[0][0],'[SkillBuilder][StructuredOutputFailure]');
+ const diagnostic=logs[0][1];assert.equal(diagnostic.modelReference,'universalAi');assert.equal(diagnostic.attempt,1);
+ assert.equal(diagnostic.name,'AI_APICallError');assert.equal(diagnostic.code,'BAD_REQUEST');assert.equal(diagnostic.statusCode,'400');
+ assert.equal(diagnostic.responseStatus,'400');assert.equal(diagnostic.aiSdkErrorType,'AI_APICallError');
+ assert.equal(diagnostic.cause.code,'UPSTREAM_REJECTED');assert.equal(diagnostic.provider,'example-provider');assert.equal(diagnostic.modelId,'text-model');
+ const printed=JSON.stringify(logs);
+ for(const secret of ['small-secret','sk-live-secret','firstsecret','secondsecret','hidden-header-secret','hidden-request-secret','hidden-body-secret'])assert.equal(printed.includes(secret),false);
+ assert.equal(JSON.stringify(response).includes('secret'),false);
+});
+
 test('HF2 human natural-language IMAGE_PROMPT creates a complete candidate and ignores missing or unsafe slug',async t=>{
  const f=await setup(t);
  const humanPrompt='科技产品广告，主体突出，整体采用真实摄影感和克制的电影感。构图以近景和中近景为主，突出产品材质、空间层次和主体质感。光线以自然环境光配合柔和侧光或轮廓光，不要过暗，也不要大面积纯黑背景。色调偏冷但保持自然。真实 UI、Logo、包装文字和产品文字必须保持真实，不允许 AI 重画、改字或生成错误文字。背景应简洁，不抢主体，适合 App、手机和数字产品功能展示。';
