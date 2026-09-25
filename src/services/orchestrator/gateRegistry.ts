@@ -1,4 +1,5 @@
 import { readState } from "@/services/advertisementGate";
+import { supervisorStageGate } from "@/services/supervisor/review";
 
 export type StageGateContext = { projectId: number; scriptId: number; profileKey: string; profileVersion: string; stageKey: string };
 export type StageGateResult = { pass: boolean; code: string; reason: string | null; details?: unknown };
@@ -26,3 +27,4 @@ registerGate("advertisement.asset-ready", async context => {
   const reason = !state.prepared ? (state.assetCount === 0 ? "素材清单为空，请先填写并准备必需素材" : missing.length ? `必需素材尚未准备：${missing.join("、")}` : "广告资产准备尚未完成") : "素材已准备，请先人工确认资产准备完成";
   return { pass: false, code: "ADVERTISEMENT_ASSET_GATE_BLOCKED", reason, details: state };
 });
+registerGate("supervisor.storyboard-approved", context => supervisorStageGate("supervisor.storyboard-approved", context));

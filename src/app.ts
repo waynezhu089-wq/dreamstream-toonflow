@@ -35,6 +35,8 @@ import productionProfiles from "@/routes/productionProfiles";
 import { initializeRecipeSchema } from "@/lib/recipeSchema";
 import recipes from "@/routes/recipes";
 import stageOrchestrator from "@/routes/stageOrchestrator";
+import { initializeSupervisorSchema } from "@/lib/supervisorSchema";
+import supervisor from "@/routes/supervisor";
 
 const app = express();
 const server = http.createServer(app);
@@ -73,6 +75,7 @@ export default async function startServe(randomPort: Boolean = false) {
   await initializeSkillSchema(u.db);
   await initializeProductionProfileSchema(u.db);
   await initializeRecipeSchema(u.db);
+  await initializeSupervisorSchema(u.db);
 
   await u.writeVersion();
   const io = new Server(server, { cors: { origin: "*" } });
@@ -204,6 +207,7 @@ export default async function startServe(randomPort: Boolean = false) {
   app.use("/api/productionProfiles", productionProfiles);
   app.use("/api/recipes", recipes);
   app.use("/api/stageOrchestrator", stageOrchestrator);
+  app.use("/api/supervisor", supervisor);
   app.use("/api/modelSelect/presets", modelPresets);
   app.use(modelUseGate);
   app.use("/api/project/advertisement/assetPlan", assetPlan);
