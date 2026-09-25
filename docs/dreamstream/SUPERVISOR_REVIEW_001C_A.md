@@ -8,6 +8,8 @@ The server reads Storyboards for the exact `projectId + scriptId`, sorted by `in
 
 Each immutable review stores the server-computed target snapshot/hash and exact Profile key/version plus exact Recipe key/version/definition hash when bound. `controlContextHash` hashes those exact references. History marks a review CURRENT only when both hashes and exact references match the current project; otherwise it remains STALE. An earlier review for a context that is later restored byte-for-byte is again a matching exact-context review. No automatic “latest” lookup or upgrade is used.
 
+HF1 reads exact Profile/Recipe context and Storyboard target within one SQLite read transaction for `/target/read`. `/review/history` includes candidate review rows and CURRENT/STALE derivation in that same transaction. The diagnostic and registered Stage Gate both use `resolveGate`, which reads context, target and review rows in one transaction. Decision writes retain their original transactional freshness check. Missing or inconsistent exact Profile/Recipe context returns `SUPERVISOR_CONTEXT_UNAVAILABLE`.
+
 ## API
 
 All endpoints require normal application authentication, use POST under `/api/supervisor`, and take the current numeric project and script IDs plus the registered `reviewKey`. Clients cannot provide a target snapshot, reviewer identity or review source.

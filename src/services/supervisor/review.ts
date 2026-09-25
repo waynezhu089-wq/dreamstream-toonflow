@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Knex } from "knex";
 import u from "@/utils";
 import { resolveProfile } from "@/services/orchestrator/profileRegistry";
-import { versionNumber } from "@/services/orchestrator/profileDefinition";
+import { ProfileError, versionNumber } from "@/services/orchestrator/profileDefinition";
 import { recipeHash, validateRecipeDefinition } from "@/services/recipeContract";
 import { canonicalJson, decisionSchema, scopeSchema, sha256, SupervisorError } from "./contract";
 import { readTarget, reviewDefinition, reviewForGate } from "./registry";
@@ -18,7 +18,12 @@ async function current(q: Query, input: { projectId: number; scriptId: number; r
   const { projectId, scriptId, reviewKey } = input;
   if (!await q("o_project").where({ id: projectId }).first() || !await q("o_script").where({ id: scriptId, projectId }).first()) throw new SupervisorError("SUPERVISOR_SCOPE_INVALID", "制作单元不存在或不属于当前项目", 404);
   const definition = reviewDefinition(reviewKey);
-  const resolved = await resolveProfile({ projectId }, q);
+  let resolved: Awaited<ReturnType<typeof resolveProfile>>;
+  try { resolved = await resolveProfile({ projectId }, q); }
+  catch (error) {
+    if (error instanceof ProfileError || error instanceof SyntaxError) throw new SupervisorError("SUPERVISOR_CONTEXT_UNAVAILABLE", "项目精确 Profile 上下文不存在或不一致", 409);
+    throw error;
+  }
   if (!resolved.managed) throw new SupervisorError("SUPERVISOR_CONTEXT_UNAVAILABLE", "当前项目没有可审核的精确 Profile", 409);
   const profile = { profileKey: resolved.profileKey, profileVersion: resolved.version };
   const binding = await q("o_projectRecipeBinding").where({ projectId }).first();
@@ -46,13 +51,19 @@ async function rows(q: Query, ids: { projectId: number; scriptId: number; review
   return q("o_supervisorReview").where(ids).orderBy("createdAt", "desc").orderBy("reviewId", "desc");
 }
 export async function targetRead(input: unknown) {
-  const state = await current(db(), scope(input));
-  return { review: state.definition, target: state.target, profile: state.profile, recipe: state.recipe, controlContextHash: state.controlContextHash };
+  const ids = scope(input);
+  return db().transaction(async trx => {
+    const state = await current(trx, ids);
+    return { review: state.definition, target: state.target, profile: state.profile, recipe: state.recipe, controlContextHash: state.controlContextHash };
+  });
 }
 export async function reviewHistory(input: unknown) {
-  const ids = scope(input), state = await current(db(), ids);
-  return { review: state.definition, target: state.target, profile: state.profile, recipe: state.recipe, controlContextHash: state.controlContextHash,
-    history: (await rows(db(), ids)).map(row => view(row, state)) };
+  const ids = scope(input);
+  return db().transaction(async trx => {
+    const state = await current(trx, ids);
+    return { review: state.definition, target: state.target, profile: state.profile, recipe: state.recipe, controlContextHash: state.controlContextHash,
+      history: (await rows(trx, ids)).map(row => view(row, state)) };
+  });
 }
 export async function decide(input: unknown, actor: unknown) {
   const parsed = decisionSchema.safeParse(input);
@@ -82,15 +93,18 @@ export async function decide(input: unknown, actor: unknown) {
   }
 }
 export async function resolveGate(input: unknown, expectedProfile?: { profileKey: string; profileVersion: string }) {
-  const ids = scope(input), state = await current(db(), ids);
-  if (expectedProfile && (expectedProfile.profileKey !== state.profile.profileKey || expectedProfile.profileVersion !== state.profile.profileVersion)) throw new SupervisorError("SUPERVISOR_CONTEXT_CHANGED", "Stage Profile 与当前项目上下文不一致", 409);
-  const history = (await rows(db(), ids)).map(row => view(row, state));
-  const effective = history.find(row => row.status === "CURRENT" && row.source === "HUMAN" && ["PASS", "REVISE"].includes(row.decision)) ?? null;
-  const base = { targetHash: state.target.targetHash, controlContextHash: state.controlContextHash, reviewKey: ids.reviewKey, effectiveDecision: effective?.decision ?? null, reviewId: effective?.reviewId ?? null, staleCount: history.filter(row => row.status === "STALE").length };
-  if (!effective) return { ...base, pass: false, code: "SUPERVISOR_REVIEW_REQUIRED", reason: "当前分镜尚未经过人工审核" };
-  if (effective.decision === "PASS") return { ...base, pass: true, code: "SUPERVISOR_PASS", reason: null };
-  const blockers = effective.issues.filter((issue: any) => issue.severity === "BLOCKER").map((issue: any) => issue.message);
-  return { ...base, pass: false, code: "SUPERVISOR_REVISE_REQUIRED", reason: blockers.join("；") || effective.summary };
+  const ids = scope(input);
+  return db().transaction(async trx => {
+    const state = await current(trx, ids);
+    if (expectedProfile && (expectedProfile.profileKey !== state.profile.profileKey || expectedProfile.profileVersion !== state.profile.profileVersion)) throw new SupervisorError("SUPERVISOR_CONTEXT_CHANGED", "Stage Profile 与当前项目上下文不一致", 409);
+    const history = (await rows(trx, ids)).map(row => view(row, state));
+    const effective = history.find(row => row.status === "CURRENT" && row.source === "HUMAN" && ["PASS", "REVISE"].includes(row.decision)) ?? null;
+    const base = { targetHash: state.target.targetHash, controlContextHash: state.controlContextHash, reviewKey: ids.reviewKey, effectiveDecision: effective?.decision ?? null, reviewId: effective?.reviewId ?? null, staleCount: history.filter(row => row.status === "STALE").length };
+    if (!effective) return { ...base, pass: false, code: "SUPERVISOR_REVIEW_REQUIRED", reason: "当前分镜尚未经过人工审核" };
+    if (effective.decision === "PASS") return { ...base, pass: true, code: "SUPERVISOR_PASS", reason: null };
+    const blockers = effective.issues.filter((issue: any) => issue.severity === "BLOCKER").map((issue: any) => issue.message);
+    return { ...base, pass: false, code: "SUPERVISOR_REVISE_REQUIRED", reason: blockers.join("；") || effective.summary };
+  });
 }
 export async function gateCheck(input: unknown) {
   const ids = scope(input), definition = reviewDefinition(ids.reviewKey);

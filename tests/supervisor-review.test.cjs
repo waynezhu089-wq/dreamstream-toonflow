@@ -175,3 +175,38 @@ test('registry fails closed for an unregistered adapter and snapshot sorts index
   f.load('services/supervisor/registry').registerReview({ reviewKey: 'test.missing-adapter', displayName: 'Missing', targetAdapterKey: 'not.registered', humanDecisions: ['PASS','REVISE'], gateKey: 'test.missing-gate' });
   assert.equal((await f.post('target/read', { ...f.input, reviewKey: 'test.missing-adapter' }, 503)).reason, 'SUPERVISOR_TARGET_ADAPTER_NOT_REGISTERED');
 });
+
+test('HF1 target, history, diagnostic Gate and Stage Gate read only inside their own transaction', async t => {
+  const f = await setup(t); await f.addStoryboard();
+  const initial = await f.post('target/read', f.input);
+  await f.post('review/decide', decision(f.input, initial));
+  let readTransactions = 0;
+  const originalDb = f.utils.db;
+  f.utils.db = new Proxy(originalDb, {
+    apply() { throw new Error('NON_TRANSACTIONAL_SUPERVISOR_READ'); },
+    get(target, key) {
+      if (key === 'transaction') return callback => { readTransactions++; return target.transaction(callback); };
+      return Reflect.get(target, key);
+    },
+  });
+  try {
+    const target = await f.post('target/read', f.input);
+    const history = await f.post('review/history', f.input);
+    const diagnostic = await f.post('gate/check', f.input);
+    const stage = await f.gateRegistry.checkGate('supervisor.storyboard-approved', { projectId: 1, scriptId: 10, profileKey: 'advertisement', profileVersion: 'v1', stageKey: 'supervisor-review' });
+    assert.equal(target.target.targetHash, initial.target.targetHash);
+    assert.equal(history.history[0].status, 'CURRENT');
+    assert.equal(diagnostic.code, 'SUPERVISOR_PASS');
+    assert.deepEqual(stage, diagnostic);
+    assert.equal(readTransactions, 4, 'each read request must use one transaction for context, target and candidate rows');
+  } finally { f.utils.db = originalDb; }
+});
+
+test('HF1 missing exact Profile produces stable context error on read and Gate', async t => {
+  const f = await setup(t); await f.addStoryboard();
+  await f.load('services/orchestrator/profileRegistry').adoptLegacy({ projectId: 1 });
+  await f.db('o_projectProfileBinding').where({ projectId: 1 }).update({ profileVersion: 999 });
+  assert.equal((await f.post('target/read', f.input, 409)).reason, 'SUPERVISOR_CONTEXT_UNAVAILABLE');
+  assert.equal((await f.post('review/history', f.input, 409)).reason, 'SUPERVISOR_CONTEXT_UNAVAILABLE');
+  assert.equal((await f.post('gate/check', f.input)).code, 'SUPERVISOR_CONTEXT_UNAVAILABLE');
+});
