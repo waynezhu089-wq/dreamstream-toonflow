@@ -110,13 +110,14 @@ export async function resolveProfile(input: unknown, q: Knex | Knex.Transaction 
 export async function bindProfile(input: unknown) {
   const value = parse(z.object({ projectId: z.number().int().positive(), profileKey: profileKeySchema, version: z.string(), source: sourceSchema.optional() }).strict(), input);
   const version = versionNumber(value.version), source = value.source ?? "MANUAL";
-  if (source !== "MANUAL") throw new ProfileError("PROFILE_SCOPE_INVALID", "001A 只允许人工绑定；Recipe 尚未启用");
+  if (source !== "MANUAL") throw new ProfileError("PROFILE_SCOPE_INVALID", "Recipe Profile 对齐只能通过 Recipe bind 事务完成");
   return db().transaction(async trx => {
     if (!await trx("o_project").where({ id: value.projectId }).first()) throw new ProfileError("PROFILE_SCOPE_INVALID", "项目不存在", 404);
     const target = await exact(trx, value.profileKey, version);
-    if (target.status !== "ACTIVE") throw new ProfileError("PROFILE_VERSION_NOT_ACTIVE", "新项目只能绑定 Active Profile Version", 409);
     const previous = await trx("o_projectProfileBinding").where({ projectId: value.projectId }).first();
     if (previous?.profileKey === value.profileKey && Number(previous.profileVersion) === version) return resolveProfile({ projectId: value.projectId }, trx);
+    if (target.status !== "ACTIVE") throw new ProfileError("PROFILE_VERSION_NOT_ACTIVE", "新项目只能绑定 Active Profile Version", 409);
+    if (await trx.schema.hasTable("o_projectRecipeBinding") && await trx("o_projectRecipeBinding").where({ projectId: value.projectId }).first()) throw new ProfileError("PROFILE_BINDING_LOCKED_BY_RECIPE", "请先移除当前 Recipe 绑定，再更换 Profile", 409);
     if (await trx("o_stageRun").where({ projectId: value.projectId }).first()) throw new ProfileError("PROFILE_BINDING_LOCKED", "已有 Stage 记录，不能直接更换 Profile", 409);
     const now = Date.now();
     await trx("o_projectProfileBinding").insert({ projectId: value.projectId, profileKey: value.profileKey, profileVersion: version, source, createdAt: now, updatedAt: now }).onConflict("projectId").merge({ profileKey: value.profileKey, profileVersion: version, source, updatedAt: now });

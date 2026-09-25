@@ -42,7 +42,8 @@
     "test:storyboard-production": "node --test tests/storyboard-production.test.cjs",
     "test:composite": "node --test tests/composite-attempt.test.cjs",
     "test:capabilities": "node --test tests/capability-registry.test.cjs",
-    "test:production-profiles": "node --test tests/production-profiles.test.cjs"
+    "test:production-profiles": "node --test tests/production-profiles.test.cjs",
+    "test:recipes": "node --test tests/recipe-registry.test.cjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.35",

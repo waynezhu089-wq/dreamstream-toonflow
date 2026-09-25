@@ -168,18 +168,17 @@ test('additive schema, family, Draft V1, Active V1 immutability, Draft V2, Activ
  await assert.rejects(f.registry.loadSkill(id,'v3'),e=>e.code==='SKILL_VERSION_NOT_FOUND');
 });
 
-test('canonical bindings resolve SHOT > STAGE > PROJECT > RECIPE > PROFILE > SYSTEM; overrides accumulate low to high',async t=>{
+test('canonical non-Recipe bindings resolve SHOT > STAGE > PROJECT > PROFILE > SYSTEM; overrides accumulate low to high',async t=>{
  const f=await setup(t),id=await f.active();const shot=await f.create({productionMode:'AI_TEXT_TO_IMAGE',primaryAssetId:null,associateAssetsIds:[]});
- const context={projectId:1,scriptId:10,storyboardId:shot.id,profileKey:'advertisement',recipeKey:'product'};
- const keys=[['SYSTEM','system'],['PROFILE','profile:advertisement'],['RECIPE','recipe:product'],['PROJECT','project:1'],['STAGE','project:1:script:10:stage:image-prompt'],['SHOT',`project:1:script:10:storyboard:${shot.id}`]];
+ const context={projectId:1,scriptId:10,storyboardId:shot.id,profileKey:'advertisement'};
+ const keys=[['SYSTEM','system'],['PROFILE','profile:advertisement'],['PROJECT','project:1'],['STAGE','project:1:script:10:stage:image-prompt'],['SHOT',`project:1:script:10:storyboard:${shot.id}`]];
  for(const [scopeType,scopeKey] of keys){await f.registry.saveBinding({scopeType,scopeKey,skillType:'IMAGE_PROMPT',skillId:id,skillVersion:'v1',overrideText:`${scopeType} override`});const r=await f.registry.resolveSkill({...context,skillType:'IMAGE_PROMPT'});assert.equal(r.resolvedFrom.scopeType,scopeType);}
  const resolved=await f.registry.resolveSkill({...context,skillType:'IMAGE_PROMPT'});
- assert.deepEqual(resolved.overrideChain.map(x=>x.scopeType),keys.map(x=>x[0]));assert.equal(resolved.resolutionTrace.length,6);assert.equal(resolved.resolutionTrace.at(-1).selected,true);
+ assert.deepEqual(resolved.overrideChain.map(x=>x.scopeType),keys.map(x=>x[0]));assert.equal(resolved.resolutionTrace.length,5);assert.equal(resolved.resolutionTrace.at(-1).selected,true);
  await f.registry.saveBinding({scopeType:'SHOT',scopeKey:keys.at(-1)[1],skillType:'IMAGE_PROMPT',skillId:null,skillVersion:null,overrideText:'Shot only bright and natural'});
  const inherited=await f.registry.resolveSkill({...context,skillType:'IMAGE_PROMPT'});assert.equal(inherited.resolvedFrom.scopeType,'STAGE');assert.equal(inherited.overrideChain.at(-1).text,'Shot only bright and natural');
- await f.registry.removeBinding({scopeType:'STAGE',scopeKey:keys[4][1],skillType:'IMAGE_PROMPT'});assert.equal((await f.registry.resolveSkill({...context,skillType:'IMAGE_PROMPT'})).resolvedFrom.scopeType,'PROJECT');
- await f.registry.removeBinding({scopeType:'PROJECT',scopeKey:'project:1',skillType:'IMAGE_PROMPT'});assert.equal((await f.registry.resolveSkill({...context,skillType:'IMAGE_PROMPT'})).resolvedFrom.scopeType,'RECIPE');
- await f.registry.removeBinding({scopeType:'RECIPE',scopeKey:'recipe:product',skillType:'IMAGE_PROMPT'});assert.equal((await f.registry.resolveSkill({...context,skillType:'IMAGE_PROMPT'})).resolvedFrom.scopeType,'PROFILE');
+ await f.registry.removeBinding({scopeType:'STAGE',scopeKey:keys[3][1],skillType:'IMAGE_PROMPT'});assert.equal((await f.registry.resolveSkill({...context,skillType:'IMAGE_PROMPT'})).resolvedFrom.scopeType,'PROJECT');
+ await f.registry.removeBinding({scopeType:'PROJECT',scopeKey:'project:1',skillType:'IMAGE_PROMPT'});assert.equal((await f.registry.resolveSkill({...context,skillType:'IMAGE_PROMPT'})).resolvedFrom.scopeType,'PROFILE');
  await f.registry.removeBinding({scopeType:'PROFILE',scopeKey:'profile:advertisement',skillType:'IMAGE_PROMPT'});assert.equal((await f.registry.resolveSkill({...context,skillType:'IMAGE_PROMPT'})).resolvedFrom.scopeType,'SYSTEM');
 });
 

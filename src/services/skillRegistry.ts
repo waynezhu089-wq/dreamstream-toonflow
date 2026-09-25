@@ -2,12 +2,14 @@ import type { Knex } from "knex";
 import { z } from "zod";
 import u from "@/utils";
 import { canonicalScopeKey, definitionHash, emptyTemplate, renderRuntimeInstruction, scopeTypeSchema, SkillError, skillIdSchema, skillTypeSchema, sourceHash, templateFor, validateContent, versionLabel, versionNumber, type ScopeType, type SkillType } from "./skillContract";
+import { recipeKeySchema, RecipeError, recipeVersionNumber } from "./recipeContract";
+import { resolveExactRecipeSkill } from "./recipeRegistry";
 
 const db = () => u.db as Knex;
 const positive = z.number().int().positive();
 const familyInput = z.object({ skillId: skillIdSchema, displayName: z.string().trim().min(1).max(256), skillType: skillTypeSchema, description: z.string().trim().max(4000).default(""), tags: z.array(z.string().trim().min(1).max(100)).max(50).default([]) }).strict();
 const bindingInput = z.object({ scopeType: scopeTypeSchema, scopeKey: z.string(), skillType: skillTypeSchema, skillId: skillIdSchema.nullable(), skillVersion: z.string().nullable(), overrideText: z.string().trim().max(4000).nullable() }).strict();
-const contextInput = z.object({ projectId: positive, scriptId: positive, storyboardId: positive, profileKey: z.string().regex(/^[a-z][a-z0-9_-]*$/).optional(), recipeKey: z.string().regex(/^[a-z][a-z0-9_-]*$/).optional() }).strict();
+const contextInput = z.object({ projectId: positive, scriptId: positive, storyboardId: positive, profileKey: z.string().regex(/^[a-z][a-z0-9_-]*$/).optional(), recipeKey: recipeKeySchema.optional(), recipeVersion: z.string().optional() }).strict();
 export type ResolveContext = z.infer<typeof contextInput>;
 
 function parseJson(value: string) { return JSON.parse(value); }
@@ -133,6 +135,7 @@ async function assertScope(q: Knex | Knex.Transaction, type: ScopeType, key: str
 }
 export async function saveBinding(input: unknown) {
   const value = bindingInput.parse(input);
+  if (value.scopeType === "RECIPE") throw new SkillError("SKILL_BINDING_INVALID", "Recipe Skill 推荐请在 Recipe Draft 中编辑，不允许直接写绑定", 409);
   if ((value.skillId === null) !== (value.skillVersion === null) || (!value.skillId && !value.overrideText)) throw new SkillError("SKILL_BINDING_INVALID", "需要完整 Skill ID + Version，或填写 Override");
   if (value.skillVersion !== null) versionNumber(value.skillVersion);
   return db().transaction(async trx => {
@@ -152,6 +155,7 @@ export async function saveBinding(input: unknown) {
 }
 export async function removeBinding(input: { scopeType: ScopeType; scopeKey: string; skillType: SkillType }) {
   const type = scopeTypeSchema.parse(input.scopeType), skillType = skillTypeSchema.parse(input.skillType), key = canonicalScopeKey(type, input.scopeKey);
+  if (type === "RECIPE") throw new SkillError("SKILL_BINDING_INVALID", "Recipe Skill 绑定由 Recipe Version 管理", 409);
   await assertScope(db(), type, key);
   await db()("o_skillBinding").where({ scopeType: type, scopeKey: key, skillType }).delete();
   return { removed: true };
@@ -170,10 +174,21 @@ export async function listBindings(input: { scopeType?: ScopeType; scopeKey?: st
 
 export async function resolveSkill(input: ResolveContext & { skillType: SkillType }) {
   const { skillType, ...scope } = z.object({ ...contextInput.shape, skillType: skillTypeSchema }).strict().parse(input);
+  if (Boolean(scope.recipeKey) !== Boolean(scope.recipeVersion)) throw new SkillError("SKILL_RECIPE_CONTEXT_MISMATCH", "Recipe Key 与精确版本必须同时提供", 409);
+  let recipeRef: { skillId: string; skillVersion: string } | null = null;
+  if (scope.recipeKey && scope.recipeVersion) {
+    try {
+      recipeVersionNumber(scope.recipeVersion);
+      recipeRef = await resolveExactRecipeSkill(db(), scope.projectId, scope.recipeKey, scope.recipeVersion, skillType);
+    } catch (error) {
+      if (error instanceof RecipeError) throw new SkillError("SKILL_RECIPE_CONTEXT_MISMATCH", error.message, 409);
+      throw error;
+    }
+  }
   const keys: { scopeType: ScopeType; scopeKey: string }[] = [
     { scopeType: "SYSTEM", scopeKey: "system" },
     ...(scope.profileKey ? [{ scopeType: "PROFILE" as const, scopeKey: `profile:${scope.profileKey}` }] : []),
-    ...(scope.recipeKey ? [{ scopeType: "RECIPE" as const, scopeKey: `recipe:${scope.recipeKey}` }] : []),
+    ...(scope.recipeKey ? [{ scopeType: "RECIPE" as const, scopeKey: `recipe:${scope.recipeKey}@${scope.recipeVersion}` }] : []),
     { scopeType: "PROJECT", scopeKey: `project:${scope.projectId}` },
     { scopeType: "STAGE", scopeKey: `project:${scope.projectId}:script:${scope.scriptId}:stage:${skillType === "IMAGE_PROMPT" ? "image-prompt" : skillType.toLowerCase().replaceAll("_", "-")}` },
     { scopeType: "SHOT", scopeKey: `project:${scope.projectId}:script:${scope.scriptId}:storyboard:${scope.storyboardId}` },
@@ -181,7 +196,7 @@ export async function resolveSkill(input: ResolveContext & { skillType: SkillTyp
   await assertScope(db(), "SHOT", keys.at(-1)!.scopeKey);
   const bindings = await db()("o_skillBinding").where({ skillType }).whereIn("scopeKey", keys.map(k => k.scopeKey));
   const trace = keys.map(({ scopeType, scopeKey }) => {
-    const row = bindings.find(b => b.scopeType === scopeType && b.scopeKey === scopeKey);
+    const row = scopeType === "RECIPE" ? (recipeRef ? { skillId: recipeRef.skillId, skillVersion: recipeVersionNumber(recipeRef.skillVersion), overrideText: null } : null) : bindings.find(b => b.scopeType === scopeType && b.scopeKey === scopeKey);
     return { scopeType, scopeKey, kind: !row ? "NONE" : row.skillId ? "EXACT_SKILL" : "OVERRIDE_ONLY", skillId: row?.skillId ?? null, skillVersion: row?.skillVersion == null ? null : versionLabel(Number(row.skillVersion)), overrideText: row?.overrideText ?? null };
   });
   const selected = [...trace].reverse().find(item => item.skillId && item.skillVersion);
