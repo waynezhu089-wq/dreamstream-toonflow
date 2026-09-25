@@ -3,6 +3,7 @@ import { z } from "zod";
 import { success } from "@/lib/responseFormat";
 import { SupervisorError } from "@/services/supervisor/contract";
 import { decide, gateCheck, reviewHistory, targetRead } from "@/services/supervisor/review";
+import { aiContext, reviewAi } from "@/services/supervisor/aiReview";
 
 const router = express.Router();
 function route(path: string, action: (body: unknown, user: unknown) => Promise<unknown>) {
@@ -18,5 +19,7 @@ function route(path: string, action: (body: unknown, user: unknown) => Promise<u
 route("/target/read", body => targetRead(body));
 route("/review/history", body => reviewHistory(body));
 route("/review/decide", (body, user) => decide(body, user));
+route("/ai/context", body => aiContext(body));
+route("/review/ai", body => reviewAi(body));
 route("/gate/check", body => gateCheck(body));
 export default router;

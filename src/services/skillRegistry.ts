@@ -4,6 +4,7 @@ import u from "@/utils";
 import { canonicalScopeKey, definitionHash, emptyTemplate, renderRuntimeInstruction, scopeTypeSchema, SkillError, skillIdSchema, skillTypeSchema, sourceHash, templateFor, validateContent, versionLabel, versionNumber, type ScopeType, type SkillType } from "./skillContract";
 import { recipeKeySchema, RecipeError, recipeVersionNumber } from "./recipeContract";
 import { resolveExactRecipeSkill } from "./recipeRegistry";
+import { resolveProfile } from "./orchestrator/profileRegistry";
 
 const db = () => u.db as Knex;
 const positive = z.number().int().positive();
@@ -204,6 +205,41 @@ export async function resolveSkill(input: ResolveContext & { skillType: SkillTyp
   const loaded = await loadSkill(selected.skillId!, selected.skillVersion!);
   const overrideChain = trace.filter(item => item.overrideText).map(item => ({ scopeType: item.scopeType, scopeKey: item.scopeKey, text: item.overrideText! }));
   return { ...loaded, resolvedFrom: { scopeType: selected.scopeType, scopeKey: selected.scopeKey }, overrideChain,
+    resolutionTrace: trace.map(item => ({ ...item, selected: item === selected, reason: item === selected ? "最高优先级的精确 Skill 绑定" : item.kind === "OVERRIDE_ONLY" ? "仅叠加局部 Override" : item.kind === "EXACT_SKILL" ? "被更高优先级精确绑定覆盖" : "此 Scope 无绑定" })) };
+}
+
+// Stage-level resolution is deliberately independent of the shot resolver: its
+// context is obtained from the persisted control plane inside the caller's read
+// transaction, and it never considers SHOT bindings.
+export async function resolveStageSkill(q: Knex | Knex.Transaction, input: { projectId: number; scriptId: number; stageKey: string; skillType: SkillType }) {
+  const { projectId, scriptId, stageKey, skillType } = input;
+  if (!await q("o_script").where({ id: scriptId, projectId }).first()) throw new SkillError("SKILL_BINDING_INVALID", "制作单元不属于当前项目", 404);
+  const profile = await resolveProfile({ projectId }, q);
+  if (!profile.managed || !profile.definition.stages.some(stage => stage.stageKey === stageKey)) throw new SkillError("SUPERVISOR_STAGE_NOT_AVAILABLE", "当前精确 Profile 没有此审核工序", 409);
+  const recipeBinding = await q("o_projectRecipeBinding").where({ projectId }).first();
+  const recipeRef = recipeBinding ? await resolveExactRecipeSkill(q, projectId, recipeBinding.recipeKey, `v${recipeBinding.recipeVersion}`, skillType) : null;
+  const keys: { scopeType: ScopeType; scopeKey: string }[] = [
+    { scopeType: "SYSTEM", scopeKey: "system" },
+    { scopeType: "PROFILE", scopeKey: `profile:${profile.profileKey}` },
+    ...(recipeBinding ? [{ scopeType: "RECIPE" as const, scopeKey: `recipe:${recipeBinding.recipeKey}` }] : []),
+    { scopeType: "PROJECT", scopeKey: `project:${projectId}` },
+    { scopeType: "STAGE", scopeKey: `project:${projectId}:script:${scriptId}:stage:${stageKey}` },
+  ];
+  const bindings = await q("o_skillBinding").where({ skillType }).whereIn("scopeKey", keys.map(key => key.scopeKey));
+  const trace = keys.map(({ scopeType, scopeKey }) => {
+    const row = scopeType === "RECIPE" ? recipeRef ? { skillId: recipeRef.skillId, skillVersion: versionNumber(recipeRef.skillVersion), overrideText: null } : null : bindings.find(binding => binding.scopeType === scopeType && binding.scopeKey === scopeKey);
+    return { scopeType, scopeKey, kind: !row ? "NONE" : row.skillId ? "EXACT_SKILL" : "OVERRIDE_ONLY", skillId: row?.skillId ?? null, skillVersion: row?.skillVersion == null ? null : versionLabel(Number(row.skillVersion)), overrideText: row?.overrideText ?? null };
+  });
+  const selected = [...trace].reverse().find(item => item.skillId && item.skillVersion);
+  if (!selected) throw new SkillError("SUPERVISOR_SKILL_NOT_RESOLVED", "当前工序尚未绑定可用的 Supervisor Skill", 409);
+  const family = await requireFamily(q, selected.skillId!);
+  const version = await requireVersion(q, selected.skillId!, selected.skillVersion!);
+  if (family.skillType !== skillType || version.status === "DRAFT") throw new SkillError("SUPERVISOR_SKILL_NOT_RESOLVED", "Supervisor Skill 类型或版本不可用于生产", 409);
+  const content = validateContent(family.skillType, version.templateId, parseJson(version.content));
+  if (definitionHash(version.templateId, content) !== version.definitionHash) throw new SkillError("SUPERVISOR_SKILL_NOT_RESOLVED", "Supervisor Skill 定义校验失败", 409);
+  const overrideChain = trace.filter(item => item.overrideText).map(item => ({ scopeType: item.scopeType, scopeKey: item.scopeKey, text: item.overrideText! }));
+  return { skillId: selected.skillId!, skillVersion: selected.skillVersion!, skillStatus: version.status, skillType, definitionHash: version.definitionHash,
+    runtimeInstruction: renderRuntimeInstruction(skillType, content), resolvedFrom: { scopeType: selected.scopeType, scopeKey: selected.scopeKey }, overrideChain,
     resolutionTrace: trace.map(item => ({ ...item, selected: item === selected, reason: item === selected ? "最高优先级的精确 Skill 绑定" : item.kind === "OVERRIDE_ONLY" ? "仅叠加局部 Override" : item.kind === "EXACT_SKILL" ? "被更高优先级精确绑定覆盖" : "此 Scope 无绑定" })) };
 }
 

@@ -196,6 +196,22 @@ class AiText {
     ];
     return mws.length > 0 ? wrapLanguageModel({ model: baseModel, middleware: mws.length === 1 ? mws[0] : mws }) : baseModel;
   }
+  // Pin the actual provider/model and deployment parameters for an entire
+  // structured review, including its optional repair attempt.
+  async trackedSession() {
+    const modelReference = await resolveModelName(this.AiType);
+    const config = await getModelConfig(this.AiType);
+    const sdkFn = await getVendorTemplateFn("textRequest", modelReference);
+    const model = await sdkFn(this.think, this.thinkLevel);
+    return {
+      modelReference,
+      invoke: (input: Omit<Parameters<typeof generateText>[0], "model">) => generateText({
+        ...input, model,
+        ...(config?.temperature && { temperature: config.temperature }),
+        ...(config?.maxOutputTokens && { maxOutputTokens: config.maxOutputTokens }),
+      } as Parameters<typeof generateText>[0]),
+    };
+  }
   async invoke(input: Omit<Parameters<typeof generateText>[0], "model">) {
     const config = await getModelConfig(this.AiType);
 

@@ -4,7 +4,7 @@ import { SupervisorError, canonicalJson, sha256 } from "./contract";
 type Query = Knex | Knex.Transaction;
 export type Target = { targetAdapterKey: string; targetType: string; targetHash: string; summary: string; snapshot: unknown };
 type TargetAdapter = (q: Query, projectId: number, scriptId: number) => Promise<Target>;
-export type ReviewDefinition = { reviewKey: string; displayName: string; targetAdapterKey: string; humanDecisions: readonly ["PASS", "REVISE"]; gateKey: string };
+export type ReviewDefinition = { reviewKey: string; displayName: string; targetAdapterKey: string; humanDecisions: readonly ["PASS", "REVISE"]; aiDecisions?: readonly ["PASS", "REVISE", "HUMAN_CONFIRM"]; supervisorSkillType?: "SUPERVISOR"; supervisorSkillStageKey?: string; gateKey: string };
 const reviews = new Map<string, ReviewDefinition>();
 const targets = new Map<string, TargetAdapter>();
 export function registerReview(definition: ReviewDefinition) { reviews.set(definition.reviewKey, Object.freeze(definition)); }
@@ -53,4 +53,4 @@ registerTarget("storyboard.semantic.v1", async (q, projectId, scriptId) => {
   if (Buffer.byteLength(encoded, "utf8") > MAX_SNAPSHOT_BYTES) throw new SupervisorError("SUPERVISOR_TARGET_UNAVAILABLE", "分镜审核快照过大", 503);
   return { targetAdapterKey: "storyboard.semantic.v1", targetType: "STORYBOARD_SEMANTIC", targetHash: sha256(snapshot), summary: `${snapshot.length} 个分镜`, snapshot };
 });
-registerReview({ reviewKey: "storyboard.semantic-approval", displayName: "Storyboard Semantic Approval", targetAdapterKey: "storyboard.semantic.v1", humanDecisions: ["PASS", "REVISE"], gateKey: "supervisor.storyboard-approved" });
+registerReview({ reviewKey: "storyboard.semantic-approval", displayName: "Storyboard Semantic Approval", targetAdapterKey: "storyboard.semantic.v1", humanDecisions: ["PASS", "REVISE"], aiDecisions: ["PASS", "REVISE", "HUMAN_CONFIRM"], supervisorSkillType: "SUPERVISOR", supervisorSkillStageKey: "supervisor-review", gateKey: "supervisor.storyboard-approved" });
