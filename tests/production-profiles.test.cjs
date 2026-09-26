@@ -29,6 +29,38 @@ const mini = (overrides = {}) => ({ schemaVersion: 1, initialStageKey: 'a', stag
   { stageKey: 'c', displayName: 'C', description: '', required: true, allowSkip: false, uiOrder: 30, entryGateKey: null, exitGateKey: null },
 ], transitions: [{ fromStageKey: 'a', toStageKey: 'b' }, { fromStageKey: 'b', toStageKey: 'c' }], ...overrides });
 
+// Serialized by the pre-D-A V1 schema (52c790a), with its separately captured
+// SHA-256. Keep both literal: deriving the expected hash from today's parser
+// would repeat the regression that missed historical persisted rows.
+const historicalV1 = '{"schemaVersion":1,"initialStageKey":"brief","stages":[{"stageKey":"brief","displayName":"Brief","description":"","required":true,"allowSkip":false,"uiOrder":10,"entryGateKey":null,"exitGateKey":null},{"stageKey":"image-production","displayName":"Image Production","description":"","required":true,"allowSkip":false,"uiOrder":20,"entryGateKey":null,"exitGateKey":null}],"transitions":[{"fromStageKey":"brief","toStageKey":"image-production"}]}';
+const historicalV1Hash = '4da67969f20a017f11aa8f3c386a7c354e82a58956873121507cc8fcbf3669d8';
+
+test('pre-D-A serialized V1 hash and persisted advertisement v1/v2 rows remain byte-compatible', async t => {
+  const f = await setup(t);
+  const parsed = f.definition.validateDefinition(JSON.parse(historicalV1));
+  assert.equal(JSON.stringify(parsed), historicalV1);
+  assert.equal(f.definition.definitionHash(parsed), historicalV1Hash);
+
+  // Simulate existing SQLite rows. Never call a migration or recompute their
+  // definitionHash after insertion; exact reads must honor stored provenance.
+  const now = Date.now();
+  await f.db('o_productionProfileVersion').where({ profileKey: 'advertisement', version: 1 })
+    .update({ status: 'DEPRECATED', definition: historicalV1, definitionHash: historicalV1Hash });
+  await f.db('o_productionProfileVersion').insert({ profileKey: 'advertisement', version: 2, status: 'ACTIVE',
+    definition: historicalV1, definitionHash: historicalV1Hash, createdAt: now, updatedAt: now, activatedAt: now, deprecatedAt: null });
+  const before = await f.db('o_productionProfileVersion').where({ profileKey: 'advertisement' }).orderBy('version').select('version', 'definition', 'definitionHash');
+  for (const version of ['v1', 'v2']) {
+    const exact = await f.registry.getProfile({ profileKey: 'advertisement', version });
+    assert.equal(exact.versions[0].version, version);
+    assert.equal(exact.versions[0].definition.schemaVersion, 1);
+  }
+  assert.equal((await f.registry.resolveProfile({ projectId: 1 })).version, 'v1');
+  const bound = await f.registry.bindProfile({ projectId: 1, profileKey: 'advertisement', version: 'v2' });
+  assert.equal(bound.version, 'v2');
+  assert.equal((await f.registry.resolveProfile({ projectId: 1 })).version, 'v2');
+  assert.deepEqual(await f.db('o_productionProfileVersion').where({ profileKey: 'advertisement' }).orderBy('version').select('version', 'definition', 'definitionHash'), before);
+});
+
 test('bootstrap is idempotent and preserves exact frozen advertisement v1', async t => {
   const f = await setup(t), first = await f.registry.getProfile({ profileKey: 'advertisement', version: 'v1' });
   assert.equal(first.versions[0].status, 'ACTIVE');

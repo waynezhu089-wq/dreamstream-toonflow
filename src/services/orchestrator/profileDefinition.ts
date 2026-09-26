@@ -39,8 +39,11 @@ const commonDefinition = {
 };
 const legacyDefinitionSchema = z.object({
   schemaVersion: z.literal(1),
-  ...commonDefinition,
+  // V1 parser output order is part of its persisted JSON.stringify hash.
+  // Keep the pre-D-A order byte-compatible with existing exact versions.
+  initialStageKey: stageKeySchema,
   stages: z.array(stageSchema).min(1).max(200),
+  transitions: z.array(transitionSchema).max(1000),
 }).strict();
 const enforcedDefinitionSchema = z.object({
   schemaVersion: z.literal(2),

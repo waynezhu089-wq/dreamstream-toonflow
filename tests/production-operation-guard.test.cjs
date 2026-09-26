@@ -47,7 +47,10 @@ test('V1 hash/validation stays stable; V2 validates exact operation ownership', 
   const v1 = f.definition.advertisementV1;
   assert.equal(f.definition.definitionHash(v1), require('node:crypto').createHash('sha256').update(JSON.stringify(v1)).digest('hex'));
   assert.equal(f.definition.validateDefinition(v1).schemaVersion, 1);
-  assert.equal(f.definition.validateDefinition(enforced()).runtimeControl, 'ENFORCED');
+  const v2 = enforced();
+  assert.equal(f.definition.validateDefinition(v2).runtimeControl, 'ENFORCED');
+  assert.equal(f.definition.definitionHash(f.definition.validateDefinition(v2)),
+    f.definition.definitionHash(f.definition.validateDefinition({ transitions: v2.transitions, stages: v2.stages, initialStageKey: v2.initialStageKey, runtimeControl: v2.runtimeControl, schemaVersion: 2 })));
   for (const bad of [
     { ...enforced(), runtimeControl: undefined },
     { ...enforced(), stages: enforced().stages.map((s, i) => i === 0 ? { ...s, operationKeys: ['BAD'] } : s) },
