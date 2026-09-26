@@ -1,6 +1,8 @@
 import type { Express, RequestHandler } from "express";
 import u from "@/utils";
 import { assertProductionReady, gateFailure, productionId, ProductionGateError } from "@/services/advertisementGate";
+import { operationForProductionRoute } from "@/services/orchestrator/productionOperationRegistry";
+import { assertProductionOperationAllowed } from "@/services/orchestrator/productionOperationGuard";
 import workflowState from "@/routes/project/advertisement/getWorkflowState";
 import confirmAssets from "@/routes/project/advertisement/confirmAssetPreparation";
 
@@ -153,6 +155,11 @@ export const productionGate: RequestHandler = async (req, res, next) => {
     }
     for (const scope of scopes.values()) await assertProductionReady(scope.projectId, scope.scriptId);
     if (!scopes.size && requestedProject !== undefined) await assertProductionReady(requestedProject, requestedScript);
+    const operationKey = operationForProductionRoute(route);
+    if (operationKey) {
+      if (!scopes.size) throw new ProductionGateError("无法确定生产操作的当前制作单元", "PRODUCTION_CONTEXT_INVALID", 400);
+      for (const scope of scopes.values()) await assertProductionOperationAllowed(operationKey, scope);
+    }
     next();
   } catch (error) {
     const failure = gateFailure(error);

@@ -30,13 +30,25 @@ const stageSchema = z.object({
   entryGateKey: gateKeySchema.nullable(),
   exitGateKey: gateKeySchema.nullable(),
 }).strict();
+export const operationKeySchema = z.string().regex(/^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+$/).max(160);
+const enforcedStageSchema = stageSchema.extend({ operationKeys: z.array(operationKeySchema) }).strict();
 const transitionSchema = z.object({ fromStageKey: stageKeySchema, toStageKey: stageKeySchema }).strict();
-export const definitionSchema = z.object({
-  schemaVersion: z.literal(1),
+const commonDefinition = {
   initialStageKey: stageKeySchema,
-  stages: z.array(stageSchema).min(1).max(200),
   transitions: z.array(transitionSchema).max(1000),
+};
+const legacyDefinitionSchema = z.object({
+  schemaVersion: z.literal(1),
+  ...commonDefinition,
+  stages: z.array(stageSchema).min(1).max(200),
 }).strict();
+const enforcedDefinitionSchema = z.object({
+  schemaVersion: z.literal(2),
+  runtimeControl: z.literal("ENFORCED"),
+  ...commonDefinition,
+  stages: z.array(enforcedStageSchema).min(1).max(200),
+}).strict();
+export const definitionSchema = z.discriminatedUnion("schemaVersion", [legacyDefinitionSchema, enforcedDefinitionSchema]);
 export type ProfileDefinition = z.infer<typeof definitionSchema>;
 
 export function validateDefinition(input: unknown): ProfileDefinition {
@@ -49,6 +61,10 @@ export function validateDefinition(input: unknown): ProfileDefinition {
     throw new ProfileError("PROFILE_DEFINITION_INVALID", "Stage Key、显示顺序必须唯一，且初始 Stage 必须存在");
   }
   if (definition.stages.some(stage => stage.required && stage.allowSkip)) throw new ProfileError("PROFILE_DEFINITION_INVALID", "必需 Stage 不能允许跳过");
+  if (definition.schemaVersion === 2) {
+    const operationKeys = definition.stages.flatMap(stage => stage.operationKeys);
+    if (new Set(operationKeys).size !== operationKeys.length) throw new ProfileError("PROFILE_DEFINITION_INVALID", "operationKey 在 Profile Version 中必须唯一");
+  }
   const outgoing = new Map([...keys].map(key => [key, [] as string[]]));
   const edges = new Set<string>();
   for (const edge of definition.transitions) {

@@ -121,9 +121,9 @@ export async function decide(input: unknown, actor: unknown) {
     throw error;
   }
 }
-export async function resolveGate(input: unknown, expectedProfile?: { profileKey: string; profileVersion: string }) {
+export async function resolveGate(input: unknown, expectedProfile?: { profileKey: string; profileVersion: string }, q?: Knex.Transaction) {
   const ids = scope(input);
-  return db().transaction(async trx => {
+  const read = async (trx: Knex.Transaction) => {
     const state = await current(trx, ids);
     if (expectedProfile && (expectedProfile.profileKey !== state.profile.profileKey || expectedProfile.profileVersion !== state.profile.profileVersion)) throw new SupervisorError("SUPERVISOR_CONTEXT_CHANGED", "Stage Profile 与当前项目上下文不一致", 409);
     const raw = await rows(trx, ids);
@@ -137,16 +137,17 @@ export async function resolveGate(input: unknown, expectedProfile?: { profileKey
     if (effective.decision === "HUMAN_CONFIRM") return { ...base, pass: false, code: "SUPERVISOR_HUMAN_CONFIRM_REQUIRED", reason: effective.summary };
     const blockers = effective.issues.filter((issue: any) => issue.severity === "BLOCKER").map((issue: any) => issue.message);
     return { ...base, pass: false, code: "SUPERVISOR_REVISE_REQUIRED", reason: blockers.join("；") || effective.summary };
-  });
+  };
+  return q ? read(q) : db().transaction(read);
 }
 export async function gateCheck(input: unknown) {
   const ids = scope(input), definition = reviewDefinition(ids.reviewKey);
   return supervisorStageGate(definition.gateKey, ids);
 }
-export async function supervisorStageGate(gateKey: string, context: { projectId: number; scriptId: number; profileKey?: string; profileVersion?: string }) {
+export async function supervisorStageGate(gateKey: string, context: { projectId: number; scriptId: number; profileKey?: string; profileVersion?: string }, q?: Knex.Transaction) {
   const definition = reviewForGate(gateKey);
   try {
-    return await resolveGate({ projectId: context.projectId, scriptId: context.scriptId, reviewKey: definition.reviewKey }, context.profileKey && context.profileVersion ? { profileKey: context.profileKey, profileVersion: context.profileVersion } : undefined);
+    return await resolveGate({ projectId: context.projectId, scriptId: context.scriptId, reviewKey: definition.reviewKey }, context.profileKey && context.profileVersion ? { profileKey: context.profileKey, profileVersion: context.profileVersion } : undefined, q);
   } catch (error) {
     const code = error instanceof SupervisorError ? error.code : "SUPERVISOR_TARGET_UNAVAILABLE";
     return { pass: false, code, reason: error instanceof SupervisorError ? error.message : "Supervisor Gate 暂时不可用", targetHash: null, controlContextHash: null };

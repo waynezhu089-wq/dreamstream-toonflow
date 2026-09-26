@@ -29,6 +29,7 @@ async function fixture(t) {
       if(id==='sucrase')return {transform:x=>({code:x})};
       if(id==='uuid')return {v4:require('node:crypto').randomUUID};
       if (id.startsWith('@/')) return load(id.slice(2));
+      if (id.startsWith('.')) return load(path.posix.normalize(path.posix.join(path.posix.dirname(name), id)));
       return require(id);
     }, module, module.exports);
     return module.exports;
@@ -74,6 +75,7 @@ async function fixture(t) {
   await raw.schema.createTable('o_vendorConfig',t=>{t.string('id').primary();t.integer('enable');t.text('inputValues');});
   await raw.schema.createTable('o_tasks',t=>{t.increments('id');t.integer('projectId');t.bigInteger('startTime');for(const k of ['taskClass','relatedObjects','model','describe','state','reason'])t.text(k);});
   await load('lib/advertisementAssetPlanSchema').initializeAssetPlanSchema(db);
+  await load('lib/productionProfileSchema').initializeProductionProfileSchema(db);
   await load('lib/modelPresetSchema').initializeModelPresetSchema(db);
   const migrate=load('lib/storyboardProductionSchema').initializeStoryboardProductionSchema;await migrate(db);await migrate(db);
   await db('o_vendorConfig').insert({id:'vendor',enable:1});

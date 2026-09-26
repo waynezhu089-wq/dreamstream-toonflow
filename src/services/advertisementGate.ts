@@ -1,4 +1,5 @@
 import u from "@/utils";
+import type { Knex } from "knex";
 import { readAssetPlanInTransaction } from "@/services/advertisementAssetPlan";
 import { resolveProductionProfile } from "@/agents/productionAgent/profile";
 
@@ -30,10 +31,10 @@ export function gateFailure(error: unknown) {
 
 // Every caller must identify the current unit; no first-unit fallback.
 // Read plan, current bindings/images and confirmation in one SQLite snapshot.
-export async function readState(projectId: number, scriptId: number) {
+export async function readState(projectId: number, scriptId: number, q?: Knex.Transaction) {
   projectId = productionId(projectId);
   scriptId = productionId(scriptId);
-  return u.db.transaction(async (trx) => {
+  const read = async (trx: Knex.Transaction) => {
     const project = await trx("o_project").where("id", projectId).first();
     if (!project) throw new ProductionGateError("项目不存在", "PRODUCTION_CONTEXT_INVALID", 404);
     if (resolveProductionProfile(project).key !== "advertisement") {
@@ -67,7 +68,8 @@ export async function readState(projectId: number, scriptId: number) {
       planItems, incompleteAssets, prepared, confirmed,
       ready: confirmed && prepared,
     };
-  });
+  };
+  return q ? read(q) : u.db.transaction(read);
 }
 
 export async function assertProductionReady(projectId: unknown, scriptId: unknown) {
