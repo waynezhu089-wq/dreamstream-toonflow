@@ -221,3 +221,42 @@ test('postflight exact Profile change discards AI with context changed', async t
   assert.equal((await f.post('review/ai', input, 409)).reason, 'SUPERVISOR_CONTEXT_CHANGED');
   assert.equal((await f.db('o_supervisorReview')).length, 0);
 });
+
+test('HF1 structured failures log bounded safe diagnostics without changing retry or API behavior', async t => {
+  const f = await setup(t), input = await f.aiInput();
+  const secret = 'SENSITIVE_PROMPT_COOKIE_API_KEY_DO_NOT_LOG';
+  const events = [], original = console.error;
+  console.error = (...args) => events.push(args);
+  try {
+    const { NoObjectGeneratedError } = require('ai');
+    f.stub([new NoObjectGeneratedError({ message: secret, text: secret, response: { body: secret } }), new NoObjectGeneratedError({ message: secret, text: secret })]);
+    assert.equal((await f.post('review/ai', input, 502)).reason, 'SUPERVISOR_AI_OUTPUT_INVALID');
+    assert.equal(events.length, 2);
+    assert.deepEqual(events.map(x => x[1].failureClass), ['AI_SDK_OBJECT_FAILURE', 'AI_SDK_OBJECT_FAILURE']);
+    assert.deepEqual(events.map(x => x[1].attempt), [1, 2]);
+    assert.equal(f.sessionRefs.length, 1);
+    assert.doesNotMatch(JSON.stringify(events), new RegExp(secret));
+    events.length = 0;
+    f.stub([{ ...f.revise, issues: [{ ...f.revise.issues[0], code: 'bad code', message: secret }] }, { ...f.revise, issues: [{ ...f.revise.issues[0], code: 'bad code', message: secret }] }]);
+    assert.equal((await f.post('review/ai', input, 502)).reason, 'SUPERVISOR_AI_OUTPUT_INVALID');
+    assert.equal(events.length, 2);
+    assert.equal(events[0][1].failureClass, 'ZOD_SCHEMA_FAILURE');
+    assert.equal(events[0][1].invalidIssueCodeCount, 1);
+    assert.equal(events[0][1].issueCount, 1);
+    assert.doesNotMatch(JSON.stringify(events), new RegExp(secret));
+    events.length = 0;
+    f.stub([{ ...f.pass, summary: secret, issues: [{ ...f.revise.issues[0], message: secret }] }, { ...f.pass, summary: secret, issues: [{ ...f.revise.issues[0], message: secret }] }]);
+    assert.equal((await f.post('review/ai', input, 502)).reason, 'SUPERVISOR_AI_OUTPUT_INVALID');
+    assert.equal(events.length, 2);
+    assert.equal(events[0][1].failureClass, 'BUSINESS_VALIDATION_FAILURE');
+    assert.equal(events[0][1].decision, 'PASS');
+    assert.equal(events[0][1].blockerCount, 1);
+    for (const [marker, data] of events) {
+      assert.equal(marker, '[SupervisorAI][StructuredOutputFailure]');
+      assert.equal(data.modelReference, 'vendor:actual-model');
+      assert.equal(data.errorStatus, 502);
+    }
+    assert.equal((await f.db('o_supervisorReview')).length, 0);
+    assert.doesNotMatch(JSON.stringify(events), new RegExp(secret));
+  } finally { console.error = original; }
+});

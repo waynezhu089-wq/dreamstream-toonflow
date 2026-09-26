@@ -34,6 +34,30 @@ function validateOutput(value: unknown, allowed: readonly string[]) {
       parsed.decision === "REVISE" && !parsed.issues.some(issue => issue.severity === "BLOCKER")) throw new SupervisorError("SUPERVISOR_AI_OUTPUT_INVALID", "AI 审核结构或决定不符合规则", 502);
   return parsed;
 }
+function logStructuredOutputFailure(error: unknown, attempt: number, modelReference: string, candidate: unknown) {
+  try {
+    const failureClass = NoObjectGeneratedError.isInstance(error) ? "AI_SDK_OBJECT_FAILURE" : error instanceof z.ZodError ? "ZOD_SCHEMA_FAILURE" : "BUSINESS_VALIDATION_FAILURE";
+    const details = error && typeof error === "object" ? error as Record<string, unknown> : {};
+    const safeToken = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9_.:-]{1,160}$/.test(value) ? value : null;
+    const status = Number(details.statusCode ?? details.status);
+    const parsed = candidate && typeof candidate === "object" ? candidate as Record<string, unknown> : null;
+    const issues = Array.isArray(parsed?.issues) ? parsed.issues : null;
+    const inspected = issues?.slice(0, 101) ?? null;
+    const validCode = (value: unknown) => typeof value === "string" && /^[A-Z][A-Z0-9_]{1,79}$/.test(value);
+    console.error("[SupervisorAI][StructuredOutputFailure]", {
+      attempt, modelReference: safeToken(modelReference), failureClass,
+      errorName: safeToken(details.name), errorCode: safeToken(details.code),
+      errorStatus: Number.isInteger(status) && status >= 100 && status <= 599 ? status : null,
+      messageSummary: failureClass === "AI_SDK_OBJECT_FAILURE" ? "AI SDK did not produce a structured object" :
+        failureClass === "ZOD_SCHEMA_FAILURE" ? `Structured schema rejected ${error instanceof z.ZodError ? error.issues.length : 0} field(s)` : "Supervisor decision rules rejected the structured object",
+      decision: ["PASS", "REVISE", "HUMAN_CONFIRM"].includes(String(parsed?.decision)) ? parsed?.decision : null,
+      issueCount: issues?.length ?? null,
+      blockerCount: inspected?.filter(item => item && typeof item === "object" && item.severity === "BLOCKER").length ?? null,
+      invalidIssueCodeCount: inspected?.filter(item => !item || typeof item !== "object" || !validCode(item.code)).length ?? null,
+      issueCountCapped: Boolean(issues && issues.length > 101),
+    });
+  } catch { /* Diagnostics must not alter the Supervisor failure contract. */ }
+}
 export async function reviewAi(input: unknown) {
   const parsed = requestSchema.safeParse(input);
   if (!parsed.success) throw new SupervisorError("SUPERVISOR_DECISION_INVALID", "AI 审核请求字段不合法");
@@ -62,13 +86,16 @@ export async function reviewAi(input: unknown) {
   } catch { throw new SupervisorError("SUPERVISOR_MODEL_UNAVAILABLE", "请先配置可用的文本模型", 409); }
   let output: z.infer<typeof outputSchema> | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
+    let candidate: unknown = null;
     try {
       const result = await session.invoke({ system, messages: [{ role: "user", content: attempt ? `${user}\n\nThe previous structured JSON did not validate. Return a complete valid JSON object with the required decision, summary, and issues fields.` : user }], output: Output.object({ schema: outputSchema }) });
-      output = validateOutput(result.output, state.definition.aiDecisions ?? []);
+      candidate = result.output;
+      output = validateOutput(candidate, state.definition.aiDecisions ?? []);
       break;
     } catch (error) {
       const invalid = NoObjectGeneratedError.isInstance(error) || error instanceof z.ZodError || error instanceof SupervisorError && error.code === "SUPERVISOR_AI_OUTPUT_INVALID";
       if (!invalid) throw new SupervisorError("SUPERVISOR_AI_FAILED", "AI 审核调用失败，请稍后重试", 502);
+      logStructuredOutputFailure(error, attempt + 1, session.modelReference, candidate);
     }
   }
   if (!output) throw new SupervisorError("SUPERVISOR_AI_OUTPUT_INVALID", "AI 审核结构仍不合法", 502);
