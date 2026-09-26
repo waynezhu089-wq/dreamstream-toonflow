@@ -184,3 +184,41 @@ test('HTTP enforced direct produces Attempt; legacy ad retains old no-attempt pa
   await f.generate([other.id], { projectId: 2, scriptId: 20 });
   assert.equal((await f.db('o_productionAttempt').where({ projectId: 2 }).count('* as n').first()).n, 0);
 });
+
+test('multi-shot provenance uses one transaction-local source query graph', async t => {
+  const f = await setup(t);
+  const first = await f.attempt.beginStoryboardImageAttempt(f.shot);
+  await f.attempt.runStoryboardImageAttempt(first);
+  const template = await f.row();
+  const attemptTemplate = await f.attemptRow(first.attemptId);
+  const ids = [f.storyboardId];
+  async function addShot(index) {
+    const { id, ...storyboard } = template;
+    const [shotId] = await f.db('o_storyboard').insert({ ...storyboard, index, currentImageAttemptId: null, activeImageAttemptId: null });
+    await f.db('o_assets2Storyboard').insert({ storyboardId: shotId, assetId: 1 });
+    const source = await f.db.transaction(q => f.attempt.captureStoryboardImageSource(q, { ...scope, storyboardId: shotId }));
+    const attemptId = require('node:crypto').randomUUID();
+    const { attemptId: _oldAttemptId, ...attemptRow } = attemptTemplate;
+    await f.db('o_productionAttempt').insert({ ...attemptRow, attemptId, subjectId: shotId,
+      sourceHash: source.sourceHash, sourceSnapshot: JSON.stringify(source.snapshot) });
+    await f.db('o_storyboard').where({ id: shotId }).update({ currentImageAttemptId: attemptId });
+    ids.push(shotId);
+  }
+  await addShot(2);
+  async function readAndCount() {
+    const rows = await f.db('o_storyboard').whereIn('id', ids);
+    let selects = 0;
+    const countQuery = query => { if (/^select\b/i.test(query.sql.trim())) selects++; };
+    f.raw.on('query', countQuery);
+    let result;
+    try { result = await f.attempt.readImageProvenance(1, 10, rows); }
+    finally { f.raw.off('query', countQuery); }
+    assert.equal(result.size, ids.length);
+    for (const id of ids) assert.equal(result.get(id).freshness, 'CURRENT', `shot ${id}`);
+    return selects;
+  }
+  const small = await readAndCount();
+  for (let index = 3; index <= 32; index++) await addShot(index);
+  const large = await readAndCount();
+  assert.ok(large <= small + 1, `query graph grew with shot count: two=${small}, thirty-two=${large}`);
+});

@@ -19,8 +19,8 @@ async function scopeModels(scope: string, q: Knex | Knex.Transaction): Promise<S
   const own = parse(row), inherited = parse(preset);
   return Object.fromEntries(slotNames.map(s => [s, own[s] ?? inherited[s]])) as Slots;
 }
-export async function resolveModelsInTransaction(projectId: number, q: Knex.Transaction) {
-  const project = await q("o_project").where({ id: projectId }).first();
+export async function resolveModelsInTransaction(projectId: number, q: Knex.Transaction, projectRow?: any) {
+  const project = projectRow ?? await q("o_project").where({ id: projectId }).first();
   if (!project) throw new ModelConfigError("项目不存在", 404);
   const legacy = { ...emptySlots(), image: project.imageModel || null, video: project.videoModel || null };
   if (!isAdvertisement(project)) return { models: legacy, sources: { text: "legacy", image: "legacy", video: "legacy", tts: "legacy" }, overrides: legacy };
