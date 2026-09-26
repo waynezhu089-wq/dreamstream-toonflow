@@ -1,4 +1,5 @@
 import { productionSpec } from "@/services/storyboardProduction";
+import { readImageProvenance } from "@/services/productionAttempt";
 import express from "express";
 import u from "@/utils";
 import { z } from "zod";
@@ -32,10 +33,12 @@ export default router.post(
       })
       .offset(offset)
       .limit(limit);
+    const imageProvenance = await readImageProvenance(Number(projectId), scriptId, storyboardData);
     const data = await Promise.all(
       storyboardData.map(async (i: any) => {
         return {
           ...productionSpec(i),
+          imageProvenance: imageProvenance.get(i.id!),
           id: i.id,
           prompt: i.prompt,
           imagePrompt: i.imagePrompt ?? null,

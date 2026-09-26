@@ -169,6 +169,8 @@ export interface o_skillList {
   'updateTime': number;
 }
 export interface o_storyboard {
+  currentImageAttemptId?: string | null;
+  activeImageAttemptId?: string | null;
   productionSpec?: string | null;
   imagePrompt?: string | null;
   'createTime'?: number | null;

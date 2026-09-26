@@ -159,6 +159,7 @@ async function fixture(t) {
     '@/utils/agent/skillsTools': {}, '@/agents/productionAgent/tools': () => ({}),
   };
   const load = moduleLoader(utils, overrides);
+  await load(path.join(root, 'src/lib/storyboardProductionSchema.ts')).initializeStoryboardProductionSchema(db);
   await load(path.join(root, 'src/lib/advertisementAssetPlanSchema.ts')).initializeAssetPlanSchema(db);
   await load(path.join(root, 'src/lib/productionProfileSchema.ts')).initializeProductionProfileSchema(db);
   for (const [scriptId, projectId] of [[10, 1], [11, 1], [30, 3]]) {

@@ -1,4 +1,7 @@
 import { isAdvertisement, produceAdvertisementStoryboard } from "@/services/storyboardProduction";
+import { resolveProfile } from "@/services/orchestrator/profileRegistry";
+import { beginStoryboardImageAttempt, runStoryboardImageAttempt } from "@/services/productionAttempt";
+import type { Knex } from "knex";
 import express from "express";
 import u from "@/utils";
 import { z } from "zod";
@@ -38,6 +41,23 @@ export default router.post(
       const ids = [...new Set(storyboardIds)];
       const rows = await u.db("o_storyboard").where({projectId, scriptId}).whereIn("id", ids);
       if (rows.length !== ids.length) return res.status(400).send({code:"STORYBOARD_SCOPE_INVALID",message:"分镜不存在或不属于当前制作单元"});
+      const profile = await resolveProfile({ projectId });
+      if (profile.managed && profile.definition.schemaVersion === 2) {
+        try {
+          const attempts = await (u.db as Knex).transaction(async trx => {
+            const created = [];
+            for (const storyboardId of ids) created.push(await beginStoryboardImageAttempt({ projectId, scriptId, storyboardId }, req.body.model, trx));
+            return created;
+          });
+          res.status(200).send(success(attempts.map(attempt => ({ id: attempt.storyboardId, attemptId: attempt.attemptId, state: "生成中", src: null }))));
+          const count = Math.max(1, Math.min(20, Math.floor(concurrentCount)));
+          for (let i = 0; i < attempts.length; i += count) await Promise.all(attempts.slice(i, i + count).map(runStoryboardImageAttempt));
+          return;
+        } catch (failure: any) {
+          if (res.headersSent) { console.error("[ProductionAttempt][WorkerFailure]", failure); return; }
+          return res.status(failure.status ?? 409).send({ code: failure.code ?? "PRODUCTION_ATTEMPT_FAILED", message: failure.message ?? "图片生产任务无法开始" });
+        }
+      }
       // Respond before slow model work, preserving the existing polling contract.
       // All modes are dispatched explicitly; compulsory never overrides the mode.
       await u.db("o_storyboard").where({projectId,scriptId}).whereIn("id",ids).update({state:"生成中",reason:""});

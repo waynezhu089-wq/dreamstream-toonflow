@@ -1,4 +1,5 @@
 import { productionSpec } from "@/services/storyboardProduction";
+import { readImageProvenance } from "@/services/productionAttempt";
 import express from "express";
 import u from "@/utils";
 import { z } from "zod";
@@ -88,6 +89,7 @@ export default router.post(
     } else {
       try {
         const storyboardData = await u.db("o_storyboard").where({ scriptId: episodesId, projectId });
+        const imageProvenance = await readImageProvenance(projectId, episodesId, storyboardData);
 
         await Promise.all(
           storyboardData.map(async (i) => {
@@ -143,6 +145,7 @@ export default router.post(
         flowData.storyboard = storyboardData
           .map((i) => ({
             ...productionSpec(i),
+            imageProvenance: imageProvenance.get(i.id!),
             id: i.id,
             index: i.index,
             duration: i.duration ? +i.duration : 0,

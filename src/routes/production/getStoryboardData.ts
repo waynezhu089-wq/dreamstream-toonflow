@@ -1,5 +1,6 @@
 import express from "express";
 import { productionSpec } from "@/services/storyboardProduction";
+import { readImageProvenance } from "@/services/productionAttempt";
 import u from "@/utils";
 import { z } from "zod";
 import { success } from "@/lib/responseFormat";
@@ -15,6 +16,7 @@ export default router.post(
   async (req, res) => {
     const { scriptId, projectId } = req.body;
     const storyboardData = await u.db("o_storyboard").where({ scriptId, projectId }).orderBy("index", "asc");
+    const imageProvenance = await readImageProvenance(projectId, scriptId, storyboardData);
     const data = await Promise.all(
       storyboardData.map(async (i) => {
         return {
@@ -69,6 +71,7 @@ export default router.post(
         return {
           id: String(item.id),
           ...productionSpec(item),
+          imageProvenance: imageProvenance.get(item.id as number),
           createTime: item.createTime ?? undefined,
           duration: item.duration ? Number(item.duration) : undefined,
           filePath: item.filePath || undefined,

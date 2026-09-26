@@ -497,6 +497,8 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
         table.text("videoDesc");
         table.integer("shouldGenerateImage"); // 0 否  1 是
         table.text("productionSpec").nullable(); // Advertisement production semantics, JSON envelope v1
+        table.text("currentImageAttemptId").nullable();
+        table.text("activeImageAttemptId").nullable();
         table.integer("projectId");
         table.integer("flowId"); //工作流id
         table.integer("index");

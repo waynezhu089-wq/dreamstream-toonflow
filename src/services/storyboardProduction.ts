@@ -88,7 +88,7 @@ export async function writeAdvertisementStoryboards(projectId: number, scriptId:
       if (previous) {
         await trx("o_storyboard").where({ id, projectId, scriptId }).update({
           prompt: item.prompt, videoDesc: item.videoDesc, productionSpec: encoded,
-          ...(changed ? { state: "未生成", filePath: "", reason: "" } : {}),
+          ...(changed && !previous.currentImageAttemptId && !previous.activeImageAttemptId ? { state: "未生成", filePath: "", reason: "" } : {}),
         });
       } else {
         const track = item.track || "未分组";

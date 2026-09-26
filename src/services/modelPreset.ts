@@ -19,13 +19,12 @@ async function scopeModels(scope: string, q: Knex | Knex.Transaction): Promise<S
   const own = parse(row), inherited = parse(preset);
   return Object.fromEntries(slotNames.map(s => [s, own[s] ?? inherited[s]])) as Slots;
 }
-export async function resolveModels(projectId: number) {
-  const q = db();
+export async function resolveModelsInTransaction(projectId: number, q: Knex.Transaction) {
   const project = await q("o_project").where({ id: projectId }).first();
   if (!project) throw new ModelConfigError("项目不存在", 404);
   const legacy = { ...emptySlots(), image: project.imageModel || null, video: project.videoModel || null };
   if (!isAdvertisement(project)) return { models: legacy, sources: { text: "legacy", image: "legacy", video: "legacy", tts: "legacy" }, overrides: legacy };
-  return q.transaction(async trx => {
+  const read = async (trx: Knex.Transaction) => {
     const row = await trx("o_modelScope").where({ scope: `project:${projectId}` }).first();
     // Legacy project fields remain readable until a slot is explicitly migrated.
     const stored = JSON.parse(row?.slots || "{}");
@@ -37,7 +36,11 @@ export async function resolveModels(projectId: number) {
       sources: Object.fromEntries(slotNames.map(s => [s, own[s] ? "project" : profile[s] ? "profile" : system[s] ? "system" : "none"])),
       overrides: own,
     };
-  });
+  };
+  return read(q);
+}
+export async function resolveModels(projectId: number) {
+  return db().transaction(trx => resolveModelsInTransaction(projectId, trx));
 }
 export async function listConfiguration() {
   const options: { value: string; label: string; type: Slot }[] = [];
