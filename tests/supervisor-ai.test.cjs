@@ -41,7 +41,7 @@ async function setup(t) {
   const aiInput = async () => { const value = await target(); return { ...ids, expectedTargetHash: value.target.targetHash, expectedControlContextHash: value.controlContextHash }; };
   const calls = [], sessionRefs = [];
   const stub = (results) => { let index = 0; f.utils.Ai.Text = key => ({ trackedSession: async () => {
-    sessionRefs.push(key); return { modelReference: 'vendor:actual-model', invoke: async input => { calls.push(input); const result = results[Math.min(index++, results.length - 1)]; if (result instanceof Error) throw result; if (typeof result === 'function') return result(input); return { output: result }; } };
+    sessionRefs.push(key); return { modelReference: 'vendor:actual-model', invoke: async () => { throw Error('Supervisor must use invokeObject'); }, invokeObject: async input => { calls.push(input); const result = results[Math.min(index++, results.length - 1)]; if (result instanceof Error) throw result; if (typeof result === 'function') return result(input); return { object: result }; } };
   } }); };
   const pass = { decision: 'PASS', summary: 'Approved', issues: [] };
   const revise = { decision: 'REVISE', summary: 'Revise', issues: [{ severity: 'BLOCKER', code: 'SHOT_CHANGE', message: 'Fix shot', suggestion: null, evidence: null }] };
@@ -113,7 +113,7 @@ test('structured PASS/REVISE/HUMAN_CONFIRM persist exact provenance and drive Ga
   assert.equal(history[0].actorUserId, null);
   assert.deepEqual(await f.db('o_storyboard').select('*'), before);
   assert.equal(f.calls.length, 3); assert.equal(f.sessionRefs.length, 3);
-  for (const call of f.calls) { assert.equal(call.output?.name, 'object'); assert.match(call.system, /untrusted review data/); assert.doesNotMatch(call.system, /A shot/); }
+  for (const call of f.calls) { assert.equal(call.schema?._def?.type, 'object'); assert.match(call.system, /untrusted review data/); assert.match(call.system, /JSON structure/); assert.doesNotMatch(call.system, /A shot/); }
 });
 
 test('one structured repair uses one pinned session; runtime failure does not retry', async t => {
@@ -121,7 +121,7 @@ test('one structured repair uses one pinned session; runtime failure does not re
   f.stub([{ decision: 'PASS', summary: '', issues: [] }, f.pass]);
   await f.post('review/ai', input);
   assert.equal(f.calls.length, 2); assert.equal(f.sessionRefs.length, 1);
-  assert.match(f.calls[1].messages[0].content, /valid JSON object/);
+  assert.match(f.calls[1].messages[0].content, /complete JSON structure/);
   const before = (await f.db('o_supervisorReview')).length;
   f.stub([new Error('provider down')]);
   assert.equal((await f.post('review/ai', input, 502)).reason, 'SUPERVISOR_AI_FAILED');
@@ -145,11 +145,11 @@ test('policy drift stales AI, while HUMAN remains effective after later AI revie
 
 test('postflight target or policy change discards AI result', async t => {
   const f = await setup(t), input = await f.aiInput();
-  f.stub([async () => { await f.db('o_storyboard').where({ id: f.shotId }).update({ prompt: 'Changed during AI' }); return { output: f.pass }; }]);
+  f.stub([async () => { await f.db('o_storyboard').where({ id: f.shotId }).update({ prompt: 'Changed during AI' }); return { object: f.pass }; }]);
   assert.equal((await f.post('review/ai', input, 409)).reason, 'SUPERVISOR_TARGET_CHANGED');
   assert.equal((await f.db('o_supervisorReview')).length, 0);
   const next = await f.aiInput();
-  f.stub([async () => { await f.registry.saveBinding({ scopeType: 'PROJECT', scopeKey: 'project:1', skillType: 'SUPERVISOR', skillId: null, skillVersion: null, overrideText: 'Changed during AI' }); return { output: f.pass }; }]);
+  f.stub([async () => { await f.registry.saveBinding({ scopeType: 'PROJECT', scopeKey: 'project:1', skillType: 'SUPERVISOR', skillId: null, skillVersion: null, overrideText: 'Changed during AI' }); return { object: f.pass }; }]);
   assert.equal((await f.post('review/ai', next, 409)).reason, 'SUPERVISOR_SKILL_CHANGED');
   assert.equal((await f.db('o_supervisorReview')).length, 0);
 });
@@ -216,7 +216,7 @@ test('postflight exact Profile change discards AI with context changed', async t
     const version = await profile.createVersion({ profileKey: 'advertisement', sourceVersion: 'v1' });
     await profile.activateVersion({ profileKey: 'advertisement', version: version.version });
     await f.db('o_projectProfileBinding').where({ projectId: 1 }).update({ profileVersion: 2 });
-    return { output: f.pass };
+    return { object: f.pass };
   }]);
   assert.equal((await f.post('review/ai', input, 409)).reason, 'SUPERVISOR_CONTEXT_CHANGED');
   assert.equal((await f.db('o_supervisorReview')).length, 0);

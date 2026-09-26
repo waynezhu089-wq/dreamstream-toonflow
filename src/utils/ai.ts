@@ -1,4 +1,5 @@
-import { generateText, streamText, wrapLanguageModel, stepCountIs, extractReasoningMiddleware } from "ai";
+import { generateText, generateObject, streamText, wrapLanguageModel, stepCountIs, extractReasoningMiddleware } from "ai";
+import type { ZodType } from "zod";
 import { devToolsMiddleware } from "@ai-sdk/devtools";
 import axios from "axios";
 import { transform } from "sucrase";
@@ -210,6 +211,11 @@ class AiText {
         ...(config?.temperature && { temperature: config.temperature }),
         ...(config?.maxOutputTokens && { maxOutputTokens: config.maxOutputTokens }),
       } as Parameters<typeof generateText>[0]),
+      invokeObject: (input: Omit<Parameters<typeof generateObject>[0], "model"> & { schema: ZodType }) => generateObject({
+        ...input, model,
+        ...(config?.temperature && { temperature: config.temperature }),
+        ...(config?.maxOutputTokens && { maxOutputTokens: config.maxOutputTokens }),
+      } as Parameters<typeof generateObject>[0]),
     };
   }
   async invoke(input: Omit<Parameters<typeof generateText>[0], "model">) {
