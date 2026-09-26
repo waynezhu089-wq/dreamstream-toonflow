@@ -38,6 +38,7 @@ export default router.post(
           ...productionSpec(i),
           id: i.id,
           prompt: i.prompt,
+          imagePrompt: i.imagePrompt ?? null,
           state: i.state,
           src: i.filePath ? await u.oss.getSmallImageUrl(i.filePath!) : "",
         };

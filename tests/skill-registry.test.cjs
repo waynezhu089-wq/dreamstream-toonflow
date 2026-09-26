@@ -210,20 +210,30 @@ test('Manual, Copy and selected-source Project Derived builders retain provenanc
  await assert.rejects(f.registry.requireReversePromptExecution(),e=>e.code==='REVERSE_PROMPT_CAPABILITY_UNSUPPORTED');
 });
 
-test('IMAGE_PROMPT compiler loads exact Skill, sends full context to existing text route, previews without mutation, then human Apply reuses storyboard invalidation',async t=>{
+test('IMAGE_PROMPT compiler separates semantic and image prompts; Apply mutates execution fields only',async t=>{
  const f=await setup(t),id=await f.active();const shot=await f.create({productionMode:'REAL_AI_COMPOSITE',primaryAssetId:1,associateAssetsIds:[1],prompt:'Old prompt'});
+ await f.load('lib/productionProfileSchema').initializeProductionProfileSchema(f.db);
+ await f.load('lib/recipeSchema').initializeRecipeSchema(f.db);
+ await f.load('lib/supervisorSchema').initializeSupervisorSchema(f.db);
+ const review=f.load('services/supervisor/review'),reviewInput={projectId:1,scriptId:10,reviewKey:'storyboard.semantic-approval.v2'};
+ const beforeReview=await review.targetRead(reviewInput);
+ await review.decide({...reviewInput,expectedTargetHash:beforeReview.target.targetHash,expectedControlContextHash:beforeReview.controlContextHash,decision:'PASS',summary:'Approved',issues:[]},{id:1,name:'Reviewer'});
  await f.registry.saveBinding({scopeType:'PROJECT',scopeKey:'project:1',skillType:'IMAGE_PROMPT',skillId:id,skillVersion:'v1',overrideText:null});
  await f.registry.saveBinding({scopeType:'SHOT',scopeKey:`project:1:script:10:storyboard:${shot.id}`,skillType:'IMAGE_PROMPT',skillId:null,skillVersion:null,overrideText:'Brighter and natural'});
  const calls=[];f.utils.Ai.Text=key=>({invoke:async input=>{calls.push({key,input});return{text:'A complete new cinematic background prompt, soft natural side light, blank screen, no text or interface.'};}});
  const preview=await f.compiler.compileImagePrompt({projectId:1,scriptId:10,storyboardId:shot.id});
  assert.equal(preview.resolvedSkill.skillVersion,'v1');assert.equal(preview.resolvedSkill.resolvedFrom.scopeType,'PROJECT');
  assert.equal(calls[0].key,'productionAgent:storyboardGenAgent');assert.match(calls[0].input.system,/真实 UI/);
- const context=JSON.parse(calls[0].input.messages[0].content);assert.equal(context.currentStoryboard.prompt,'Old prompt');assert.equal(context.assetConstraints.assets[0].assetId,1);assert.equal(context.currentStoryboard.primaryAssetId,1);assert.equal(context.overrideChain.at(-1).text,'Brighter and natural');
+ const context=JSON.parse(calls[0].input.messages[0].content);assert.equal(context.currentStoryboard.semanticPrompt,'Old prompt');assert.equal(context.currentStoryboard.currentImagePrompt,null);assert.equal(context.assetConstraints.assets[0].assetId,1);assert.equal(context.currentStoryboard.semanticProductionSpec.primaryAssetId,1);assert.equal(context.overrideChain.at(-1).text,'Brighter and natural');
  assert.equal((await f.db('o_storyboard').where({id:shot.id}).first()).prompt,'Old prompt');
+ assert.equal(preview.currentSemanticPrompt,'Old prompt');assert.equal(preview.currentImagePrompt,null);assert.ok(preview.compiledImagePrompt);
  const record=await f.compiler.readCompile({compileId:preview.compileId,projectId:1,scriptId:10,storyboardId:shot.id});assert.equal(record.appliedAt,null);assert.equal(record.skillDefinitionHash.length,64);assert.equal(record.modelReference,'productionAgent:storyboardGenAgent');
  const applied=await f.compiler.applyCompile({compileId:preview.compileId,projectId:1,scriptId:10,storyboardId:shot.id});
- const row=await f.db('o_storyboard').where({id:shot.id}).first();assert.equal(row.prompt,preview.compiledPrompt);assert.equal(row.state,'未生成');assert.equal(row.filePath,'');
+ const row=await f.db('o_storyboard').where({id:shot.id}).first();assert.equal(row.prompt,'Old prompt');assert.equal(row.imagePrompt,preview.compiledImagePrompt);assert.equal(row.state,'未生成');assert.equal(row.filePath,'');
  const spec=f.load('services/storyboardProduction').productionSpec(row);assert.equal(spec.promptSkillId,id);assert.equal(spec.promptSkillVersion,'v1');assert.ok(applied.appliedAt);
+ assert.equal((await review.targetRead(reviewInput)).target.targetHash,beforeReview.target.targetHash);
+ assert.equal((await review.reviewHistory(reviewInput)).history[0].status,'CURRENT');
+ assert.equal((await review.resolveGate(reviewInput)).code,'SUPERVISOR_PASS');
  await assert.rejects(f.compiler.applyCompile({compileId:preview.compileId,projectId:1,scriptId:10,storyboardId:shot.id}),e=>e.code==='SKILL_BINDING_INVALID');
 });
 
@@ -264,6 +274,22 @@ test('point-of-use text model check, stale preview and scoped Compile read preve
  await assert.rejects(f.compiler.readCompile({compileId:preview.compileId,projectId:1,scriptId:11,storyboardId:shot.id}),e=>e.code==='SKILL_SOURCE_INVALID');
  await f.db('o_storyboard').where({id:shot.id}).update({prompt:'Human changed this prompt'});
  await assert.rejects(f.compiler.applyCompile({compileId:preview.compileId,projectId:1,scriptId:10,storyboardId:shot.id}),e=>e.code==='SKILL_BINDING_INVALID');
+ assert.equal((await f.db('o_skillCompile').where({compileId:preview.compileId}).first()).appliedAt,null);
+});
+
+test('B1 Apply rejects changed image prompt, exact Skill or ordered Override without writing',async t=>{
+ const f=await setup(t),id=await f.active();const shot=await f.create({productionMode:'AI_TEXT_TO_IMAGE',primaryAssetId:null,associateAssetsIds:[],prompt:'Approved scene'});
+ await f.registry.saveBinding({scopeType:'PROJECT',scopeKey:'project:1',skillType:'IMAGE_PROMPT',skillId:id,skillVersion:'v1',overrideText:null});
+ f.utils.Ai.Text=()=>({invoke:async()=>({text:'Fresh independent complete image execution prompt.'})});
+ const scope={projectId:1,scriptId:10,storyboardId:shot.id};
+ let preview=await f.compiler.compileImagePrompt(scope);
+ await f.db('o_storyboard').where({id:shot.id}).update({imagePrompt:'Manual execution edit'});
+ await assert.rejects(f.compiler.applyCompile({compileId:preview.compileId,...scope}),e=>e.code==='SKILL_BINDING_INVALID');
+ await f.db('o_storyboard').where({id:shot.id}).update({imagePrompt:null});
+ preview=await f.compiler.compileImagePrompt(scope);
+ await f.registry.saveBinding({scopeType:'SHOT',scopeKey:`project:1:script:10:storyboard:${shot.id}`,skillType:'IMAGE_PROMPT',skillId:null,skillVersion:null,overrideText:'New shot override'});
+ await assert.rejects(f.compiler.applyCompile({compileId:preview.compileId,...scope}),e=>e.code==='SKILL_BINDING_INVALID');
+ assert.equal((await f.db('o_storyboard').where({id:shot.id}).first()).imagePrompt,null);
  assert.equal((await f.db('o_skillCompile').where({compileId:preview.compileId}).first()).appliedAt,null);
 });
 

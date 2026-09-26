@@ -147,6 +147,7 @@ export default router.post(
             index: i.index,
             duration: i.duration ? +i.duration : 0,
             prompt: i.prompt,
+            imagePrompt: i.imagePrompt ?? null,
             associateAssetsIds: assets2StoryboardMap[i.id!] ?? [],
             src: i.filePath,
             state: i.state,

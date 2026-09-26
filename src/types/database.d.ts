@@ -170,6 +170,7 @@ export interface o_skillList {
 }
 export interface o_storyboard {
   productionSpec?: string | null;
+  imagePrompt?: string | null;
   'createTime'?: number | null;
   'duration'?: string | null;
   'filePath'?: string | null;

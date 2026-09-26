@@ -110,11 +110,11 @@ export async function deprecateVersion(input: { skillId: string; version: string
   return versionView(await requireVersion(db(), skillId, input.version));
 }
 // Runtime loader reads one exact row. Historical DEPRECATED versions remain legal.
-export async function loadSkill(skillIdValue: string, versionValue: string) {
+export async function loadSkill(skillIdValue: string, versionValue: string, q: Knex | Knex.Transaction = db()) {
   const skillId = skillIdSchema.parse(skillIdValue);
-  const row = await requireVersion(db(), skillId, versionValue);
+  const row = await requireVersion(q, skillId, versionValue);
   if (row.status === "DRAFT") throw new SkillError("SKILL_DRAFT_NOT_ALLOWED", "Draft 不可进入正式生产", 409);
-  const family = await requireFamily(db(), skillId), content = validateContent(family.skillType, row.templateId, parseJson(row.content));
+  const family = await requireFamily(q, skillId), content = validateContent(family.skillType, row.templateId, parseJson(row.content));
   if (definitionHash(row.templateId, content) !== row.definitionHash) throw new SkillError("SKILL_TEMPLATE_INVALID", "Skill 定义校验失败", 409);
   return { skillId, skillVersion: versionLabel(Number(row.version)), skillStatus: row.status, skillType: family.skillType, definitionHash: row.definitionHash, content, runtimeInstruction: renderRuntimeInstruction(family.skillType, content) };
 }
@@ -173,14 +173,14 @@ export async function listBindings(input: { scopeType?: ScopeType; scopeKey?: st
   return (await query.orderBy("updatedAt", "desc")).map(bindingView);
 }
 
-export async function resolveSkill(input: ResolveContext & { skillType: SkillType }) {
+export async function resolveSkill(input: ResolveContext & { skillType: SkillType }, q: Knex | Knex.Transaction = db()) {
   const { skillType, ...scope } = z.object({ ...contextInput.shape, skillType: skillTypeSchema }).strict().parse(input);
   if (Boolean(scope.recipeKey) !== Boolean(scope.recipeVersion)) throw new SkillError("SKILL_RECIPE_CONTEXT_MISMATCH", "Recipe Key 与精确版本必须同时提供", 409);
   let recipeRef: { skillId: string; skillVersion: string } | null = null;
   if (scope.recipeKey && scope.recipeVersion) {
     try {
       recipeVersionNumber(scope.recipeVersion);
-      recipeRef = await resolveExactRecipeSkill(db(), scope.projectId, scope.recipeKey, scope.recipeVersion, skillType);
+      recipeRef = await resolveExactRecipeSkill(q, scope.projectId, scope.recipeKey, scope.recipeVersion, skillType);
     } catch (error) {
       if (error instanceof RecipeError) throw new SkillError("SKILL_RECIPE_CONTEXT_MISMATCH", error.message, 409);
       throw error;
@@ -194,15 +194,15 @@ export async function resolveSkill(input: ResolveContext & { skillType: SkillTyp
     { scopeType: "STAGE", scopeKey: `project:${scope.projectId}:script:${scope.scriptId}:stage:${skillType === "IMAGE_PROMPT" ? "image-prompt" : skillType.toLowerCase().replaceAll("_", "-")}` },
     { scopeType: "SHOT", scopeKey: `project:${scope.projectId}:script:${scope.scriptId}:storyboard:${scope.storyboardId}` },
   ];
-  await assertScope(db(), "SHOT", keys.at(-1)!.scopeKey);
-  const bindings = await db()("o_skillBinding").where({ skillType }).whereIn("scopeKey", keys.map(k => k.scopeKey));
+  await assertScope(q, "SHOT", keys.at(-1)!.scopeKey);
+  const bindings = await q("o_skillBinding").where({ skillType }).whereIn("scopeKey", keys.map(k => k.scopeKey));
   const trace = keys.map(({ scopeType, scopeKey }) => {
     const row = scopeType === "RECIPE" ? (recipeRef ? { skillId: recipeRef.skillId, skillVersion: recipeVersionNumber(recipeRef.skillVersion), overrideText: null } : null) : bindings.find(b => b.scopeType === scopeType && b.scopeKey === scopeKey);
     return { scopeType, scopeKey, kind: !row ? "NONE" : row.skillId ? "EXACT_SKILL" : "OVERRIDE_ONLY", skillId: row?.skillId ?? null, skillVersion: row?.skillVersion == null ? null : versionLabel(Number(row.skillVersion)), overrideText: row?.overrideText ?? null };
   });
   const selected = [...trace].reverse().find(item => item.skillId && item.skillVersion);
   if (!selected) throw new SkillError("SKILL_RESOLUTION_FAILED", "当前镜头没有可解析的 Skill；请先人工绑定 Active 版本", 409);
-  const loaded = await loadSkill(selected.skillId!, selected.skillVersion!);
+  const loaded = await loadSkill(selected.skillId!, selected.skillVersion!, q);
   const overrideChain = trace.filter(item => item.overrideText).map(item => ({ scopeType: item.scopeType, scopeKey: item.scopeKey, text: item.overrideText! }));
   return { ...loaded, resolvedFrom: { scopeType: selected.scopeType, scopeKey: selected.scopeKey }, overrideChain,
     resolutionTrace: trace.map(item => ({ ...item, selected: item === selected, reason: item === selected ? "最高优先级的精确 Skill 绑定" : item.kind === "OVERRIDE_ONLY" ? "仅叠加局部 Override" : item.kind === "EXACT_SKILL" ? "被更高优先级精确绑定覆盖" : "此 Scope 无绑定" })) };

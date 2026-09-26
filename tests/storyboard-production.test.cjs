@@ -161,6 +161,16 @@ test('text-to-image uses real shared Ai.Image, preset resolution, task records a
  tasks=await f.db('o_tasks').orderBy('id');assert.equal(tasks.at(-1).state,'生成失败');
 });
 
+test('B1 advertisement image execution prefers imagePrompt and preserves legacy semantic fallback',async t=>{
+ const f=await fixture(t),shot=await f.create({productionMode:'AI_TEXT_TO_IMAGE',primaryAssetId:null,associateAssetsIds:[],prompt:'Semantic scene'});
+ await f.config();
+ await f.db('o_storyboard').where({id:shot.id}).update({imagePrompt:'Detailed execution image prompt'});
+ await f.generate([shot.id]);assert.equal(f.calls.at(-1).prompt,'Detailed execution image prompt');
+ await f.db('o_storyboard').where({id:shot.id}).update({imagePrompt:null});
+ await f.generate([shot.id]);assert.equal(f.calls.at(-1).prompt,'Semantic scene');
+ assert.equal((await f.db('o_storyboard').where({id:shot.id}).first()).prompt,'Semantic scene');
+});
+
 test('reference and composite never fall back; text input and unknown capabilities are rejected',async t=>{
  const f=await fixture(t);await f.config();
  for(const data of [{productionMode:'AI_REFERENCE_GENERATE',referenceAssetIds:[1]},{productionMode:'REAL_AI_COMPOSITE'},{productionMode:'AI_TEXT_TO_IMAGE',referenceAssetIds:[1]},{productionMode:'AI_TEXT_TO_IMAGE',primaryAssetId:null,referenceAssetGroupIds:['views']},{productionMode:'AI_TEXT_TO_IMAGE',primaryAssetId:null,capabilityId:'comfy.z-image-turbo.txt2img.v1'}]){
@@ -207,8 +217,8 @@ test('fresh real initDB builder and additive upgrade retain old rows without gue
  function moduleAt(name){const module={exports:{}};const code=ts.transpileModule(fs.readFileSync(path.join(root,'src',name+'.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
  new Function('require','module','exports',code)(id=>id==='uuid'?{v4:require('node:crypto').randomUUID}:id==='@/utils/agent/embedding'?{getEmbedding:async()=>[]}:require(id),module,module.exports);return module.exports;}
  const migrate=moduleAt('lib/storyboardProductionSchema').initializeStoryboardProductionSchema;
- await migrate(db);await moduleAt('lib/initDB').default(db);assert.equal(await db.schema.hasColumn('o_storyboard','productionSpec'),true);
- await db.schema.alterTable('o_storyboard',t=>t.dropColumn('productionSpec'));
- await db('o_storyboard').insert({id:42,projectId:1,scriptId:10,shouldGenerateImage:0,filePath:'/legacy'});
- await migrate(db);await migrate(db);const row=await db('o_storyboard').where({id:42}).first();assert.equal(row.productionSpec,null);assert.equal(row.filePath,'/legacy');assert.equal(row.shouldGenerateImage,0);
+ await migrate(db);await moduleAt('lib/initDB').default(db);assert.equal(await db.schema.hasColumn('o_storyboard','productionSpec'),true);assert.equal(await db.schema.hasColumn('o_storyboard','imagePrompt'),true);
+ await db.schema.alterTable('o_storyboard',t=>{t.dropColumn('productionSpec');t.dropColumn('imagePrompt');});
+ await db('o_storyboard').insert({id:42,projectId:1,scriptId:10,prompt:'Legacy semantic',shouldGenerateImage:0,filePath:'/legacy'});
+ await migrate(db);await migrate(db);const row=await db('o_storyboard').where({id:42}).first();assert.equal(row.productionSpec,null);assert.equal(row.imagePrompt,null);assert.equal(row.prompt,'Legacy semantic');assert.equal(row.filePath,'/legacy');assert.equal(row.shouldGenerateImage,0);
 });

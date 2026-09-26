@@ -69,6 +69,63 @@ test('snapshot is deterministic, scoped, semantic-only and rejects invalid spec'
   assert.equal((await f.post('gate/check', f.input)).code, 'SUPERVISOR_TARGET_UNAVAILABLE');
 });
 
+test('B1 Semantic V2 excludes execution changes, canonicalizes arrays, and stales on semantic changes', async t => {
+  const f = await setup(t), id = await f.addStoryboard({ track: 'Opening', productionSpec: JSON.stringify({ productionMode: 'REAL_ASSET_DIRECT', primaryAssetId: 1, referenceAssetIds: [3, 2], referenceAssetGroupIds: ['z', 'a'] }) });
+  const input = { ...f.input, reviewKey: 'storyboard.semantic-approval.v2' };
+  const baseline = await f.post('target/read', input);
+  assert.equal(baseline.target.targetAdapterKey, 'storyboard.semantic.v2');
+  assert.deepEqual(baseline.target.snapshot[0].referenceAssetIds, [2, 3]);
+  assert.deepEqual(baseline.target.snapshot[0].referenceAssetGroupIds, ['a', 'z']);
+  await f.post('review/decide', decision(input, baseline));
+  await f.db('o_storyboard').where({ id }).update({ imagePrompt: 'Execution only', shouldGenerateImage: 1, filePath: '/output.png', state: '已完成', reason: 'runtime', productionSpec: JSON.stringify({ productionMode: 'REAL_ASSET_DIRECT', primaryAssetId: 1, referenceAssetIds: [2, 3], referenceAssetGroupIds: ['a', 'z'], promptSkillId: 'skill', promptSkillVersion: 'v1', capabilityId: 'capability' }) });
+  assert.equal((await f.post('target/read', input)).target.targetHash, baseline.target.targetHash);
+  assert.equal((await f.post('gate/check', input)).code, 'SUPERVISOR_PASS');
+  const original = await f.db('o_storyboard').where({ id }).first();
+  for (const update of [{ prompt: 'Revised' }, { videoDesc: 'New desc' }, { duration: '4' }, { track: 'Other' }, { productionSpec: JSON.stringify({ productionMode: 'AI_TEXT_TO_IMAGE', primaryAssetId: 1, referenceAssetIds: [2, 3], referenceAssetGroupIds: ['a', 'z'] }) }, { productionSpec: JSON.stringify({ productionMode: 'REAL_ASSET_DIRECT', primaryAssetId: 2, referenceAssetIds: [2, 3], referenceAssetGroupIds: ['a', 'z'] }) }, { productionSpec: JSON.stringify({ productionMode: 'REAL_ASSET_DIRECT', primaryAssetId: 1, referenceAssetIds: [4, 3], referenceAssetGroupIds: ['a', 'z'] }) }, { productionSpec: JSON.stringify({ productionMode: 'REAL_ASSET_DIRECT', primaryAssetId: 1, referenceAssetIds: [2, 3], referenceAssetGroupIds: ['a', 'new'] }) }]) {
+    await f.db('o_storyboard').where({ id }).update(update);
+    assert.notEqual((await f.post('target/read', input)).target.targetHash, baseline.target.targetHash, JSON.stringify(update));
+    await f.db('o_storyboard').where({ id }).update({ prompt: original.prompt, videoDesc: original.videoDesc, duration: original.duration, track: original.track, productionSpec: original.productionSpec });
+  }
+  await f.db('o_assets2Storyboard').insert({ storyboardId: id, assetId: 1 });
+  assert.notEqual((await f.post('target/read', input)).target.targetHash, baseline.target.targetHash);
+  await f.db('o_assets2Storyboard').where({ storyboardId: id }).delete();
+  const second = await f.addStoryboard({ index: 2, prompt: 'Second shot' });
+  const withSecond = (await f.post('target/read', input)).target.targetHash;
+  assert.notEqual(withSecond, baseline.target.targetHash);
+  await f.db('o_storyboard').where({ id: second }).update({ index: 0 });
+  assert.notEqual((await f.post('target/read', input)).target.targetHash, withSecond);
+  await f.db('o_storyboard').where({ id: second }).delete();
+  assert.equal((await f.post('target/read', input)).target.targetHash, baseline.target.targetHash);
+  await f.db('o_storyboard').where({ id }).update({ duration: 'bad' });
+  assert.equal((await f.post('target/read', input, 503)).reason, 'SUPERVISOR_TARGET_UNAVAILABLE');
+  await f.db('o_storyboard').where({ id }).update({ duration: original.duration, prompt: 'Changed semantics' });
+  assert.equal((await f.post('review/history', input)).history[0].status, 'STALE');
+  assert.equal((await f.post('gate/check', input)).code, 'SUPERVISOR_REVIEW_REQUIRED');
+});
+
+test('B1 server resolves legacy advisory and exact enforced V2 review; missing Gate fails closed', async t => {
+  const f = await setup(t); await f.addStoryboard();
+  const legacy = await f.post('current/resolve', { projectId: 1, scriptId: 10 });
+  assert.equal(legacy.mode, 'LEGACY_ADVISORY'); assert.equal(legacy.gateDriving, false); assert.equal(legacy.reviewKey, 'storyboard.semantic-approval');
+  const profile = f.load('services/orchestrator/profileRegistry');
+  const stage = (key, order, exitGateKey) => ({ stageKey: key, displayName: key, description: '', required: true, allowSkip: false, uiOrder: order, entryGateKey: null, exitGateKey, operationKeys: [] });
+  const definition = { schemaVersion: 2, runtimeControl: 'ENFORCED', initialStageKey: 'supervisor-review', stages: [stage('supervisor-review', 10, 'supervisor.storyboard-approved')], transitions: [] };
+  await profile.createVersion({ profileKey: 'advertisement', definition }); await profile.activateVersion({ profileKey: 'advertisement', version: 'v2' }); await profile.bindProfile({ projectId: 1, profileKey: 'advertisement', version: 'v2' });
+  assert.equal((await f.post('current/resolve', { projectId: 1, scriptId: 10 })).reviewKey, 'storyboard.semantic-approval');
+  await profile.createVersion({ profileKey: 'advertisement', definition: { ...definition, stages: [stage('supervisor-review', 10, 'supervisor.storyboard-approved.v2')] } });
+  await profile.activateVersion({ profileKey: 'advertisement', version: 'v3' });
+  await profile.bindProfile({ projectId: 1, profileKey: 'advertisement', version: 'v3' });
+  const resolved = await f.post('current/resolve', { projectId: 1, scriptId: 10 });
+  assert.equal(resolved.reviewKey, 'storyboard.semantic-approval.v2'); assert.equal(resolved.targetAdapterKey, 'storyboard.semantic.v2'); assert.equal(resolved.gateKey, 'supervisor.storyboard-approved.v2');
+  const input = { ...f.input, reviewKey: resolved.reviewKey };
+  const target = await f.post('target/read', input); await f.post('review/decide', decision(input, target));
+  assert.equal((await f.gateRegistry.checkGate(resolved.gateKey, { projectId: 1, scriptId: 10, profileKey: 'advertisement', profileVersion: 'v3', stageKey: 'supervisor-review' })).code, 'SUPERVISOR_PASS');
+  await profile.createVersion({ profileKey: 'advertisement', definition: { ...definition, stages: [stage('supervisor-review', 10, null)] } });
+  await profile.activateVersion({ profileKey: 'advertisement', version: 'v4' });
+  await profile.bindProfile({ projectId: 1, profileKey: 'advertisement', version: 'v4' });
+  assert.equal((await f.post('current/resolve', { projectId: 1, scriptId: 10 }, 409)).reason, 'SUPERVISOR_CURRENT_REVIEW_NOT_CONFIGURED');
+});
+
 test('human PASS, REVISE and stale history feed same diagnostic and Stage Gate', async t => {
   const f = await setup(t), id = await f.addStoryboard();
   const target = await f.post('target/read', f.input);

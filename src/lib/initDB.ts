@@ -487,6 +487,7 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
         table.integer("id").notNullable();
         table.integer("scriptId");
         table.text("prompt");
+        table.text("imagePrompt").nullable();
         table.text("filePath");
         table.text("duration");
         table.text("state");

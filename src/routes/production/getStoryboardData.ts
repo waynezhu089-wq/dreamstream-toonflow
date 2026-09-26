@@ -73,6 +73,7 @@ export default router.post(
           duration: item.duration ? Number(item.duration) : undefined,
           filePath: item.filePath || undefined,
           prompt: item.prompt ?? undefined,
+          imagePrompt: item.imagePrompt ?? null,
           scriptId: item.scriptId ?? undefined,
           characters: charactersWithUrl,
           index: item.index,

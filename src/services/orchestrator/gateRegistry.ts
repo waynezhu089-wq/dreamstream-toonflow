@@ -29,3 +29,4 @@ registerGate("advertisement.asset-ready", async (context, q) => {
   return { pass: false, code: "ADVERTISEMENT_ASSET_GATE_BLOCKED", reason, details: state };
 });
 registerGate("supervisor.storyboard-approved", (context, q) => supervisorStageGate("supervisor.storyboard-approved", context, q));
+registerGate("supervisor.storyboard-approved.v2", (context, q) => supervisorStageGate("supervisor.storyboard-approved.v2", context, q));

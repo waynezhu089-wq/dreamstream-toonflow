@@ -22,6 +22,17 @@ export function productionSpec(row: { productionSpec?: string | null }) {
   // Corrupt persisted semantics must never silently become text-to-image.
   return { ...emptySpec, ...specSchema.parse(JSON.parse(row.productionSpec)) };
 }
+export function semanticProductionSpec(spec: ReturnType<typeof productionSpec>) {
+  return { productionMode: spec.productionMode, primaryAssetId: spec.primaryAssetId,
+    referenceAssetIds: [...spec.referenceAssetIds].sort((a, b) => a - b),
+    referenceAssetGroupIds: [...spec.referenceAssetGroupIds].sort() };
+}
+export function executionProductionSpec(spec: ReturnType<typeof productionSpec>) {
+  return { promptSkillId: spec.promptSkillId, promptSkillVersion: spec.promptSkillVersion, capabilityId: spec.capabilityId };
+}
+export function effectiveImagePrompt(row: { imagePrompt?: string | null; prompt?: string | null }) {
+  return row.imagePrompt?.trim() || row.prompt || "";
+}
 export class StoryboardProductionError extends ProductionGateError {}
 const fail = (message: string, code: string) => { throw new StoryboardProductionError(message, code, 409); };
 
@@ -136,7 +147,7 @@ export async function produceAdvertisementStoryboard(projectId: number, scriptId
         if (requestModel && requestModel !== model) fail("所选模型与当前项目配置不同，请保存配置后重试", "MODEL_CONFIG_MISMATCH");
         const project = await u.db("o_project").where({ id: projectId }).first();
         await u.db("o_storyboard").where(where).update({ state: "生成中", reason: "", filePath: "" });
-        const input = { prompt: row.prompt ?? "", size: project?.imageQuality as "1K" | "2K" | "4K", aspectRatio: project?.videoRatio as `${number}:${number}`, referenceList: [] };
+        const input = { prompt: effectiveImagePrompt(row), size: project?.imageQuality as "1K" | "2K" | "4K", aspectRatio: project?.videoRatio as `${number}:${number}`, referenceList: [] };
         const image = await u.Ai.Image(model as `${string}:${string}`).run(input, { taskClass: "生成分镜图片", describe: "分镜图片生成", relatedObjects: JSON.stringify({ storyboardId: id, scriptId, ...spec, ...input }), projectId });
         const filePath = `/${projectId}/assets/${scriptId}/${u.uuid()}.jpg`;
         await image.save(filePath);

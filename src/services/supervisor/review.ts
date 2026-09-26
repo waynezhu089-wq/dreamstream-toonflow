@@ -11,6 +11,40 @@ import { SkillError } from "@/services/skillContract";
 
 type Query = Knex | Knex.Transaction;
 const db = () => u.db as Knex;
+const currentScopeSchema = scopeSchema.omit({ reviewKey: true });
+export async function resolveCurrentReview(input: unknown) {
+  const parsed = currentScopeSchema.safeParse(input);
+  if (!parsed.success) throw new SupervisorError("SUPERVISOR_SCOPE_INVALID", "请指定当前项目和制作单元");
+  return db().transaction(async trx => {
+    const { projectId, scriptId } = parsed.data;
+    const project = await trx("o_project").where({ id: projectId }).first();
+    if (!project || !await trx("o_script").where({ id: scriptId, projectId }).first()) throw new SupervisorError("SUPERVISOR_SCOPE_INVALID", "制作单元不存在或不属于当前项目", 404);
+    let profile: Awaited<ReturnType<typeof resolveProfile>>;
+    try { profile = await resolveProfile({ projectId }, trx); }
+    catch (error) {
+      if (error instanceof ProfileError || error instanceof SyntaxError) throw new SupervisorError("SUPERVISOR_CONTEXT_UNAVAILABLE", "项目精确 Profile 上下文不存在或不一致", 409);
+      throw error;
+    }
+    if (!profile.managed) throw new SupervisorError("SUPERVISOR_CURRENT_REVIEW_NOT_CONFIGURED", "当前 Profile 没有 Supervisor Review", 409);
+    const stage = profile.definition.stages.find(item => item.stageKey === "supervisor-review");
+    if (!stage) throw new SupervisorError("SUPERVISOR_STAGE_NOT_AVAILABLE", "当前精确 Profile 没有 Supervisor Review 工序", 409);
+    if (stage.exitGateKey) {
+      let definition;
+      try { definition = reviewForGate(stage.exitGateKey); }
+      catch { throw new SupervisorError("SUPERVISOR_CURRENT_REVIEW_NOT_CONFIGURED", "当前 Supervisor Gate 未关联已注册的 Review", 409); }
+      return { mode: "GATE_DRIVING", gateDriving: true, reviewKey: definition.reviewKey, gateKey: definition.gateKey,
+        targetAdapterKey: definition.targetAdapterKey, displayName: definition.displayName,
+        profileKey: profile.profileKey, profileVersion: profile.version };
+    }
+    if (profile.definition.schemaVersion === 1 && profile.profileKey === "advertisement") {
+      const definition = reviewDefinition("storyboard.semantic-approval");
+      return { mode: "LEGACY_ADVISORY", gateDriving: false, reviewKey: definition.reviewKey, gateKey: definition.gateKey,
+        targetAdapterKey: definition.targetAdapterKey, displayName: definition.displayName,
+        profileKey: profile.profileKey, profileVersion: profile.version };
+    }
+    throw new SupervisorError("SUPERVISOR_CURRENT_REVIEW_NOT_CONFIGURED", "当前 Supervisor 工序没有配置已注册的审核 Gate", 409);
+  });
+}
 function scope(input: unknown) {
   const parsed = scopeSchema.safeParse(input);
   if (!parsed.success) throw new SupervisorError("SUPERVISOR_SCOPE_INVALID", "请指定当前项目、制作单元与 Review 类型");

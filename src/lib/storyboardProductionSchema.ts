@@ -11,5 +11,8 @@ export async function initializeStoryboardProductionSchema(db: Knex) {
     if (!(await trx.schema.hasColumn("o_storyboard", "productionSpec"))) {
       await trx.schema.alterTable("o_storyboard", table => table.text("productionSpec").nullable());
     }
+    if (!(await trx.schema.hasColumn("o_storyboard", "imagePrompt"))) {
+      await trx.schema.alterTable("o_storyboard", table => table.text("imagePrompt").nullable());
+    }
   });
 }
