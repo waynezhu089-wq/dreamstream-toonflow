@@ -222,3 +222,166 @@ test('multi-shot provenance uses one transaction-local source query graph', asyn
   const large = await readAndCount();
   assert.ok(large <= small + 1, `query graph grew with shot count: two=${small}, thirty-two=${large}`);
 });
+
+async function attachFixture(t) {
+  const f = await setup(t);
+  await f.raw.schema.alterTable('o_imageFlow', table => table.text('flowData'));
+  const bytes = await require('sharp')({ create: { width: 3, height: 3, channels: 4, background: '#123456' } }).png().toBuffer();
+  const files = new Map([['1/editor/kept.png', bytes]]);
+  f.utils.oss.getFile = async path => {
+    if (!files.has(path)) throw Error('missing fixture image');
+    return files.get(path);
+  };
+  const attach = f.load('services/manualAttach');
+  async function flow(path = '1/editor/kept.png', type = 'upload') {
+    const [flowId] = await f.db('o_imageFlow').insert({ flowData: JSON.stringify({ edges: [], nodes: [{ id: 'node-1', type,
+      data: type === 'upload' ? { image: path } : { generatedImage: path, references: [] } }] }) });
+    return flowId;
+  }
+  return { ...f, attach, files, bytes, flow };
+}
+
+test('manual attach keeps prior current, validates persisted flow and bytes, then becomes CURRENT', async t => {
+  const f = await attachFixture(t);
+  const generated = await f.attempt.beginStoryboardImageAttempt(f.shot);
+  await f.attempt.runStoryboardImageAttempt(generated);
+  const old = await f.row();
+  const flowId = await f.flow();
+  const begun = await f.attach.beginManualAttachAttempt(f.shot, flowId, '/1/editor/kept.png');
+  assert.equal(begun.producerType, 'MANUAL_ATTACH');
+  assert.equal(begun.producerRef, `imageFlow:${flowId}`);
+  assert.equal((await f.row()).filePath, old.filePath);
+  assert.equal((await f.row()).currentImageAttemptId, old.currentImageAttemptId);
+  assert.equal((await f.row()).activeImageAttemptId, begun.attemptId);
+  assert.equal((await f.attach.finishManualAttachAttempt(begun.attemptId)).status, 'SUCCEEDED');
+  const row = await f.row();
+  assert.equal(row.filePath, '1/editor/kept.png');
+  assert.equal(row.flowId, flowId);
+  assert.equal(row.currentImageAttemptId, begun.attemptId);
+  assert.equal(row.activeImageAttemptId, null);
+  assert.equal(row.shouldGenerateImage, 1);
+  const output = JSON.parse((await f.attemptRow(begun.attemptId)).outputRef);
+  assert.equal(output.outputHash, require('node:crypto').createHash('sha256').update(f.bytes).digest('hex'));
+  assert.equal(output.candidateNodeId, 'node-1');
+  assert.equal((await f.provenance()).freshness, 'CURRENT');
+  assert.equal((await f.provenance()).producerType, 'MANUAL_ATTACH');
+  const generatedFlowId = await f.flow('1/editor/kept.png', 'generated');
+  const fromGenerated = await f.attach.beginManualAttachAttempt(f.shot, generatedFlowId, '1/editor/kept.png');
+  assert.equal((await f.attach.finishManualAttachAttempt(fromGenerated.attemptId)).status, 'SUCCEEDED');
+  assert.equal(JSON.parse((await f.attemptRow(fromGenerated.attemptId)).producerInput).candidateNodeType, 'generated');
+  await f.db('o_storyboard').where({ id: f.storyboardId }).update({ prompt: 'Changed after attach' });
+  assert.equal((await f.provenance()).freshness, 'STALE');
+  assert.equal((await f.attemptRow(begun.attemptId)).status, 'SUCCEEDED');
+});
+
+test('manual attach rejects untrusted flow/path and failed image validation retains current', async t => {
+  const f = await attachFixture(t);
+  const first = await f.attempt.beginStoryboardImageAttempt(f.shot);
+  await f.attempt.runStoryboardImageAttempt(first);
+  const original = await f.row();
+  const flowId = await f.flow();
+  await assert.rejects(f.attach.beginManualAttachAttempt(f.shot, flowId + 99, '1/editor/kept.png'), e => e.code === 'ATTACH_FLOW_NOT_FOUND');
+  await assert.rejects(f.attach.beginManualAttachAttempt(f.shot, flowId, '1/editor/other.png'), e => e.code === 'ATTACH_CANDIDATE_NOT_IN_FLOW');
+  await assert.rejects(f.attach.beginManualAttachAttempt(f.shot, flowId, '2/editor/kept.png'), e => e.code === 'ATTACH_CANDIDATE_SCOPE_INVALID');
+  const referenceOnly = await f.flow('1/editor/kept.png', 'reference');
+  await assert.rejects(f.attach.beginManualAttachAttempt(f.shot, referenceOnly, '1/editor/kept.png'), e => e.code === 'ATTACH_CANDIDATE_NOT_IN_FLOW');
+  assert.equal((await f.db('o_productionAttempt').count('* as n').first()).n, 1);
+  f.files.delete('1/editor/kept.png');
+  const missing = await f.attach.beginManualAttachAttempt(f.shot, flowId, '1/editor/kept.png');
+  await assert.rejects(f.attach.finishManualAttachAttempt(missing.attemptId), e => e.code === 'ATTACH_CANDIDATE_FILE_INVALID');
+  assert.equal((await f.attemptRow(missing.attemptId)).status, 'FAILED');
+  assert.equal((await f.row()).filePath, original.filePath);
+  assert.equal((await f.row()).currentImageAttemptId, original.currentImageAttemptId);
+  f.files.set('1/editor/kept.png', Buffer.from('not an image'));
+  const invalid = await f.attach.beginManualAttachAttempt(f.shot, flowId, '1/editor/kept.png');
+  await assert.rejects(f.attach.finishManualAttachAttempt(invalid.attemptId), e => e.code === 'ATTACH_CANDIDATE_FILE_INVALID');
+  assert.equal((await f.row()).filePath, original.filePath);
+});
+
+test('manual attach postflight stales source, control, and removed flow candidates without replacing old current', async t => {
+  const f = await attachFixture(t);
+  const first = await f.attempt.beginStoryboardImageAttempt(f.shot);
+  await f.attempt.runStoryboardImageAttempt(first);
+  const original = await f.row();
+  const flowId = await f.flow();
+  const source = await f.attach.beginManualAttachAttempt(f.shot, flowId, '1/editor/kept.png');
+  await f.db('o_storyboard').where({ id: f.storyboardId }).update({ prompt: 'Changed while attach validates' });
+  assert.equal((await f.attach.finishManualAttachAttempt(source.attemptId)).staleCode, 'PRODUCTION_SOURCE_CHANGED');
+  assert.equal((await f.row()).filePath, original.filePath);
+  await f.decide();
+  const control = await f.attach.beginManualAttachAttempt(f.shot, flowId, '1/editor/kept.png');
+  await f.db('o_stageRun').where({ ...scope, stageKey: 'image-production' }).update({ state: 'COMPLETED' });
+  assert.equal((await f.attach.finishManualAttachAttempt(control.attemptId)).staleCode, 'PRODUCTION_CONTROL_CHANGED');
+  await f.db('o_stageRun').where({ ...scope, stageKey: 'image-production' }).update({ state: 'IN_PROGRESS' });
+  const removed = await f.attach.beginManualAttachAttempt(f.shot, flowId, '1/editor/kept.png');
+  await f.db('o_imageFlow').where({ id: flowId }).update({ flowData: JSON.stringify({ nodes: [], edges: [] }) });
+  assert.equal((await f.attach.finishManualAttachAttempt(removed.attemptId)).staleCode, 'ATTACH_CANDIDATE_NOT_IN_FLOW');
+  assert.equal((await f.row()).filePath, original.filePath);
+  assert.equal((await f.row()).currentImageAttemptId, original.currentImageAttemptId);
+});
+
+test('generic attach postflight rejects mismatched output without trusting caller metadata', async t => {
+  const f = await attachFixture(t);
+  const flowId = await f.flow();
+  const begun = await f.attach.beginManualAttachAttempt(f.shot, flowId, '1/editor/kept.png');
+  const result = await f.attempt.finishCurrentImageAttempt(begun.attemptId, { filePath: '1/editor/other.png',
+    mediaType: 'image/png', outputHash: 'forged', byteLength: 1, flowId });
+  assert.equal(result.status, 'STALE');
+  assert.equal(result.staleCode, 'PRODUCTION_OUTPUT_PROVENANCE_MISMATCH');
+  assert.equal((await f.row()).filePath, '');
+  assert.equal((await f.row()).currentImageAttemptId, null);
+});
+
+test('one subject owner: attach supersedes generate and a newer attach supersedes older attach', async t => {
+  const f = await attachFixture(t);
+  const flowId = await f.flow();
+  const generate = await f.attempt.beginStoryboardImageAttempt(f.shot);
+  const attachA = await f.attach.beginManualAttachAttempt(f.shot, flowId, '1/editor/kept.png');
+  assert.equal((await f.attemptRow(generate.attemptId)).staleCode, 'PRODUCTION_ATTEMPT_SUPERSEDED');
+  assert.equal((await f.attempt.finishStoryboardImageAttempt(generate.attemptId, { filePath: '/generated/1', mediaType: 'image/jpeg' })).status, 'STALE');
+  const attachB = await f.attach.beginManualAttachAttempt(f.shot, flowId, '1/editor/kept.png');
+  assert.equal((await f.attemptRow(attachA.attemptId)).staleCode, 'PRODUCTION_ATTEMPT_SUPERSEDED');
+  assert.equal((await f.attach.finishManualAttachAttempt(attachA.attemptId)).status, 'STALE');
+  assert.equal((await f.row()).activeImageAttemptId, attachB.attemptId);
+  assert.equal((await f.attach.finishManualAttachAttempt(attachB.attemptId)).status, 'SUCCEEDED');
+  assert.equal((await f.row()).currentImageAttemptId, attachB.attemptId);
+  assert.equal((await f.row()).filePath, '1/editor/kept.png');
+});
+
+test('HTTP controlled attach derives output provenance on server; Legacy V1 still has no Attempt', async t => {
+  const f = await attachFixture(t);
+  const express = require('express');
+  const app = express(); app.use(express.json());
+  f.load('middleware/productionGate').registerProductionGate(app);
+  app.use('/api/production/storyboard/updateStoryboardUrl', f.load('routes/production/storyboard/updateStoryboardUrl').default);
+  const server = app.listen(0, '127.0.0.1'); await require('node:events').once(server, 'listening');
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  async function post(body) {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/production/storyboard/updateStoryboardUrl`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() };
+  }
+  const flowId = await f.flow();
+  const controlled = await post({ id: f.storyboardId, projectId: 1, scriptId: 10, flowId, url: '/1/editor/kept.png',
+    sourceHash: 'forged', outputHash: 'forged', status: 'SUCCEEDED' });
+  assert.equal(controlled.status, 200, JSON.stringify(controlled.body));
+  const attached = await f.row();
+  const record = await f.attemptRow(attached.currentImageAttemptId);
+  assert.equal(record.producerType, 'MANUAL_ATTACH');
+  assert.notEqual(record.sourceHash, 'forged');
+  assert.notEqual(JSON.parse(record.outputRef).outputHash, 'forged');
+  const foreign = await post({ id: f.storyboardId, projectId: 2, scriptId: 20, flowId, url: '/1/editor/kept.png' });
+  assert.equal(foreign.status, 400);
+  assert.equal((await f.row()).currentImageAttemptId, attached.currentImageAttemptId);
+  const legacyShot = await f.post('storyboard/addStoryboard', { projectId: 2, scriptId: 20,
+    ...f.item({ primaryAssetId: 3, associateAssetsIds: [3] }) });
+  const before = Number((await f.db('o_productionAttempt').count('* as n').first()).n);
+  const legacy = await post({ id: legacyShot.id, projectId: 2, scriptId: 20, flowId: 999, url: '/legacy/image.png' });
+  assert.equal(legacy.status, 200, JSON.stringify(legacy.body));
+  const legacyRow = await f.db('o_storyboard').where({ id: legacyShot.id }).first();
+  assert.equal(legacyRow.filePath, '/legacy/image.png');
+  assert.equal(legacyRow.currentImageAttemptId, null);
+  assert.equal(Number((await f.db('o_productionAttempt').count('* as n').first()).n), before);
+  assert.equal((await f.attempt.readImageProvenance(2, 20, [legacyRow])).get(legacyShot.id).freshness, 'LEGACY');
+});

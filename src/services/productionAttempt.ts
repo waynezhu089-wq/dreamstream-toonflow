@@ -1,19 +1,23 @@
 import { randomUUID } from "node:crypto";
 import type { Knex } from "knex";
 import u from "@/utils";
+import { readAttachCandidate } from "@/services/attachCandidate";
 import { ProductionGateError } from "@/services/advertisementGate";
 import { resolveModelsInTransaction, requireModel } from "@/services/modelPreset";
 import { readProductionOperationAdmission, type OperationAdmission } from "@/services/orchestrator/productionOperationGuard";
+import type { ProductionOperationKey } from "@/services/orchestrator/productionOperationRegistry";
 import { canonicalJson, sha256 } from "@/services/supervisor/contract";
 import { effectiveImagePrompt, productionSpec } from "@/services/storyboardProduction";
 
 const database = () => u.db as Knex;
-const operationKey = "storyboard.image.generate";
+const generateOperationKey = "storyboard.image.generate";
+const attachOperationKey = "storyboard.image.attach";
 const subjectType = "STORYBOARD_IMAGE";
 const adapterKey = "storyboard.image-source.v1";
 const directRef = "toonflow.real-asset-direct.v1";
 type Scope = { projectId: number; scriptId: number; storyboardId: number };
-type Output = { filePath: string; mediaType: string; outputHash?: string; assetId?: number; imageId?: number; assetKey?: string };
+type Output = { filePath: string; mediaType: string; outputHash?: string; byteLength?: number; flowId?: number;
+  candidateNodeType?: string; candidateNodeId?: string; assetId?: number; imageId?: number; assetKey?: string };
 
 function fail(code: string, message: string): never { throw new ProductionGateError(message, code, 409); }
 function parseJson(value: string | null | undefined) { return value ? JSON.parse(value) : null; }
@@ -21,7 +25,7 @@ function stableControl(admission: OperationAdmission) {
   return {
     profile: { key: admission.profileKey, version: admission.profileVersion, definitionHash: admission.profileDefinitionHash },
     recipe: admission.recipeKey ? { key: admission.recipeKey, version: admission.recipeVersion, definitionHash: admission.recipeDefinitionHash } : null,
-    operationKey, stage: { key: admission.stageKey, state: admission.stageState },
+    operationKey: admission.operationKey, stage: { key: admission.stageKey, state: admission.stageState },
     gates: admission.gates.map(gate => {
       const detail = (gate.result.details ?? gate.result) as any;
       return { gateKey: gate.gateKey, stageKey: gate.stageKey, boundary: gate.boundary, pass: gate.result.pass, code: gate.result.code,
@@ -136,10 +140,13 @@ export async function captureStoryboardImageSource(q: Knex.Transaction, scope: S
   return buildStoryboardImageSource(context, scope);
 }
 
-export async function beginStoryboardImageAttempt(scope: Scope, requestModel?: string, transaction?: Knex.Transaction) {
+type Producer = { producerType: string; producerRef: string | null; producerInput: any };
+export async function beginCurrentImageAttempt(scope: Scope, operationKey: ProductionOperationKey,
+  prepareProducer: (q: Knex.Transaction, source: Awaited<ReturnType<typeof captureStoryboardImageSource>>) => Promise<Producer> | Producer,
+  transaction?: Knex.Transaction) {
   const begin = async (q: Knex.Transaction) => {
     const source = await captureStoryboardImageSource(q, scope);
-    if (requestModel && source.producerType === "AI_MODEL" && requestModel !== source.producerRef) fail("MODEL_CONFIG_MISMATCH", "所选模型与当前项目配置不同，请保存配置后重试");
+    const producer = await prepareProducer(q, source);
     const admission = await readProductionOperationAdmission(operationKey, scope, q);
     if (!admission.enforced || !admission.allowed || !admission.snapshotConsistent) fail(admission.code, admission.reason ?? "当前生产工序未放行");
     const controlSnapshot = stableControl(admission);
@@ -150,17 +157,41 @@ export async function beginStoryboardImageAttempt(scope: Scope, requestModel?: s
       profileKey: admission.profileKey, profileVersion: Number(admission.profileVersion!.slice(1)), profileDefinitionHash: admission.profileDefinitionHash,
       recipeKey: admission.recipeKey, recipeVersion: admission.recipeVersion, recipeDefinitionHash: admission.recipeDefinitionHash,
       stageKey: admission.stageKey, operationKey, subjectType, subjectId: scope.storyboardId, sourceAdapterKey: adapterKey,
-      sourceHash: source.sourceHash, sourceSnapshot: canonicalJson(source.snapshot), producerType: source.producerType,
-      producerRef: source.producerRef, producerInput: canonicalJson(source.producerInput), controlContextHash: sha256(controlSnapshot),
+      sourceHash: source.sourceHash, sourceSnapshot: canonicalJson(source.snapshot), producerType: producer.producerType,
+      producerRef: producer.producerRef, producerInput: canonicalJson(producer.producerInput), controlContextHash: sha256(controlSnapshot),
       controlSnapshot: canonicalJson(controlSnapshot), status: "RUNNING", startedAt: now, updatedAt: now });
     await q("o_storyboard").where({ id: scope.storyboardId, projectId: scope.projectId, scriptId: scope.scriptId })
       .update({ activeImageAttemptId: attemptId, state: "生成中", reason: "" });
-    return { attemptId, ...scope, producerType: source.producerType, producerRef: source.producerRef, producerInput: source.producerInput };
+    return { attemptId, ...scope, ...producer };
   };
   return transaction ? begin(transaction) : database().transaction(begin);
 }
 
-export async function finishStoryboardImageAttempt(attemptId: string, output: Output) {
+export async function beginStoryboardImageAttempt(scope: Scope, requestModel?: string, transaction?: Knex.Transaction) {
+  return beginCurrentImageAttempt(scope, generateOperationKey, (_q, source) => {
+    if (requestModel && source.producerType === "AI_MODEL" && requestModel !== source.producerRef) fail("MODEL_CONFIG_MISMATCH", "所选模型与当前项目配置不同，请保存配置后重试");
+    return { producerType: source.producerType, producerRef: source.producerRef, producerInput: source.producerInput };
+  }, transaction);
+}
+
+async function outputProvenanceCode(q: Knex.Transaction, attempt: any, output: Output, scope: Scope): Promise<string | null> {
+  const input = parseJson(attempt.producerInput);
+  if (attempt.producerType === "REAL_ASSET_DIRECT") return output.filePath === input?.filePath ? null : "PRODUCTION_OUTPUT_PROVENANCE_MISMATCH";
+  if (attempt.producerType === "AI_MODEL") return output.filePath === `/${scope.projectId}/production-attempts/${attempt.attemptId}/image.jpg` ? null : "PRODUCTION_OUTPUT_PROVENANCE_MISMATCH";
+  if (attempt.producerType === "MANUAL_ATTACH") {
+    if (attempt.operationKey !== attachOperationKey || attempt.producerRef !== `imageFlow:${input?.flowId}` ||
+      output.filePath !== input?.candidatePath || output.flowId !== input?.flowId || !output.outputHash || !output.byteLength) {
+      return "PRODUCTION_OUTPUT_PROVENANCE_MISMATCH";
+    }
+    try {
+      const current = await readAttachCandidate(q, scope.projectId, input.flowId, input.candidatePath);
+      return current.candidateNodeId === input.candidateNodeId && current.candidateNodeType === input.candidateNodeType ? null : "PRODUCTION_OUTPUT_PROVENANCE_MISMATCH";
+    } catch (error) { return error instanceof ProductionGateError ? error.code : "PRODUCTION_OUTPUT_PROVENANCE_MISMATCH"; }
+  }
+  return "PRODUCTION_OUTPUT_PROVENANCE_MISMATCH";
+}
+
+export async function finishCurrentImageAttempt(attemptId: string, output: Output) {
   return database().transaction(async q => {
     const attempt = await q("o_productionAttempt").where({ attemptId }).first();
     if (!attempt) fail("PRODUCTION_ATTEMPT_NOT_FOUND", "图片生产任务不存在");
@@ -175,9 +206,7 @@ export async function finishStoryboardImageAttempt(attemptId: string, output: Ou
     let staleCode: string | null = null;
     if (!storyboard) staleCode = "PRODUCTION_SUBJECT_CHANGED";
     else if (storyboard.activeImageAttemptId !== attemptId) staleCode = "PRODUCTION_ATTEMPT_SUPERSEDED";
-    const input = parseJson(attempt.producerInput);
-    if (!staleCode && (attempt.producerType === "REAL_ASSET_DIRECT" && output.filePath !== input?.filePath ||
-      attempt.producerType === "AI_MODEL" && output.filePath !== `/${scope.projectId}/production-attempts/${attemptId}/image.jpg`)) staleCode = "PRODUCTION_OUTPUT_PROVENANCE_MISMATCH";
+    if (!staleCode) staleCode = await outputProvenanceCode(q, attempt, output, scope);
     if (!staleCode) {
       try {
         const source = await captureStoryboardImageSource(q, scope);
@@ -185,7 +214,7 @@ export async function finishStoryboardImageAttempt(attemptId: string, output: Ou
       } catch { staleCode = "PRODUCTION_SOURCE_CHANGED"; }
     }
     if (!staleCode) {
-      const admission = await readProductionOperationAdmission(operationKey, scope, q);
+      const admission = await readProductionOperationAdmission(attempt.operationKey, scope, q);
       if (!admission.enforced || !admission.allowed || !admission.snapshotConsistent || sha256(stableControl(admission)) !== attempt.controlContextHash) staleCode = "PRODUCTION_CONTROL_CHANGED";
     }
     if (staleCode) {
@@ -196,12 +225,15 @@ export async function finishStoryboardImageAttempt(attemptId: string, output: Ou
     }
     await q("o_productionAttempt").where({ attemptId }).update({ status: "SUCCEEDED", outputRef, completedAt: now, updatedAt: now });
     await q("o_storyboard").where({ id: scope.storyboardId, projectId: scope.projectId, scriptId: scope.scriptId })
-      .update({ filePath: output.filePath, currentImageAttemptId: attemptId, activeImageAttemptId: null, state: "已完成", reason: "" });
+      .update({ filePath: output.filePath, currentImageAttemptId: attemptId, activeImageAttemptId: null, state: "已完成", reason: "",
+        ...(attempt.producerType === "MANUAL_ATTACH" ? { flowId: output.flowId, shouldGenerateImage: 1 } : {}) });
     return { attemptId, status: "SUCCEEDED" };
   });
 }
 
-export async function failStoryboardImageAttempt(attemptId: string, error: unknown) {
+export async function finishStoryboardImageAttempt(attemptId: string, output: Output) { return finishCurrentImageAttempt(attemptId, output); }
+
+export async function failCurrentImageAttempt(attemptId: string, error: unknown) {
   return database().transaction(async q => {
     const attempt = await q("o_productionAttempt").where({ attemptId }).first();
     if (!attempt || attempt.status !== "RUNNING") return;
@@ -213,6 +245,8 @@ export async function failStoryboardImageAttempt(attemptId: string, error: unkno
     if (row) await q("o_storyboard").where(where).update({ activeImageAttemptId: null, state: row.filePath ? "已完成" : "生成失败", reason: row.filePath ? "" : `${code}: ${message}` });
   });
 }
+
+export async function failStoryboardImageAttempt(attemptId: string, error: unknown) { return failCurrentImageAttempt(attemptId, error); }
 
 export async function runStoryboardImageAttempt(attempt: Awaited<ReturnType<typeof beginStoryboardImageAttempt>>) {
   try {

@@ -128,9 +128,12 @@ test('composite start/finish and current-image attach pass through real middlewa
   }
   assert.equal((await f.db('o_storyboard').where({ id: f.shotId }).first()).filePath, null);
   await f.decide();
-  const attached = await post('updateStoryboardUrl', { id: f.shotId, url: '/tmp/attached.png', flowId: 1 });
-  assert.equal(attached.status, 200);
-  assert.equal((await f.db('o_storyboard').where({ id: f.shotId }).first()).filePath, '/tmp/attached.png');
+  await f.raw.schema.alterTable('o_imageFlow', table => table.text('flowData'));
+  const [flowId] = await f.db('o_imageFlow').insert({ flowData: JSON.stringify({ nodes: [{ id: 'upload-1', type: 'upload', data: { image: '1/editor/attached.png' } }], edges: [] }) });
+  f.utils.oss.getFile = async () => require('sharp')({ create: { width: 2, height: 2, channels: 4, background: '#123456' } }).png().toBuffer();
+  const attached = await post('updateStoryboardUrl', { id: f.shotId, url: '/1/editor/attached.png', flowId });
+  assert.equal(attached.status, 200, JSON.stringify(attached.body));
+  assert.equal((await f.db('o_storyboard').where({ id: f.shotId }).first()).filePath, '1/editor/attached.png');
   assert.equal((await f.db('o_stageRun').where({ ...unit, stageKey: 'image-production' }).first()).state, 'IN_PROGRESS');
 });
 
