@@ -15,6 +15,28 @@ import jwt from "jsonwebtoken";
 import socketInit from "@/socket/index";
 import { isEletron } from "@/utils/getPath";
 import { ensureThumbnail, ThumbnailSize } from "@/utils/image";
+import { registerProductionGate } from "@/middleware/productionGate";
+import { initializeAssetPlanSchema } from "@/lib/advertisementAssetPlanSchema";
+import assetPlan from "@/routes/project/advertisement/assetPlan";
+
+import { initializeModelPresetSchema } from "@/lib/modelPresetSchema";
+import modelPresets from "@/routes/modelSelect/presets";
+import { modelUseGate } from "@/middleware/modelUseGate";
+
+import { initializeStoryboardProductionSchema } from "@/lib/storyboardProductionSchema";
+import { initializeCompositeAttemptSchema } from "@/lib/compositeAttemptSchema";
+import composite from "@/routes/production/storyboard/composite";
+import { initializeCapabilitySchema } from "@/lib/capabilitySchema";
+import capabilities from "@/routes/capabilities";
+import { initializeSkillSchema } from "@/lib/skillSchema";
+import skills from "@/routes/skills";
+import { initializeProductionProfileSchema } from "@/lib/productionProfileSchema";
+import productionProfiles from "@/routes/productionProfiles";
+import { initializeRecipeSchema } from "@/lib/recipeSchema";
+import recipes from "@/routes/recipes";
+import stageOrchestrator from "@/routes/stageOrchestrator";
+import { initializeSupervisorSchema } from "@/lib/supervisorSchema";
+import supervisor from "@/routes/supervisor";
 
 const app = express();
 const server = http.createServer(app);
@@ -45,6 +67,15 @@ async function checkPermissions() {
 
 export default async function startServe(randomPort: Boolean = false) {
   await checkPermissions();
+  await initializeAssetPlanSchema(u.db);
+  await initializeModelPresetSchema(u.db);
+  await initializeStoryboardProductionSchema(u.db);
+  await initializeCompositeAttemptSchema(u.db);
+  await initializeCapabilitySchema(u.db);
+  await initializeSkillSchema(u.db);
+  await initializeProductionProfileSchema(u.db);
+  await initializeRecipeSchema(u.db);
+  await initializeSupervisorSchema(u.db);
 
   await u.writeVersion();
   const io = new Server(server, { cors: { origin: "*" } });
@@ -169,6 +200,17 @@ export default async function startServe(randomPort: Boolean = false) {
     }
   });
 
+  registerProductionGate(app);
+  app.use("/api/production/storyboard/composite", composite);
+  app.use("/api/capabilities", capabilities);
+  app.use("/api/skills", skills);
+  app.use("/api/productionProfiles", productionProfiles);
+  app.use("/api/recipes", recipes);
+  app.use("/api/stageOrchestrator", stageOrchestrator);
+  app.use("/api/supervisor", supervisor);
+  app.use("/api/modelSelect/presets", modelPresets);
+  app.use(modelUseGate);
+  app.use("/api/project/advertisement/assetPlan", assetPlan);
   const router = await import("@/router");
   await router.default(app);
 

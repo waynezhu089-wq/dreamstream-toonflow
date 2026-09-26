@@ -24,6 +24,9 @@
     "dev:gui-vite": "cross-env VITE_DEV=1 electronmon -r tsx scripts/main.ts",
     "start": "cross-env NODE_ENV=prod node data/serve/app.js",
     "lint": "tsc --noEmit",
+    "test:production-workspace": "node --test tests/production-workspace.test.cjs",
+    "test:advertisement-asset-plan": "node --test tests/advertisement-asset-plan.test.cjs",
+    "test:advertisement-gate": "node --test tests/advertisement-production-gate.test.cjs",
     "build": "cross-env NODE_ENV=prod tsx scripts/build.ts",
     "pack": "electron-builder --dir",
     "dist": "yarn build && electron-builder",
@@ -32,7 +35,15 @@
     "dist:linux": "yarn build && electron-builder --linux",
     "debug:ai": "npx @ai-sdk/devtools",
     "license": "node scripts/license.ts",
-    "vendor2json": "node scripts/vendor2json.ts"
+    "vendor2json": "node scripts/vendor2json.ts",
+    "test:database-adapter": "node --test tests/database-adapter.test.cjs",
+    "test:model-presets": "node --test tests/model-presets.test.cjs",
+    "test:advertisement-production-context": "node --test tests/advertisement-production-context.test.cjs",
+    "test:storyboard-production": "node --test tests/storyboard-production.test.cjs",
+    "test:composite": "node --test tests/composite-attempt.test.cjs",
+    "test:capabilities": "node --test tests/capability-registry.test.cjs",
+    "test:production-profiles": "node --test tests/production-profiles.test.cjs",
+    "test:recipes": "node --test tests/recipe-registry.test.cjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.35",

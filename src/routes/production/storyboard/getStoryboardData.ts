@@ -1,3 +1,4 @@
+import { productionSpec } from "@/services/storyboardProduction";
 import express from "express";
 import u from "@/utils";
 import { z } from "zod";
@@ -8,6 +9,7 @@ const router = express.Router();
 export default router.post(
   "/",
   validateFields({
+    projectId: z.number().optional(),
     scriptId: z.number(),
     page: z.number(),
     limit: z.number(),
@@ -15,11 +17,14 @@ export default router.post(
   }),
   async (req, res) => {
     const { scriptId, page, limit, name } = req.body;
+    const script = await u.db("o_script").where({id:scriptId}).first();
+    if (!script || (req.body.projectId !== undefined && req.body.projectId !== script.projectId)) return res.status(400).send({message:"制作单元不属于当前项目"});
+    const projectId = script.projectId;
     const offset = (page - 1) * limit;
 
     const storyboardData = await u
       .db("o_storyboard")
-      .where({ scriptId })
+      .where({ scriptId, projectId })
       .modify((qb) => {
         if (name) {
           qb.andWhere("title", "like", `%${name}%`);
@@ -30,8 +35,10 @@ export default router.post(
     const data = await Promise.all(
       storyboardData.map(async (i: any) => {
         return {
+          ...productionSpec(i),
           id: i.id,
           prompt: i.prompt,
+          imagePrompt: i.imagePrompt ?? null,
           state: i.state,
           src: i.filePath ? await u.oss.getSmallImageUrl(i.filePath!) : "",
         };
@@ -39,7 +46,7 @@ export default router.post(
     );
     const totalQuery = (await u
       .db("o_storyboard")
-      .where({ scriptId })
+      .where({ scriptId, projectId })
       .modify((qb) => {
         if (name) {
           qb.andWhere("title", "like", `%${name}%`);

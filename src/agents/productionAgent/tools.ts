@@ -1,8 +1,11 @@
+import { productionFields } from "@/services/storyboardProduction";
 import { tool, jsonSchema, Tool } from "ai";
 import { z } from "zod";
 import _ from "lodash";
 import ResTool from "@/socket/resTool";
 import u from "@/utils";
+
+import { advertisementProductionContext, assertAdvertisementAssetReferences } from "@/services/advertisementProductionContext";
 
 const deriveAssetSchema = z.object({
   id: z.number().describe("衍生资产ID,如果新增则为空"),
@@ -23,6 +26,7 @@ export const assetItemSchema = z.object({
   derive: z.array(deriveAssetSchema).describe("衍生资产列表"),
 });
 const storyboardSchema = z.object({
+  ...productionFields,
   id: z.number().describe("分镜ID，必须为真实id"),
   duration: z.number().describe("持续时长(秒)"),
   prompt: z.string().describe("生成提示词"),
@@ -58,6 +62,8 @@ const flowDataKeyLabels = Object.fromEntries(
 ) as Record<keyof FlowData, string>;
 
 interface ToolConfig {
+  advertisement?: boolean;
+  storyboardGeneration?: boolean;
   resTool: ResTool;
   toolsNames?: string[];
   msg: ReturnType<ResTool["newMessage"]>;
@@ -96,6 +102,10 @@ export default (toolCpnfig: ToolConfig) => {
           .toJSONSchema(),
       ),
       execute: async ({ key }) => {
+        if (key === "assets") {
+          const context = await advertisementProductionContext(resTool.data.projectId, resTool.data.scriptId);
+          if (context) return context.assets;
+        }
         const thinking = msg.thinking(`正在获取${flowDataKeyLabels[key]}工作区数据...`);
 
         const flowData: FlowData = await new Promise((resolve) => socket.emit("getFlowData", { key }, (res: any) => resolve(res)));
@@ -228,7 +238,7 @@ export default (toolCpnfig: ToolConfig) => {
         )
           .then((res) => {
             thinking.appendText("生成的分镜数据:\n" + JSON.stringify(res, null, 2));
-            thinking.updateTitle("分镜生成完成");
+            thinking.updateTitle(toolCpnfig.advertisement ? "分镜生产请求已接收，请检查最终状态" : "分镜生成完成");
             thinking.complete();
           })
           .catch((e) => {
@@ -249,9 +259,17 @@ export default (toolCpnfig: ToolConfig) => {
         duration: number;
         associateAssetsIds: number[] | null;
         shouldGenerateImage: string;
+        productionMode?: "REAL_ASSET_DIRECT" | "AI_TEXT_TO_IMAGE" | "AI_REFERENCE_GENERATE" | "REAL_AI_COMPOSITE" | null;
+        primaryAssetId?: number | null;
+        referenceAssetIds?: number[];
+        referenceAssetGroupIds?: string[];
+        promptSkillId?: string | null;
+        promptSkillVersion?: string | null;
+        capabilityId?: string | null;
       }>(
         z
           .object({
+            ...productionFields,
             videoDesc: z.string().describe("画面描述、场景、关联资产名称、时长、景别、运镜、角色动作、情绪、光影氛围、台词、音效、关联资产ID"),
             prompt: z.string().nullable().describe("分镜图片提示词"),
             track: z.string().describe("分组"),
@@ -262,8 +280,10 @@ export default (toolCpnfig: ToolConfig) => {
           .toJSONSchema(),
       ),
       execute: async (raw) => {
+        await assertAdvertisementAssetReferences(resTool.data.projectId, resTool.data.scriptId, raw.associateAssetsIds ?? []);
         const thinking = msg.thinking("正在新增 分镜面板 数据...");
         const data = {
+          ...Object.fromEntries(Object.keys(productionFields).filter(key => key in raw).map(key => [key, (raw as any)[key]])),
           videoDesc: raw.videoDesc,
           prompt: raw.prompt,
           track: raw.track,
@@ -293,7 +313,76 @@ export default (toolCpnfig: ToolConfig) => {
         return true;
       },
     }),
+    replace_flowData_storyboard: tool({
+      description:
+        "整套替换当前制作单元的分镜面板。仅在用户明确要求修订/清理已有分镜，并且需要让分镜面板与已确认的分镜表一一对应时使用。该工具是幂等修订入口，不用于普通新增。",
+      inputSchema: jsonSchema<{
+        items: Array<{
+          videoDesc: string;
+          prompt: string | null;
+          track: string;
+          duration: number;
+          associateAssetsIds: number[] | null;
+          shouldGenerateImage: "true" | "false";
+        }>;
+      }>(
+        z
+          .object({
+            items: z
+              .array(
+                z.object({
+                  ...productionFields,
+                  videoDesc: z.string().describe("画面描述、场景、动作、台词、音效等"),
+                  prompt: z.string().nullable().describe("分镜图片提示词"),
+                  track: z.string().describe("分组"),
+                  duration: z.number().positive().describe("视频推荐时间"),
+                  associateAssetsIds: z.array(z.number()).nullable().describe("真实存在的关联资产ID；无资产时传空数组"),
+                  shouldGenerateImage: z.enum(["true", "false"]).describe("是否需要生成分镜图片"),
+                }),
+              )
+              .min(1)
+              .max(50)
+              .describe("最终完整分镜列表，顺序即最终镜头顺序"),
+          })
+          .toJSONSchema(),
+      ),
+      execute: async ({ items }) => {
+        await assertAdvertisementAssetReferences(resTool.data.projectId, resTool.data.scriptId, items.flatMap(item => item.associateAssetsIds ?? []));
+        const thinking = msg.thinking("正在整套替换分镜面板...");
+        try {
+          const res = await socketQueue(
+            () =>
+              new Promise<any>((resolve, reject) =>
+                socket.emit("replaceStoryboard", { items }, (result: any) => {
+                  if (!result?.success) return reject(new Error(result?.error || result?.message || "整套替换分镜失败"));
+                  resolve(result);
+                }),
+              ),
+          );
+          thinking.appendText(`已将当前分镜面板替换为 ${items.length} 条最终分镜。\n`);
+          thinking.updateTitle("整套替换分镜完成");
+          thinking.complete();
+          return res?.message ?? `已替换为 ${items.length} 条分镜`;
+        } catch (e) {
+          thinking.appendText("整套替换分镜失败:\n" + u.error(e).message);
+          thinking.updateTitle("整套替换分镜失败");
+          thinking.complete();
+          throw e;
+        }
+      },
+    }),
   };
 
+  if (toolCpnfig.advertisement) {
+    // Text planning and review cannot directly dispatch storyboard images.
+    if (!toolCpnfig.storyboardGeneration) delete tools.generate_storyboard;
+    // Auxiliary asset creation belongs to Asset Preparation, not Production planning.
+    for (const name of ["add_deriveAsset", "del_deriveAsset", "generate_deriveAsset"]) delete tools[name];
+    tools.get_advertisementAssetPlan = tool({
+      description: "读取当前项目/制作单元已确认 Asset Plan 的有效生产资产语义（含真实 assetId）",
+      inputSchema: jsonSchema(z.object({}).toJSONSchema()),
+      execute: async () => advertisementProductionContext(resTool.data.projectId, resTool.data.scriptId),
+    });
+  }
   return toolsNames ? Object.fromEntries(Object.entries(tools).filter(([n]) => toolsNames.includes(n))) : tools;
 };

@@ -1,8 +1,11 @@
-import { generateText, streamText, wrapLanguageModel, stepCountIs, extractReasoningMiddleware } from "ai";
+import { generateText, generateObject, streamText, wrapLanguageModel, stepCountIs, extractReasoningMiddleware } from "ai";
+import type { ZodType } from "zod";
 import { devToolsMiddleware } from "@ai-sdk/devtools";
 import axios from "axios";
 import { transform } from "sucrase";
 import u from "@/utils";
+
+import { requireModel } from "@/services/modelPreset";
 
 type AiType =
   | "scriptAgent"
@@ -194,6 +197,27 @@ class AiText {
     ];
     return mws.length > 0 ? wrapLanguageModel({ model: baseModel, middleware: mws.length === 1 ? mws[0] : mws }) : baseModel;
   }
+  // Pin the actual provider/model and deployment parameters for an entire
+  // structured review, including its optional repair attempt.
+  async trackedSession() {
+    const modelReference = await resolveModelName(this.AiType);
+    const config = await getModelConfig(this.AiType);
+    const sdkFn = await getVendorTemplateFn("textRequest", modelReference);
+    const model = await sdkFn(this.think, this.thinkLevel);
+    return {
+      modelReference,
+      invoke: (input: Omit<Parameters<typeof generateText>[0], "model">) => generateText({
+        ...input, model,
+        ...(config?.temperature && { temperature: config.temperature }),
+        ...(config?.maxOutputTokens && { maxOutputTokens: config.maxOutputTokens }),
+      } as Parameters<typeof generateText>[0]),
+      invokeObject: (input: Omit<Parameters<typeof generateObject>[0], "model"> & { schema: ZodType }) => generateObject({
+        ...input, model,
+        ...(config?.temperature && { temperature: config.temperature }),
+        ...(config?.maxOutputTokens && { maxOutputTokens: config.maxOutputTokens }),
+      } as Parameters<typeof generateObject>[0]),
+    };
+  }
   async invoke(input: Omit<Parameters<typeof generateText>[0], "model">) {
     const config = await getModelConfig(this.AiType);
 
@@ -250,7 +274,8 @@ class AiImage {
     this.key = key;
   }
   async run(input: ImageConfig, taskRecord?: TaskRecord) {
-    const modelName = await resolveModelName(this.key);
+    const selected = taskRecord ? await requireModel(taskRecord.projectId, "image", this.key) : this.key;
+    const modelName = await resolveModelName(selected as typeof this.key);
     const exec = async (mn: `${string}:${string}`) => {
       const fn = await getVendorTemplateFn("imageRequest", mn);
       await referenceList2imageBase642(mn.split(/:(.+)/)[0], input);
@@ -259,7 +284,7 @@ class AiImage {
       return this;
     };
     if (taskRecord) {
-      await withTaskRecord(this.key, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
+      await withTaskRecord(modelName, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
       return this;
     }
     await exec(modelName);
@@ -296,7 +321,8 @@ class AiVideo {
     this.key = key;
   }
   async run(input: VideoConfig, taskRecord?: TaskRecord) {
-    const modelName = await resolveModelName(this.key);
+    const selected = taskRecord ? await requireModel(taskRecord.projectId, "video", this.key) : this.key;
+    const modelName = await resolveModelName(selected as typeof this.key);
     try {
       const exec = async (mn: `${string}:${string}`) => {
         const fn = await getVendorTemplateFn("videoRequest", mn);
@@ -307,7 +333,7 @@ class AiVideo {
         if (this.result.startsWith("http")) this.result = await urlToBase64(this.result);
       };
       if (taskRecord) {
-        await withTaskRecord(this.key, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
+        await withTaskRecord(modelName, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
         return this;
       }
       await exec(modelName);
@@ -328,7 +354,8 @@ class AiAudio {
     this.key = key;
   }
   async run(input: VideoConfig, taskRecord?: TaskRecord) {
-    const modelName = await resolveModelName(this.key);
+    const selected = taskRecord ? await requireModel(taskRecord.projectId, "tts", this.key) : this.key;
+    const modelName = await resolveModelName(selected as typeof this.key);
     const exec = async (mn: `${string}:${string}`) => {
       try {
         const fn = await getVendorTemplateFn("ttsRequest", mn);
@@ -340,7 +367,7 @@ class AiAudio {
       } catch (e) {}
     };
     if (taskRecord) {
-      return withTaskRecord(this.key, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
+      return withTaskRecord(modelName, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
     }
     return await exec(modelName);
   }
