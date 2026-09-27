@@ -4,6 +4,7 @@ import u from "@/utils";
 import { z } from "zod";
 import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
+import { rejectControlledSemanticWrite } from "@/services/orchestrator/revisionWriteSafety";
 const router = express.Router();
 export default router.post(
   "/",
@@ -32,6 +33,8 @@ export default router.post(
       } catch (e: any) { return res.status(e.status ?? 400).send({ code: e.code ?? "STORYBOARD_PRODUCTION_INVALID", message: e.message }); }
     }
     const { data, scriptId, projectId } = req.body;
+    try { await rejectControlledSemanticWrite(projectId, scriptId); }
+    catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code, message: e.message }); }
     if (!data.length) return res.status(400).send({ success: false, message: "数据不能为空" });
     for (const item of data) {
       const [id] = await u.db("o_storyboard").insert({

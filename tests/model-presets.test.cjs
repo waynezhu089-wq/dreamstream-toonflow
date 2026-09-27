@@ -19,6 +19,7 @@ async function fixture(t) {
       if (id === 'uuid') return { v4: require('node:crypto').randomUUID };
       if (['axios','ai','@ai-sdk/devtools','sucrase'].includes(id)) return {};
       if (id.startsWith('@/')) return load(id.slice(2));
+      if (id.startsWith('.')) return load(path.posix.normalize(path.posix.join(path.posix.dirname(name), id)));
       return require(id);
     }, module, module.exports); return module.exports;
   }

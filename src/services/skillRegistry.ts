@@ -132,7 +132,7 @@ async function assertScope(q: Knex | Knex.Transaction, type: ScopeType, key: str
   const projectId = Number(match[1]), scriptId = Number(match[2]), storyboardId = Number(match[4]);
   if (!await q("o_project").where({ id: projectId }).first()) throw new SkillError("SKILL_BINDING_INVALID", "项目不存在", 404);
   if (type !== "PROJECT" && !await q("o_script").where({ id: scriptId, projectId }).first()) throw new SkillError("SKILL_BINDING_INVALID", "制作单元不属于项目", 404);
-  if (type === "SHOT" && !await q("o_storyboard").where({ id: storyboardId, projectId, scriptId }).first()) throw new SkillError("SKILL_BINDING_INVALID", "镜头不属于制作单元", 404);
+  if (type === "SHOT" && !await q("o_storyboard").where({ id: storyboardId, projectId, scriptId }).whereNull("retiredAt").first()) throw new SkillError("SKILL_BINDING_INVALID", "镜头不属于当前有效制作单元", 404);
 }
 export async function saveBinding(input: unknown) {
   const value = bindingInput.parse(input);
@@ -289,7 +289,7 @@ export async function readAndSanitizeSelectedSource(input: { projectId: number; 
   if (!project || !script) throw new SkillError("SKILL_SOURCE_INVALID", "来源制作单元不存在", 404);
   let snapshot: string;
   if (input.sourceType === "STORYBOARD_PROMPT") {
-    const shot = await q("o_storyboard").where({ id: ids.sourceId, projectId: ids.projectId, scriptId: ids.scriptId }).first();
+    const shot = await q("o_storyboard").where({ id: ids.sourceId, projectId: ids.projectId, scriptId: ids.scriptId }).whereNull("retiredAt").first();
     if (!shot?.prompt) throw new SkillError("SKILL_SOURCE_INVALID", "指定镜头没有 Prompt", 404);
     snapshot = shot.prompt;
   } else if (["DIRECTOR_OUTPUT_SNAPSHOT", "PRODUCTION_TEXT_RESULT"].includes(input.sourceType)) {

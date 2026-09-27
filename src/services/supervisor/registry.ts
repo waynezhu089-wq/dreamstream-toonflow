@@ -73,7 +73,7 @@ registerTarget("storyboard.semantic.v1", async (q, projectId, scriptId) => {
 registerReview({ reviewKey: "storyboard.semantic-approval", displayName: "Storyboard Semantic Approval", targetAdapterKey: "storyboard.semantic.v1", humanDecisions: ["PASS", "REVISE"], aiDecisions: ["PASS", "REVISE", "HUMAN_CONFIRM"], supervisorSkillType: "SUPERVISOR", supervisorSkillStageKey: "supervisor-review", gateKey: "supervisor.storyboard-approved" });
 
 registerTarget("storyboard.semantic.v2", async (q, projectId, scriptId) => {
-  const rows = await q("o_storyboard").where({ projectId, scriptId }).orderBy("index", "asc").orderBy("id", "asc")
+  const rows = await q("o_storyboard").where({ projectId, scriptId }).whereNull("retiredAt").orderBy("index", "asc").orderBy("id", "asc")
     .select("id", "index", "track", "duration", "prompt", "videoDesc", "productionSpec");
   if (!rows.length) throw new SupervisorError("SUPERVISOR_TARGET_EMPTY", "当前制作单元暂无分镜，无法审核", 409);
   const links = await q("o_assets2Storyboard").whereIn("storyboardId", rows.map(row => row.id)).select("storyboardId", "assetId");

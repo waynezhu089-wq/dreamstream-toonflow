@@ -8,6 +8,7 @@ import { canonicalJson, decisionSchema, scopeSchema, sha256, SupervisorError } f
 import { readTarget, reviewDefinition, reviewForGate } from "./registry";
 import { resolveStageSkill } from "@/services/skillRegistry";
 import { SkillError } from "@/services/skillContract";
+import { acquireRevisionBoundary, currentRevisionEpoch } from "@/services/orchestrator/revisionBoundary";
 
 type Query = Knex | Knex.Transaction;
 const db = () => u.db as Knex;
@@ -53,6 +54,7 @@ function scope(input: unknown) {
 export async function current(q: Query, input: { projectId: number; scriptId: number; reviewKey: string }) {
   const { projectId, scriptId, reviewKey } = input;
   if (!await q("o_project").where({ id: projectId }).first() || !await q("o_script").where({ id: scriptId, projectId }).first()) throw new SupervisorError("SUPERVISOR_SCOPE_INVALID", "制作单元不存在或不属于当前项目", 404);
+  const revisionEpoch = await currentRevisionEpoch(q, projectId, scriptId);
   const definition = reviewDefinition(reviewKey);
   let resolved: Awaited<ReturnType<typeof resolveProfile>>;
   try { resolved = await resolveProfile({ projectId }, q); }
@@ -74,7 +76,7 @@ export async function current(q: Query, input: { projectId: number; scriptId: nu
     recipe = { recipeKey: binding.recipeKey, recipeVersion: `v${Number(binding.recipeVersion)}`, recipeDefinitionHash: exact.definitionHash };
   }
   const target = await readTarget(q, reviewDefinition(reviewKey), projectId, scriptId);
-  return { definition, profile, recipe, controlContextHash: sha256({ profile, recipe }), target };
+  return { definition, profile, recipe, controlContextHash: sha256({ profile, recipe }), target, revisionEpoch };
 }
 export async function supervisorPolicy(q: Query, state: Awaited<ReturnType<typeof current>>, ids: { projectId: number; scriptId: number }) {
   const definition = state.definition;
@@ -97,7 +99,9 @@ async function policyForHistory(q: Query, state: Awaited<ReturnType<typeof curre
 }
 function view(row: any, state: Awaited<ReturnType<typeof current>>, policyHash: string | null = null) {
   const recipe = state.recipe;
-  const current = row.targetHash === state.target.targetHash && row.controlContextHash === state.controlContextHash && row.profileKey === state.profile.profileKey && Number(row.profileVersion) === versionNumber(state.profile.profileVersion) &&
+  const epochCurrent = state.target.targetAdapterKey !== "storyboard.semantic.v2" ||
+    (row.revisionEpoch == null ? state.revisionEpoch === 0 : Number(row.revisionEpoch) === state.revisionEpoch);
+  const current = epochCurrent && row.targetHash === state.target.targetHash && row.controlContextHash === state.controlContextHash && row.profileKey === state.profile.profileKey && Number(row.profileVersion) === versionNumber(state.profile.profileVersion) &&
     row.recipeKey === (recipe?.recipeKey ?? null) && (row.recipeVersion === null ? null : Number(row.recipeVersion)) === (recipe ? Number(recipe.recipeVersion.slice(1)) : null) && row.recipeDefinitionHash === (recipe?.recipeDefinitionHash ?? null);
   const policyCurrent = row.source === "HUMAN" || Boolean(policyHash && row.supervisorResolutionHash === policyHash);
   return { ...row, profileVersion: `v${row.profileVersion}`, recipeVersion: row.recipeVersion === null ? null : `v${row.recipeVersion}`,
@@ -113,7 +117,8 @@ export async function targetRead(input: unknown) {
   const ids = scope(input);
   return db().transaction(async trx => {
     const state = await current(trx, ids);
-    return { review: state.definition, target: state.target, profile: state.profile, recipe: state.recipe, controlContextHash: state.controlContextHash };
+    return { review: state.definition, target: state.target, profile: state.profile, recipe: state.recipe, controlContextHash: state.controlContextHash,
+      revisionEpoch: state.revisionEpoch };
   });
 }
 export async function reviewHistory(input: unknown) {
@@ -125,7 +130,8 @@ export async function reviewHistory(input: unknown) {
     const history = raw.map(row => view(row, state, policy?.supervisorResolutionHash));
     const effective = history.find(row => row.status === "CURRENT" && row.source === "HUMAN" && ["PASS", "REVISE"].includes(row.decision)) ?? history.find(row => row.status === "CURRENT" && row.source === "AI") ?? null;
     if (effective) effective.effective = true;
-    return { review: state.definition, target: state.target, profile: state.profile, recipe: state.recipe, controlContextHash: state.controlContextHash, history };
+    return { review: state.definition, target: state.target, profile: state.profile, recipe: state.recipe,
+      controlContextHash: state.controlContextHash, revisionEpoch: state.revisionEpoch, history };
   });
 }
 export async function decide(input: unknown, actor: unknown) {
@@ -137,7 +143,13 @@ export async function decide(input: unknown, actor: unknown) {
   if (!identity || !Number.isSafeInteger(Number(identity.id)) || Number(identity.id) <= 0 || typeof identity.name !== "string" || !identity.name.trim()) throw new SupervisorError("SUPERVISOR_REVIEWER_CONTEXT_INVALID", "无法确认当前人工审核人", 401);
   const actorName = identity.name as string;
   try { return await db().transaction(async trx => {
+    await acquireRevisionBoundary(trx, value.projectId, value.scriptId);
     const state = await current(trx, value);
+    if (state.target.targetAdapterKey === "storyboard.semantic.v2" &&
+      (state.revisionEpoch > 0 && value.expectedRevisionEpoch === undefined ||
+        value.expectedRevisionEpoch !== undefined && value.expectedRevisionEpoch !== state.revisionEpoch)) {
+      throw new SupervisorError("SUPERVISOR_REVISION_CHANGED", "审核修订代次已变化，请刷新后重审", 409);
+    }
     if (state.target.targetHash !== value.expectedTargetHash) throw new SupervisorError("SUPERVISOR_TARGET_CHANGED", "分镜内容已变化，请刷新后重新审核", 409);
     if (state.controlContextHash !== value.expectedControlContextHash) throw new SupervisorError("SUPERVISOR_CONTEXT_CHANGED", "Profile 或 Recipe 上下文已变化，请刷新后重新审核", 409);
     const reviewId = randomUUID();
@@ -146,7 +158,9 @@ export async function decide(input: unknown, actor: unknown) {
       reviewKey: value.reviewKey, targetAdapterKey: state.target.targetAdapterKey, targetType: state.target.targetType, targetHash: state.target.targetHash, controlContextHash: state.controlContextHash,
       targetSnapshot: canonicalJson(state.target.snapshot), decision: value.decision, source: "HUMAN", summary: value.summary, issues: canonicalJson(value.issues),
       supervisorSkillId: null, supervisorSkillVersion: null, supervisorSkillDefinitionHash: null, modelReference: null,
-      actorUserId: Number(identity.id), actorDisplayName: actorName.trim().slice(0, 256), createdAt: Date.now() };
+      actorUserId: Number(identity.id), actorDisplayName: actorName.trim().slice(0, 256),
+      revisionEpoch: state.target.targetAdapterKey === "storyboard.semantic.v2" ? state.revisionEpoch : null,
+      createdAt: Date.now() };
     await trx("o_supervisorReview").insert(row);
     return view(row, state);
   }); } catch (error: any) {
@@ -165,7 +179,9 @@ export async function resolveGate(input: unknown, expectedProfile?: { profileKey
     const policy = raw.some(row => row.source === "AI") ? await policyForHistory(trx, state, ids) : null;
     const history = raw.map(row => view(row, state, policy?.supervisorResolutionHash));
     const effective = human ?? history.find(row => row.status === "CURRENT" && row.source === "AI") ?? null;
-    const base = { targetHash: state.target.targetHash, controlContextHash: state.controlContextHash, reviewKey: ids.reviewKey, effectiveDecision: effective?.decision ?? null, reviewId: effective?.reviewId ?? null, staleCount: history.filter(row => row.status === "STALE").length };
+    const base = { targetHash: state.target.targetHash, controlContextHash: state.controlContextHash,
+      revisionEpoch: state.revisionEpoch, reviewKey: ids.reviewKey, effectiveDecision: effective?.decision ?? null,
+      reviewId: effective?.reviewId ?? null, staleCount: history.filter(row => row.status === "STALE").length };
     if (!effective) return { ...base, pass: false, code: "SUPERVISOR_REVIEW_REQUIRED", reason: "当前分镜尚无有效审核决定" };
     if (effective.decision === "PASS") return { ...base, pass: true, code: "SUPERVISOR_PASS", reason: null };
     if (effective.decision === "HUMAN_CONFIRM") return { ...base, pass: false, code: "SUPERVISOR_HUMAN_CONFIRM_REQUIRED", reason: effective.summary };

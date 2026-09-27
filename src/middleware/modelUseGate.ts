@@ -1,6 +1,7 @@
 import { isAdvertisement } from "@/services/storyboardProduction";
 import type { RequestHandler } from "express";
 import { requireModel, ModelConfigError, type Slot } from "@/services/modelPreset";
+import { usesControlledRevision } from "@/services/orchestrator/revisionWriteSafety";
 const entries: Record<string, Slot> = {
   "/api/assetsgenerate/generateassets": "image",
   "/api/assetsgenerate/batchgenerateimageassets": "image",
@@ -16,6 +17,9 @@ export const modelUseGate: RequestHandler = async (req, res, next) => {
   try {
     // Advertisement dispatch checks models per item; real direct output needs none.
     if (req.path.toLowerCase().replace(/\/+$/, "") === "/api/production/storyboard/batchgenerateimage" && await isAdvertisement(Number(req.body.projectId))) return next();
+    // B3-B video guards must be durable before model resolution. The guarded
+    // route performs the same point-of-use check immediately after admission.
+    if (slot === "video" && await usesControlledRevision(Number(req.body.projectId))) return next();
     const resolved = await requireModel(Number(req.body.projectId), slot, req.body.model);
     if (req.body.model && resolved !== req.body.model) throw new ModelConfigError("所选模型与当前项目配置不同，请先在本项目模型配置中保存或刷新后重试", 409);
     req.body.model = resolved;

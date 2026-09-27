@@ -5,6 +5,11 @@ import { v4 as uuidv4 } from "uuid";
 import { success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 import { ReferenceList } from "@/utils/ai";
+import { admitRevisionWork } from "@/services/orchestrator/revisionWorkGuard";
+import { runControlledVideo } from "@/services/orchestrator/controlledVideoWorker";
+import { usesControlledRevision } from "@/services/orchestrator/revisionWriteSafety";
+import { requireModel, ModelConfigError } from "@/services/modelPreset";
+import { settleRevisionWork } from "@/services/orchestrator/revisionWorkGuard";
 const router = express.Router();
 
 type Type = "imageReference" | "startImage" | "endImage" | "videoReference" | "audioReference";
@@ -36,13 +41,36 @@ export default router.post(
         duration: z.number(),
       }),
     ),
-    model: z.string(),
+    model: z.string().optional(),
     mode: z.string(),
     resolution: z.string(),
     audio: z.boolean().optional(),
   }),
   async (req, res) => {
     const { scriptId, projectId, trackData, model, resolution, audio, mode } = req.body;
+    const controlledItems = (trackData as { trackId: number; uploadData: { id: number; sources: string }[]; prompt: string; duration: number }[])
+      .map(item => ({ ...item, videoPath: `/${projectId}/video/${uuidv4()}.mp4` }));
+    let guarded;
+    let controlled;
+    try { controlled = await usesControlledRevision(projectId); guarded = controlled ?
+      await admitRevisionWork({ projectId, scriptId }, "VIDEO_GENERATE",
+        controlledItems.map(item => ({ trackId: item.trackId, references: item.uploadData, videoPath: item.videoPath }))) : null; }
+    catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code ?? "REVISION_RUNTIME_UNSAFE", message: e.message }); }
+    if (controlled && !guarded) return res.status(409).send({ code: "REVISION_RUNTIME_UNSAFE", message: "受控 Profile 已变化，请重试" });
+    if (guarded) {
+      let resolvedModel: string;
+      try {
+        resolvedModel = await requireModel(projectId, "video", model);
+        if (model && resolvedModel !== model) throw new ModelConfigError("所选模型与当前项目配置不同，请刷新后重试", 409);
+      } catch (e: any) {
+        for (const guard of guarded) await settleRevisionWork({ projectId, scriptId }, guard, "FAILED", { error: e.message });
+        return res.status(e.status ?? 409).send({ code: "VIDEO_MODEL_UNAVAILABLE", message: e.message });
+      }
+      res.status(200).send(success(guarded.map(guard => ({ videoId: guard.videoId, trackId: guard.trackId }))));
+      for (const [index, guard] of guarded.entries()) void runControlledVideo({ projectId, scriptId }, guard,
+        controlledItems[index], { model: resolvedModel, mode, resolution, audio });
+      return;
+    }
 
     let modeData = [];
     if (Array.isArray(mode)) {
@@ -103,7 +131,7 @@ export default router.post(
         }),
       );
       const relatedObjects = { projectId, videoId, scriptId, type: "视频" };
-      const aiVideo = u.Ai.Video(model);
+      const aiVideo = u.Ai.Video(model!);
       aiVideo
         .run(
           {

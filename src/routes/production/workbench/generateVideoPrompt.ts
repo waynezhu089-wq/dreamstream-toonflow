@@ -5,6 +5,9 @@ import { success, error } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 import fs from "fs/promises";
 import path from "path";
+import { admitRevisionWork } from "@/services/orchestrator/revisionWorkGuard";
+import { runControlledVideoPrompt } from "@/services/orchestrator/controlledVideoPromptWorker";
+import { usesControlledRevision } from "@/services/orchestrator/revisionWriteSafety";
 const router = express.Router();
 
 export default router.post(
@@ -23,6 +26,18 @@ export default router.post(
   }),
   async (req, res) => {
     const { trackId, projectId, info, model, mode } = req.body;
+    if (await usesControlledRevision(projectId)) {
+      const target = await u.db("o_videoTrack").where({ id: trackId, projectId }).first("scriptId");
+      if (!target) return res.status(404).send({ code: "REVISION_WORK_SCOPE_INVALID", message: "轨道不属于当前项目" });
+      const scope = { projectId, scriptId: Number(target.scriptId) };
+      let guarded;
+      try { guarded = await admitRevisionWork(scope, "VIDEO_PROMPT", [{ trackId, references: info }]); }
+      catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code ?? "REVISION_RUNTIME_UNSAFE", message: e.message }); }
+      if (!guarded) return res.status(409).send({ code: "REVISION_RUNTIME_UNSAFE", message: "受控 Profile 已变化，请重试" });
+      const text = await runControlledVideoPrompt(scope, guarded[0], info, model, mode);
+      return text === null ? res.status(409).send({ code: "REVISION_WORK_NOT_PUBLISHED", message: "提示词任务失败或已失去当前写入权" }) :
+        res.status(200).send(success(text));
+    }
     await u.db("o_videoTrack").where({ id: trackId }).update({
       state: "生成中",
     });

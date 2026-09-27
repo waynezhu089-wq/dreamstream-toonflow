@@ -14,6 +14,7 @@ export async function initializeSupervisorSchema(db: Knex) {
       t.string("supervisorSkillId", 160).nullable(); t.integer("supervisorSkillVersion").nullable(); t.string("supervisorSkillDefinitionHash", 64).nullable();
       t.string("supervisorResolutionHash", 64).nullable(); t.text("supervisorResolutionTrace").nullable(); t.text("supervisorOverrideChain").nullable();
       t.string("modelReference", 256).nullable(); t.integer("actorUserId").nullable(); t.string("actorDisplayName", 256).nullable();
+      t.integer("revisionEpoch").nullable();
       t.bigInteger("createdAt").notNullable();
       t.index(["projectId", "scriptId", "reviewKey", "targetHash", "createdAt"], "idx_supervisor_review_target");
     });
@@ -21,6 +22,7 @@ export async function initializeSupervisorSchema(db: Knex) {
       ["supervisorResolutionHash", (t: Knex.AlterTableBuilder) => t.string("supervisorResolutionHash", 64).nullable()],
       ["supervisorResolutionTrace", (t: Knex.AlterTableBuilder) => t.text("supervisorResolutionTrace").nullable()],
       ["supervisorOverrideChain", (t: Knex.AlterTableBuilder) => t.text("supervisorOverrideChain").nullable()],
+      ["revisionEpoch", (t: Knex.AlterTableBuilder) => t.integer("revisionEpoch").nullable()],
     ] as const) if (!await trx.schema.hasColumn("o_supervisorReview", name)) await trx.schema.alterTable("o_supervisorReview", add);
     await trx.raw("CREATE TRIGGER IF NOT EXISTS supervisor_review_no_update BEFORE UPDATE ON o_supervisorReview BEGIN SELECT RAISE(ABORT, 'supervisor reviews are immutable'); END");
     await trx.raw("CREATE TRIGGER IF NOT EXISTS supervisor_review_no_delete BEFORE DELETE ON o_supervisorReview BEGIN SELECT RAISE(ABORT, 'supervisor reviews are immutable'); END");

@@ -1,5 +1,6 @@
 import { productionSpec } from "@/services/storyboardProduction";
 import { readImageProvenance } from "@/services/productionAttempt";
+import { isControlledSemanticV2 } from "@/services/orchestrator/revisionWriteSafety";
 import express from "express";
 import u from "@/utils";
 import { z } from "zod";
@@ -45,7 +46,7 @@ export default router.post(
       .where("o_assets.assetsId", "in", assetIds)
       .whereNotNull("o_assets.assetsId");
 
-    if (!sqlData) {
+    if (!sqlData && !await isControlledSemanticV2(u.db, projectId, episodesId)) {
       const flowData: FlowData = {
         script: scriptData?.content ?? "",
         scriptPlan: "",
@@ -88,7 +89,7 @@ export default router.post(
       return res.status(200).send(success(flowData));
     } else {
       try {
-        const storyboardData = await u.db("o_storyboard").where({ scriptId: episodesId, projectId });
+        const storyboardData = await u.db("o_storyboard").where({ scriptId: episodesId, projectId }).whereNull("retiredAt");
         const imageProvenance = await readImageProvenance(projectId, episodesId, storyboardData);
 
         await Promise.all(
@@ -114,7 +115,7 @@ export default router.post(
           }
           assets2StoryboardMap[i.storyboardId!].push(i.assetId!);
         });
-        const flowData = JSON.parse(sqlData!.data ?? "{}");
+        const flowData = JSON.parse(sqlData?.data ?? "{}");
         flowData.assets = await Promise.all(
           assetsData.map(async (item) => ({
             id: item.id,

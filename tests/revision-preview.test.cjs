@@ -33,8 +33,25 @@ async function setup(t) {
   const profiles = f.load('services/orchestrator/profileRegistry');
   await profiles.createVersion({ profileKey: 'advertisement', definition: graph });
   await profiles.activateVersion({ profileKey: 'advertisement', version: 'v2' });
-  await profiles.bindProfile({ projectId: 1, profileKey: 'advertisement', version: 'v2' });
   const created = await f.create();
+  await profiles.bindProfile({ projectId: 1, profileKey: 'advertisement', version: 'v2' });
+  // These are fixture rows for read-only Preview scenarios. Once V2 is bound,
+  // the real legacy add endpoint correctly requires controlled Confirm.
+  f.create = async overrides => {
+    const item = f.item(overrides);
+    const max = await f.db('o_storyboard').where(scope).max('index as value').first();
+    const [id] = await f.db('o_storyboard').insert({ ...scope, trackId: created.trackId,
+      track: item.track, index: Number(max?.value ?? -1) + 1, prompt: item.prompt,
+      videoDesc: item.videoDesc, duration: String(item.duration), state: item.state,
+      filePath: '', reason: '', shouldGenerateImage: item.shouldGenerateImage,
+      productionSpec: JSON.stringify({ schemaVersion: 1, productionMode: item.productionMode,
+        primaryAssetId: item.primaryAssetId, referenceAssetIds: item.referenceAssetIds,
+        referenceAssetGroupIds: item.referenceAssetGroupIds, promptSkillId: item.promptSkillId,
+        promptSkillVersion: item.promptSkillVersion, capabilityId: item.capabilityId }) });
+    if (item.associateAssetsIds.length) await f.db('o_assets2Storyboard').insert(
+      item.associateAssetsIds.map(assetId => ({ storyboardId: id, assetId })));
+    return f.db('o_storyboard').where({ id }).first();
+  };
   const app = express(); app.use(express.json());
   app.use('/api/stageOrchestrator', f.load('routes/stageOrchestrator/index').default);
   const server = app.listen(0, '127.0.0.1');

@@ -1,5 +1,6 @@
 import { isAdvertisement, produceAdvertisementStoryboard } from "@/services/storyboardProduction";
 import { resolveProfile } from "@/services/orchestrator/profileRegistry";
+import { isControlledSemanticV2 } from "@/services/orchestrator/revisionWriteSafety";
 import { beginStoryboardImageAttempt, runStoryboardImageAttempt } from "@/services/productionAttempt";
 import type { Knex } from "knex";
 import express from "express";
@@ -37,9 +38,11 @@ export default router.post(
       compulsory: boolean;
     } = req.body;
     if (!storyboardIds || storyboardIds.length === 0) return res.status(400).send(error("storyboardIds不能为空"));
+    if (!await isAdvertisement(projectId) && await isControlledSemanticV2(u.db, projectId, scriptId))
+      return res.status(409).send({ code: "REVISION_RUNTIME_UNSAFE", message: "此受控 Profile 尚无分镜图片生产适配" });
     if (await isAdvertisement(projectId)) {
       const ids = [...new Set(storyboardIds)];
-      const rows = await u.db("o_storyboard").where({projectId, scriptId}).whereIn("id", ids);
+      const rows = await u.db("o_storyboard").where({projectId, scriptId}).whereNull("retiredAt").whereIn("id", ids);
       if (rows.length !== ids.length) return res.status(400).send({code:"STORYBOARD_SCOPE_INVALID",message:"分镜不存在或不属于当前制作单元"});
       const profile = await resolveProfile({ projectId });
       if (profile.managed && profile.definition.schemaVersion === 2) {

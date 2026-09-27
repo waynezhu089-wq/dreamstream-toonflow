@@ -162,6 +162,7 @@ async function fixture(t) {
   await load(path.join(root, 'src/lib/storyboardProductionSchema.ts')).initializeStoryboardProductionSchema(db);
   await load(path.join(root, 'src/lib/advertisementAssetPlanSchema.ts')).initializeAssetPlanSchema(db);
   await load(path.join(root, 'src/lib/productionProfileSchema.ts')).initializeProductionProfileSchema(db);
+  await load(path.join(root, 'src/lib/revisionSchema.ts')).initializeRevisionSchema(db);
   for (const [scriptId, projectId] of [[10, 1], [11, 1], [30, 3]]) {
     await load(path.join(root, 'src/services/advertisementAssetPlan.ts')).saveAssetPlan({ projectId, scriptId, items: [
       { assetKey: 'brand', name: 'Brand', category: 'brand', required: true, sourcePolicy: 'AI_ALLOWED', assetId: scriptId + 100 },

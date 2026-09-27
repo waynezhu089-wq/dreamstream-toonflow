@@ -12,11 +12,16 @@ export default router.post(
   validateFields({
     scriptId: z.number(),
     projectId: z.number(),
+    historyOnly: z.boolean().optional(),
+    historyOffset: z.number().int().nonnegative().optional(),
   }),
   async (req, res) => {
-    const { scriptId, projectId } = req.body;
-    const storyboardData = await u.db("o_storyboard").where({ scriptId, projectId }).orderBy("index", "asc");
-    const imageProvenance = await readImageProvenance(projectId, scriptId, storyboardData);
+    const { scriptId, projectId, historyOnly = false, historyOffset = 0 } = req.body;
+    const query = u.db("o_storyboard").where({ scriptId, projectId });
+    if (historyOnly) query.whereNotNull("retiredAt").orderBy("retiredAt", "desc").orderBy("id", "desc").limit(100).offset(historyOffset);
+    else query.whereNull("retiredAt").orderBy("index", "asc");
+    const storyboardData = await query;
+    const imageProvenance = historyOnly ? new Map() : await readImageProvenance(projectId, scriptId, storyboardData);
     const data = await Promise.all(
       storyboardData.map(async (i) => {
         return {

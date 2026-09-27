@@ -4,6 +4,7 @@ import u from "@/utils";
 import { z } from "zod";
 import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
+import { assertDirectSemanticWriteAllowed } from "@/services/orchestrator/revisionWriteSafety";
 
 const router = express.Router();
 
@@ -44,6 +45,7 @@ export default router.post(
 
     try {
       const result = await u.db.transaction(async (trx: any) => {
+        await assertDirectSemanticWriteAllowed(trx, projectId, scriptId);
         const oldStoryboards = await trx("o_storyboard").where({ scriptId, projectId }).select("id", "flowId");
         const oldIds = oldStoryboards.map((i: any) => i.id).filter(Boolean);
         const oldFlowIds = oldStoryboards.map((i: any) => i.flowId).filter(Boolean);

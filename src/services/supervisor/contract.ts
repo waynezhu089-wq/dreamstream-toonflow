@@ -7,7 +7,9 @@ export class SupervisorError extends Error {
 export const scopeSchema = z.object({ projectId: z.number().int().positive(), scriptId: z.number().int().positive(), reviewKey: z.string().min(1).max(160) }).strict();
 export const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export const issueSchema = z.object({ severity: z.enum(["BLOCKER", "WARNING", "INFO"]), code: z.string().regex(/^[A-Z][A-Z0-9_]{1,79}$/), message: z.string().trim().min(1).max(2000), suggestion: z.string().trim().max(2000).nullable().default(null), evidence: z.string().trim().max(2000).nullable().default(null) }).strict();
-export const decisionSchema = scopeSchema.extend({ expectedTargetHash: hashSchema, expectedControlContextHash: hashSchema, decision: z.enum(["PASS", "REVISE"]), summary: z.string().trim().min(1).max(4000), issues: z.array(issueSchema).max(100) }).strict();
+export const decisionSchema = scopeSchema.extend({ expectedTargetHash: hashSchema, expectedControlContextHash: hashSchema,
+  expectedRevisionEpoch: z.number().int().nonnegative().safe().optional(),
+  decision: z.enum(["PASS", "REVISE"]), summary: z.string().trim().min(1).max(4000), issues: z.array(issueSchema).max(100) }).strict();
 export type HumanDecision = z.infer<typeof decisionSchema>;
 export function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);

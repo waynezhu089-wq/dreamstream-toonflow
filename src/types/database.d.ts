@@ -169,6 +169,8 @@ export interface o_skillList {
   'updateTime': number;
 }
 export interface o_storyboard {
+  retiredAt?: number | null;
+  retiredByRevisionId?: string | null;
   currentImageAttemptId?: string | null;
   activeImageAttemptId?: string | null;
   productionSpec?: string | null;
@@ -222,6 +224,8 @@ export interface o_video {
   'videoTrackId'?: number | null;
 }
 export interface o_videoTrack {
+  storyboardManaged?: number | null;
+  promptRevisionEpoch?: number | null;
   'duration'?: number | null;
   'id'?: number;
   'projectId'?: number | null;

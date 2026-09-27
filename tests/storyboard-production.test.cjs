@@ -78,6 +78,7 @@ async function fixture(t) {
   await load('lib/productionProfileSchema').initializeProductionProfileSchema(db);
   await load('lib/modelPresetSchema').initializeModelPresetSchema(db);
   const migrate=load('lib/storyboardProductionSchema').initializeStoryboardProductionSchema;await migrate(db);await migrate(db);
+  await load('lib/revisionSchema').initializeRevisionSchema(db);
   await db('o_vendorConfig').insert({id:'vendor',enable:1});
   await db('o_image').update({model:null});
   await db('o_assetUploadSource').insert([1,2,3].map(id=>({projectId:id===3?2:1,assetId:id,imageId:id,filePath:'/generated/'+id,uploadedAt:Date.now()})));

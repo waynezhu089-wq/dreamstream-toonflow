@@ -7,9 +7,11 @@ import { textModelForProject } from "@/services/modelPreset";
 import { canonicalJson, hashSchema, issueSchema, scopeSchema, SupervisorError } from "./contract";
 import { current, supervisorPolicy } from "./review";
 import { versionNumber } from "@/services/orchestrator/profileDefinition";
+import { acquireRevisionBoundary } from "@/services/orchestrator/revisionBoundary";
 
 const db = () => u.db as Knex;
-const requestSchema = scopeSchema.extend({ expectedTargetHash: hashSchema, expectedControlContextHash: hashSchema }).strict();
+const requestSchema = scopeSchema.extend({ expectedTargetHash: hashSchema, expectedControlContextHash: hashSchema,
+  expectedRevisionEpoch: z.number().int().nonnegative().safe().optional() }).strict();
 const outputSchema = z.object({ decision: z.enum(["PASS", "REVISE", "HUMAN_CONFIRM"]), summary: z.string().trim().min(1).max(4000), issues: z.array(issueSchema).max(100) }).strict();
 type Scope = z.infer<typeof scopeSchema>;
 async function capture(q: Knex | Knex.Transaction, ids: Scope) {
@@ -19,7 +21,8 @@ async function capture(q: Knex | Knex.Transaction, ids: Scope) {
 }
 function contextView(captured: Awaited<ReturnType<typeof capture>>, reviewKey: string) {
   const { state, policy } = captured;
-  return { reviewKey, targetHash: state.target.targetHash, controlContextHash: state.controlContextHash, stageKey: policy.stageKey,
+  return { reviewKey, targetHash: state.target.targetHash, controlContextHash: state.controlContextHash,
+    revisionEpoch: state.revisionEpoch, stageKey: policy.stageKey,
     skillId: policy.skillId, skillVersion: policy.skillVersion, skillStatus: policy.skillStatus, skillDefinitionHash: policy.definitionHash,
     supervisorResolutionHash: policy.supervisorResolutionHash, resolvedFrom: policy.resolvedFrom, overrideChain: policy.overrideChain, resolutionTrace: policy.resolutionTrace };
 }
@@ -61,9 +64,14 @@ function logStructuredOutputFailure(error: unknown, attempt: number, modelRefere
 export async function reviewAi(input: unknown) {
   const parsed = requestSchema.safeParse(input);
   if (!parsed.success) throw new SupervisorError("SUPERVISOR_DECISION_INVALID", "AI 审核请求字段不合法");
-  const { expectedTargetHash, expectedControlContextHash, ...ids } = parsed.data;
+  const { expectedTargetHash, expectedControlContextHash, expectedRevisionEpoch, ...ids } = parsed.data;
   const before = await db().transaction(async trx => {
     const state = await current(trx, ids);
+    if (state.target.targetAdapterKey === "storyboard.semantic.v2" &&
+      (state.revisionEpoch > 0 && expectedRevisionEpoch === undefined ||
+        expectedRevisionEpoch !== undefined && expectedRevisionEpoch !== state.revisionEpoch)) {
+      throw new SupervisorError("SUPERVISOR_REVISION_CHANGED", "审核修订代次已变化，请刷新后重审", 409);
+    }
     if (state.target.targetHash !== expectedTargetHash) throw new SupervisorError("SUPERVISOR_TARGET_CHANGED", "分镜内容已变化，请刷新后重试", 409);
     if (state.controlContextHash !== expectedControlContextHash) throw new SupervisorError("SUPERVISOR_CONTEXT_CHANGED", "控制上下文已变化，请刷新后重试", 409);
     return { state, policy: await supervisorPolicy(trx, state, ids) };
@@ -102,7 +110,10 @@ export async function reviewAi(input: unknown) {
   }
   if (!output) throw new SupervisorError("SUPERVISOR_AI_OUTPUT_INVALID", "AI 审核结构仍不合法", 502);
   try { return await db().transaction(async trx => {
+    await acquireRevisionBoundary(trx, ids.projectId, ids.scriptId);
     const afterState = await current(trx, ids);
+    if (afterState.target.targetAdapterKey === "storyboard.semantic.v2" && afterState.revisionEpoch !== state.revisionEpoch)
+      throw new SupervisorError("SUPERVISOR_REVISION_CHANGED", "AI 审核期间修订代次已变化，请重试", 409);
     if (afterState.target.targetHash !== state.target.targetHash) throw new SupervisorError("SUPERVISOR_TARGET_CHANGED", "AI 审核期间分镜发生变化，请重试", 409);
     if (afterState.controlContextHash !== state.controlContextHash) throw new SupervisorError("SUPERVISOR_CONTEXT_CHANGED", "AI 审核期间控制上下文发生变化，请重试", 409);
     let afterPolicy;
@@ -116,9 +127,12 @@ export async function reviewAi(input: unknown) {
       targetSnapshot: canonicalJson(state.target.snapshot), decision: output.decision, source: "AI", summary: output.summary, issues: canonicalJson(output.issues),
       supervisorSkillId: policy.skillId, supervisorSkillVersion: Number(policy.skillVersion.slice(1)), supervisorSkillDefinitionHash: policy.definitionHash,
       supervisorResolutionHash: policy.supervisorResolutionHash, supervisorResolutionTrace: canonicalJson(policy.resolutionTrace), supervisorOverrideChain: canonicalJson(policy.overrideChain),
-      modelReference: session.modelReference, actorUserId: null, actorDisplayName: null, createdAt: Date.now() };
+      modelReference: session.modelReference, actorUserId: null, actorDisplayName: null,
+      revisionEpoch: state.target.targetAdapterKey === "storyboard.semantic.v2" ? state.revisionEpoch : null,
+      createdAt: Date.now() };
     await trx("o_supervisorReview").insert(row);
     return { reviewId, decision: output.decision, summary: output.summary, issues: output.issues, source: "AI", targetHash: state.target.targetHash,
+      revisionEpoch: state.revisionEpoch,
       controlContextHash: state.controlContextHash, supervisorResolutionHash: policy.supervisorResolutionHash, modelReference: session.modelReference };
   }); } catch (error: any) {
     if (error instanceof SupervisorError) throw error;

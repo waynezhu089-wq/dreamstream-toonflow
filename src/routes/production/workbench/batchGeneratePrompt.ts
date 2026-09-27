@@ -6,6 +6,9 @@ import { success, error } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 import fs from "fs/promises";
 import path from "path";
+import { admitRevisionWork } from "@/services/orchestrator/revisionWorkGuard";
+import { runControlledVideoPrompt } from "@/services/orchestrator/controlledVideoPromptWorker";
+import { usesControlledRevision } from "@/services/orchestrator/revisionWriteSafety";
 const router = express.Router();
 
 export default router.post(
@@ -29,6 +32,24 @@ export default router.post(
   }),
   async (req, res) => {
     const { trackData, projectId, mode, model, concurrentCount = 5 } = req.body;
+    if (await usesControlledRevision(projectId)) {
+      const trackIds = trackData.map((item: { trackId: number }) => item.trackId);
+      const targets = trackIds.length ? await u.db("o_videoTrack").where({ projectId }).whereIn("id", trackIds).select("id", "scriptId") : [];
+      if (!trackIds.length || targets.length !== trackIds.length) return res.status(409).send({ code: "REVISION_WORK_SCOPE_INVALID", message: "轨道列表无效或跨项目" });
+      const scriptIds = [...new Set(targets.map(row => Number(row.scriptId)))];
+      if (scriptIds.length !== 1) return res.status(409).send({ code: "REVISION_WORK_SCOPE_INVALID", message: "受控批量提示词必须属于同一制作单元" });
+      const scope = { projectId, scriptId: scriptIds[0] };
+      let guarded;
+      try { guarded = await admitRevisionWork(scope, "VIDEO_PROMPT",
+        trackData.map((item: { trackId: number; info: { id: number; sources: string }[] }) =>
+          ({ trackId: item.trackId, references: item.info }))); }
+      catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code ?? "REVISION_RUNTIME_UNSAFE", message: e.message }); }
+      if (!guarded) return res.status(409).send({ code: "REVISION_RUNTIME_UNSAFE", message: "受控 Profile 已变化，请重试" });
+      res.status(200).send(success("开始生成提示词"));
+      for (const [index, guard] of guarded.entries())
+        void runControlledVideoPrompt(scope, guard, trackData[index].info, model, mode);
+      return;
+    }
     try {
       // 预加载公共数据
       const [id, modelData] = model.split(/:(.+)/);

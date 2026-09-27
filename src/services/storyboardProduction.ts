@@ -5,6 +5,7 @@ import { advertisementProductionContext } from "@/services/advertisementProducti
 import { assertAssetPlanBinding } from "@/services/advertisementAssetPlan";
 import { productionId, ProductionGateError } from "@/services/advertisementGate";
 import { requireModel } from "@/services/modelPreset";
+import { assertDirectSemanticWriteAllowed } from "@/services/orchestrator/revisionWriteSafety";
 
 export const productionFields = {
   productionMode: z.enum(["REAL_ASSET_DIRECT", "AI_TEXT_TO_IMAGE", "AI_REFERENCE_GENERATE", "REAL_AI_COMPOSITE"]).nullable().optional(),
@@ -69,6 +70,7 @@ export async function writeAdvertisementStoryboards(projectId: number, scriptId:
     prepared.push({ item, previous, spec });
   }
   return u.db.transaction(async trx => {
+    await assertDirectSemanticWriteAllowed(trx, projectId, scriptId);
     if (operation === "replace") {
       if (await trx("o_video").where({ projectId, scriptId }).first()) fail("当前制作单元已有视频记录，禁止整套替换分镜", "STORYBOARD_REPLACE_HAS_VIDEO");
       const old = await trx("o_storyboard").where({ projectId, scriptId });

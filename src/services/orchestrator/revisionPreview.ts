@@ -32,15 +32,15 @@ const operation = z.discriminatedUnion("type", [
   z.object({ type: z.literal("RETIRE"), storyboardId: id }).strict(),
   z.object({ type: z.literal("REORDER"), order: z.array(ref).min(1).max(MAX_SHOTS) }).strict(),
 ]);
-const requestSchema = z.object({ schemaVersion: z.literal(1), revisionId: z.string().uuid(),
+export const revisionPreviewRequestSchema = z.object({ schemaVersion: z.literal(1), revisionId: z.string().uuid(),
   projectId: id, scriptId: id, revisionKey: z.literal(definition.revisionKey),
   changeSet: z.object({ operations: z.array(operation).min(1).max(MAX_OPERATIONS) }).strict() }).strict();
-type Request = z.infer<typeof requestSchema>;
+type Request = z.infer<typeof revisionPreviewRequestSchema>;
 type Snapshot = ReturnType<typeof storyboardSemanticV2Snapshot>;
 const reject = (code: string, message: string, status = 409): never => { throw new ProfileError(code, message, status); };
 const tooLarge = (value: unknown) => Buffer.byteLength(canonicalJson(value), "utf8") > MAX_BYTES;
 const keyOf = (value: any) => value.clientRef === undefined ? `id:${value.storyboardId ?? value.id}` : `new:${value.clientRef}`;
-function normalizedChangeSet(request: Request) {
+export function normalizedChangeSet(request: Request) {
   const normalizeFields = (fields: any) => ({ ...fields,
     ...(fields.referenceAssetIds === undefined ? {} : { referenceAssetIds: [...fields.referenceAssetIds].sort((a, b) => a - b) }),
     ...(fields.linkedAssetIds === undefined ? {} : { linkedAssetIds: [...fields.linkedAssetIds].sort((a, b) => a - b) }),
@@ -60,7 +60,10 @@ const safeSource = (context: Awaited<ReturnType<typeof captureStoryboardImageSou
 
 async function capture(q: Knex.Transaction, request: Request) {
   const { projectId, scriptId } = request;
-  if (!await q("o_script").where({ id: scriptId, projectId }).first()) reject("REVISION_SCOPE_INVALID", "制作单元不属于当前项目", 404);
+  const script = await q("o_script").where({ id: scriptId, projectId }).first();
+  if (!script) reject("REVISION_SCOPE_INVALID", "制作单元不属于当前项目", 404);
+  const revisionEpoch = Number(script.revisionEpoch ?? 0);
+  if (!Number.isSafeInteger(revisionEpoch) || revisionEpoch < 0) reject("REVISION_CONTEXT_INVALID", "制作单元修订代次无效");
   const profile = await resolveProfile({ projectId }, q);
   if (!profile.managed) throw new ProfileError("REVISION_UNSUPPORTED", "当前项目没有精确 Production Profile", 409);
   const owner = profile.definition.stages.find(stage => stage.stageKey === definition.ownerStageKey);
@@ -100,7 +103,7 @@ async function capture(q: Knex.Transaction, request: Request) {
     recipe = { key: recipeBinding.recipeKey, version: recipeBinding.recipeVersion, definitionHash: exact.definitionHash,
       bindingUpdatedAt: recipeBinding.updatedAt };
   }
-  const rows = await q("o_storyboard").where({ projectId, scriptId }).orderBy("index", "asc").orderBy("id", "asc");
+  const rows = await q("o_storyboard").where({ projectId, scriptId }).whereNull("retiredAt").orderBy("index", "asc").orderBy("id", "asc");
   if (rows.length > MAX_SHOTS) reject("REVISION_SNAPSHOT_TOO_LARGE", "分镜数量超过 Preview 上限");
   const links = rows.length ? await q("o_assets2Storyboard").whereIn("storyboardId", rows.map(row => row.id)).select("storyboardId", "assetId") : [];
   if (links.length > MAX_SHOTS * 200) reject("REVISION_SNAPSHOT_TOO_LARGE", "素材关联过多");
@@ -143,7 +146,7 @@ async function capture(q: Knex.Transaction, request: Request) {
     .orderBy("createdAt", "desc").orderBy("reviewId", "desc")
     .first("reviewId", "targetHash", "controlContextHash", "decision", "source", "createdAt");
   const sourceContext = await captureStoryboardImageSourceContext(q, projectId, scriptId, rows.map(row => row.id), [...requestedAssets]);
-  const result = { projectId, scriptId, profile: { key: profile.profileKey, version: profile.version, source: profile.source,
+  const result = { projectId, scriptId, revisionEpoch, profile: { key: profile.profileKey, version: profile.version, source: profile.source,
       persisted: profile.persisted, definitionHash: definitionHash(profile.definition), bindingUpdatedAt: binding?.updatedAt ?? null,
       definition: profile.definition }, recipe, ownerStageKey: definition.ownerStageKey, descendants: [...descendants].sort(),
     stageKeys, stageRuns, lastStageEventId: event?.id ?? null, reviewEvidence, rows, semantic, byShot,
@@ -312,18 +315,23 @@ function plan(request: Request, captured: Awaited<ReturnType<typeof capture>>) {
     sourceEvidence, provenanceEvidence, impact };
   if (tooLarge(hashInput)) reject("REVISION_SNAPSHOT_TOO_LARGE", "Preview 影响证据过大");
   return { schemaVersion: 1, revisionId: request.revisionId, revisionKey: definition.revisionKey,
+    baseRevisionEpoch: captured.revisionEpoch,
     previewHash: sha256(hashInput), sourceTargetHash: beforeHash, proposedSemanticHash: proposedHash,
     targetAdapterKey: definition.targetAdapterKey,
     profile: resolvedProfile, recipe: captured.recipe, proposedSemantic: proposed, ...impact };
 }
 
-export async function previewRevision(input: unknown) {
+export async function captureRevisionPlan(q: Knex.Transaction, input: unknown) {
   if (tooLarge(input)) reject("REVISION_REQUEST_TOO_LARGE", "Preview 请求过大", 413);
-  const parsed = requestSchema.safeParse(input);
+  const parsed = revisionPreviewRequestSchema.safeParse(input);
   if (!parsed.success) reject("REVISION_CHANGE_INVALID", "Revision Preview 请求字段不合法", 400);
   const request = parsed.data!;
   positiveId(request.projectId); positiveId(request.scriptId);
+  const captured = await capture(q, request);
+  return { request, captured, preview: plan(request, captured) };
+}
+
+export async function previewRevision(input: unknown) {
   // All database reads (including B2 provenance) share this one SQLite snapshot.
-  const captured = await db().transaction(q => capture(q, request));
-  return plan(request, captured);
+  return db().transaction(async q => (await captureRevisionPlan(q, input)).preview);
 }

@@ -82,6 +82,7 @@ async function fixture(t) {
   await utils.db.schema.createTable('o_storyboard', table => {
     table.integer('projectId');
     table.integer('id').primary(); table.integer('scriptId'); table.integer('index'); table.string('filePath');
+    table.bigInteger('retiredAt');
   });
   await utils.db.schema.createTable('o_assets2Storyboard', table => {
     table.integer('storyboardId'); table.integer('assetId');

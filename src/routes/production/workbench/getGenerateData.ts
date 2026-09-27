@@ -3,12 +3,14 @@ import u from "@/utils";
 import { z } from "zod";
 import { success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
+import { revisionMediaProjection } from "@/services/orchestrator/revisionMediaRead";
 const router = express.Router();
 
 interface VideoItem {
   id: number;
   src: string;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
+  revisionStatus?: "CURRENT" | "HISTORICAL" | "LEGACY";
 }
 
 interface TrackMedia {
@@ -25,6 +27,9 @@ interface TrackItem {
   reason?: string;
   duration?: number;
   selectVideoId?: number;
+  historicalSelectedVideoId?: number;
+  storyboardDuration?: number;
+  promptRevisionStatus?: "CURRENT" | "HISTORICAL" | "LEGACY";
   medias: TrackMedia[];
   videoList: VideoItem[];
 }
@@ -50,7 +55,7 @@ export default router.post(
     }
     const isRef = Array.isArray(videoMode) ? true : false;
 
-    const storyboardList = await u.db("o_storyboard").where({ scriptId, projectId }).orderBy("index", "asc");
+    const storyboardList = await u.db("o_storyboard").where({ scriptId, projectId }).whereNull("retiredAt").orderBy("index", "asc");
     await Promise.all(
       storyboardList.map(async (i) => {
         i.filePath = i.filePath ? await u.oss.getSmallImageUrl(i.filePath) : "";
@@ -152,22 +157,32 @@ export default router.post(
       );
     }
 
-    const trackData = await u.db("o_videoTrack").where({ projectId, scriptId });
+    const allTrackData = await u.db("o_videoTrack").where({ projectId, scriptId });
+    const activeTrackIds = new Set(storyboardList.map(row => row.trackId));
+    const trackData = allTrackData.filter(track => track.storyboardManaged !== 1 || activeTrackIds.has(track.id));
     const videoList = await u.db("o_video").whereIn(
       "videoTrackId",
       trackData.map((t) => t.id),
     );
+    const media = await revisionMediaProjection(projectId, scriptId, videoList);
     const trackList: TrackItem[] = [];
     const trackIdMap = [...new Set<number>(trackData.map((t) => t.id!))];
     for (const trackId of trackIdMap) {
       const item = trackData.find((t) => t.id === trackId);
+      const selected = videoList.find(video => video.id === item?.videoId && video.videoTrackId === trackId);
+      const selectedCurrent = selected && (media.epoch === 0 || media.status(selected) === "CURRENT");
       trackList.push({
         id: trackId,
         duration: item?.duration ?? 0,
         prompt: item?.prompt || "",
         state: (item?.state as "未生成" | "生成中" | "已完成" | "生成失败") ?? "未生成",
         reason: item?.reason ?? "",
-        selectVideoId: Number(item?.videoId)!,
+        selectVideoId: selectedCurrent ? Number(item?.videoId) : undefined,
+        historicalSelectedVideoId: selected && !selectedCurrent ? Number(item?.videoId) : undefined,
+        storyboardDuration: storyboardList.filter(shot => shot.trackId === trackId)
+          .reduce((sum, shot) => sum + Number(shot.duration ?? 0), 0),
+        promptRevisionStatus: item?.promptRevisionEpoch === media.epoch ? "CURRENT" :
+          media.epoch === 0 ? "LEGACY" : "HISTORICAL",
         medias: (() => {
           const storyboardMedias = storyboardTrackRecord[trackId] ?? [];
           const assetMedias = storyboardMedias.flatMap((s) => otherDataMap[s.id] ?? []);
@@ -200,8 +215,9 @@ export default router.post(
             .filter((v) => v.videoTrackId === trackId)
             .map(async (v) => ({
               id: v.id!,
+              revisionStatus: media.status(v),
               src: v.filePath ? await u.oss.getFileUrl(v.filePath) : "",
-              state: v.state === "已完成" ? "已完成" : v.state === "生成中" ? "生成中" : v.state === "生成失败" ? "生成失败" : "未生成",
+              state: v.state === "已完成" || v.state === "生成成功" ? "已完成" : v.state === "生成中" ? "生成中" : v.state === "生成失败" ? "生成失败" : "未生成",
               errorReason: v?.errorReason ?? "",
             })),
         ),

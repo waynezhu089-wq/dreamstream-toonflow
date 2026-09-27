@@ -17,7 +17,7 @@ const modelKey = "productionAgent:storyboardGenAgent";
 async function shotContext(input: z.infer<typeof ids>, q: Knex | Knex.Transaction = db()) {
   const project = await q("o_project").where({ id: input.projectId }).first();
   const script = await q("o_script").where({ id: input.scriptId, projectId: input.projectId }).first();
-  const shot = await q("o_storyboard").where({ id: input.storyboardId, projectId: input.projectId, scriptId: input.scriptId }).first();
+  const shot = await q("o_storyboard").where({ id: input.storyboardId, projectId: input.projectId, scriptId: input.scriptId }).whereNull("retiredAt").first();
   if (!project || !script || !shot) throw new SkillError("SKILL_SOURCE_INVALID", "镜头不属于当前项目和制作单元", 404);
   if (resolveProductionProfile(project).key !== "advertisement") throw new SkillError("SKILL_TEMPLATE_INVALID", "首版 IMAGE_PROMPT Compiler 仅接入广告 Storyboard", 409);
   const spec = productionSpec(shot);
@@ -90,10 +90,15 @@ export async function compileImagePrompt(input: unknown) {
   }
   const outputPrompt = cleanModelOutput(result?.text ?? result?._output, String(shot.imagePrompt ?? ""), String(shot.prompt ?? ""));
   const compileId = randomUUID(), now = Date.now();
-  await db()("o_skillCompile").insert({ compileId, projectId: value.projectId, scriptId: value.scriptId, storyboardId: value.storyboardId,
-    skillId: resolved.skillId, skillVersion: Number(resolved.skillVersion.slice(1)), skillDefinitionHash: resolved.definitionHash,
-    resolutionTrace: JSON.stringify(resolved.resolutionTrace), overrideChain: JSON.stringify(resolved.overrideChain),
-    inputContext: JSON.stringify(inputContext), outputPrompt, modelReference, createdAt: now, appliedAt: null });
+  await db().transaction(async trx => {
+    if (!await trx("o_storyboard").where({ id: value.storyboardId, projectId: value.projectId,
+      scriptId: value.scriptId }).whereNull("retiredAt").first("id"))
+      throw new SkillError("SKILL_SOURCE_INVALID", "镜头已退休，不能再编译图片 Prompt", 409);
+    await trx("o_skillCompile").insert({ compileId, projectId: value.projectId, scriptId: value.scriptId, storyboardId: value.storyboardId,
+      skillId: resolved.skillId, skillVersion: Number(resolved.skillVersion.slice(1)), skillDefinitionHash: resolved.definitionHash,
+      resolutionTrace: JSON.stringify(resolved.resolutionTrace), overrideChain: JSON.stringify(resolved.overrideChain),
+      inputContext: JSON.stringify(inputContext), outputPrompt, modelReference, createdAt: now, appliedAt: null });
+  });
   return { compileId, currentSemanticPrompt: shot.prompt ?? "", currentImagePrompt: shot.imagePrompt ?? null, compiledImagePrompt: outputPrompt,
     resolvedSkill: { skillId: resolved.skillId, skillVersion: resolved.skillVersion, skillStatus: resolved.skillStatus, resolvedFrom: resolved.resolvedFrom, overrideChain: resolved.overrideChain, resolutionTrace: resolved.resolutionTrace },
     capabilityContext, createdAt: now, appliedAt: null };
@@ -126,7 +131,7 @@ export async function applyCompile(input: { compileId: string; projectId: number
     const changed = await trx("o_skillCompile").where({ compileId: value.compileId, appliedAt: null }).update({ appliedAt });
     if (changed !== 1) throw new SkillError("SKILL_BINDING_INVALID", "Compile 状态已改变，请重新编译", 409);
     const persistedSpec = shot.productionSpec ? JSON.parse(shot.productionSpec) : {};
-    await trx("o_storyboard").where({ id: value.storyboardId, projectId: value.projectId, scriptId: value.scriptId }).update({
+    await trx("o_storyboard").where({ id: value.storyboardId, projectId: value.projectId, scriptId: value.scriptId }).whereNull("retiredAt").update({
       imagePrompt: row.outputPrompt, productionSpec: JSON.stringify({ ...persistedSpec, schemaVersion: persistedSpec.schemaVersion ?? 1,
         promptSkillId: row.skillId, promptSkillVersion: versionLabel(Number(row.skillVersion)) }),
     });

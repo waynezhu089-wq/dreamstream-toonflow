@@ -63,21 +63,22 @@ async function fixture(t) {
   await db('o_scriptAssets').insert([{ scriptId: 10, assetId: 1 }, { scriptId: 11, assetId: 2 }, { scriptId: 20, assetId: 3 }]);
 
   
-  await raw.schema.alterTable('o_project',t=>{for(const s of ['imageModel','videoModel','imageQuality','videoRatio','artStyle'])t.string(s);});
+  await raw.schema.alterTable('o_project',t=>{for(const s of ['imageModel','videoModel','imageQuality','videoRatio','artStyle','mode'])t.string(s);});
   await raw.schema.alterTable('o_script',t=>t.text('content'));
   await raw.schema.alterTable('o_image',t=>t.string('errorReason'));
   await raw.schema.alterTable('o_assets',t=>{t.text('describe');t.integer('flowId');});
   await raw.schema.createTable('o_storyboard',t=>{t.increments('id');for(const k of ['projectId','scriptId','trackId','flowId','index','shouldGenerateImage','createTime'])t.integer(k);for(const k of ['prompt','duration','state','filePath','reason','track','videoDesc','title'])t.text(k);});
-  await raw.schema.createTable('o_videoTrack',t=>{t.integer('id').primary().notNullable();t.integer('projectId');t.integer('scriptId');t.float('duration');});
+  await raw.schema.createTable('o_videoTrack',t=>{t.integer('id').primary().notNullable();t.integer('projectId');t.integer('scriptId');t.float('duration');t.text('prompt');t.text('state');t.text('reason');t.integer('videoId');});
   await raw.schema.createTable('o_assets2Storyboard',t=>{t.integer('assetId');t.integer('storyboardId');});
   await raw.schema.createTable('o_imageFlow',t=>t.increments('id'));
-  await raw.schema.createTable('o_video',t=>{t.increments('id');t.integer('projectId');t.integer('scriptId');});
+  await raw.schema.createTable('o_video',t=>{t.increments('id');t.integer('projectId');t.integer('scriptId');t.integer('videoTrackId');t.text('filePath');t.text('state');t.text('errorReason');t.bigInteger('time');});
   await raw.schema.createTable('o_vendorConfig',t=>{t.string('id').primary();t.integer('enable');t.text('inputValues');});
   await raw.schema.createTable('o_tasks',t=>{t.increments('id');t.integer('projectId');t.bigInteger('startTime');for(const k of ['taskClass','relatedObjects','model','describe','state','reason'])t.text(k);});
   await load('lib/advertisementAssetPlanSchema').initializeAssetPlanSchema(db);
   await load('lib/productionProfileSchema').initializeProductionProfileSchema(db);
   await load('lib/modelPresetSchema').initializeModelPresetSchema(db);
   const migrate=load('lib/storyboardProductionSchema').initializeStoryboardProductionSchema;await migrate(db);await migrate(db);
+  await load('lib/revisionSchema').initializeRevisionSchema(db);
   await db('o_vendorConfig').insert({id:'vendor',enable:1});
   await db('o_image').update({model:null});
   await db('o_assetUploadSource').insert([1,2,3].map(id=>({projectId:id===3?2:1,assetId:id,imageId:id,filePath:'/generated/'+id,uploadedAt:Date.now()})));

@@ -3,6 +3,7 @@ import u from "@/utils";
 import { checkGate, type StageGateResult } from "./gateRegistry";
 import { positiveId, ProfileError, versionNumber, type ProfileDefinition } from "./profileDefinition";
 import { resolveProfile } from "./profileRegistry";
+import { acquireRevisionBoundary, currentRevisionEpoch } from "./revisionBoundary";
 
 const db = () => u.db as Knex;
 type PersistentState = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "SKIPPED";
@@ -16,7 +17,7 @@ async function scope(input: unknown, q: Knex | Knex.Transaction = db()) {
   if (!await q("o_project").where({ id: projectId }).first() || !await q("o_script").where({ id: scriptId, projectId }).first()) throw new ProfileError("PROFILE_SCOPE_INVALID", "制作单元不存在或不属于当前项目", 404);
   const profile = await resolveProfile({ projectId }, q);
   if (!profile.managed) throw new ProfileError("PROFILE_NOT_FOUND", "当前项目尚未由 Production Profile 管理", 409);
-  return { projectId, scriptId, profile };
+  return { projectId, scriptId, profile, revisionEpoch: await currentRevisionEpoch(q, projectId, scriptId) };
 }
 function graph(definition: ProfileDefinition) {
   const incoming = new Map(definition.stages.map(stage => [stage.stageKey, [] as string[]]));
@@ -25,7 +26,7 @@ function graph(definition: ProfileDefinition) {
   return { incoming, outgoing };
 }
 export async function readOrchestrator(input: unknown) {
-  const { projectId, scriptId, profile } = await scope(input);
+  const { projectId, scriptId, profile, revisionEpoch } = await scope(input);
   const definition = profile.definition, version = versionNumber(profile.version);
   const rows = await db()("o_stageRun").where({ projectId, scriptId, profileKey: profile.profileKey, profileVersion: version });
   const state = new Map<string, PersistentState>(rows.map(row => [row.stageKey, row.state as PersistentState]));
@@ -50,7 +51,7 @@ export async function readOrchestrator(input: unknown) {
   const keys = (filter: (stage: StageView) => boolean) => stages.filter(filter).map(stage => stage.stageKey);
   return {
     profile: { profileKey: profile.profileKey, version: profile.version, status: profile.status, source: profile.source, persisted: profile.persisted },
-    productionUnit: { projectId, scriptId }, stages,
+    productionUnit: { projectId, scriptId }, revisionEpoch, stages,
     readyStages: keys(stage => stage.availability === "READY"), blockedStages: keys(stage => stage.availability === "BLOCKED"),
     inProgressStages: keys(stage => stage.persistentState === "IN_PROGRESS"), completedStages: keys(stage => stage.persistentState === "COMPLETED"), skippedStages: keys(stage => stage.persistentState === "SKIPPED"),
   };
@@ -84,8 +85,25 @@ export async function actOnStage(action: Action, input: unknown) {
   const version = versionNumber(snapshot.profile.version), now = Date.now();
   try {
     await db().transaction(async trx => {
+      await acquireRevisionBoundary(trx, projectId, scriptId);
       const current = await scope({ projectId, scriptId }, trx);
       if (current.profile.profileKey !== snapshot.profile.profileKey || current.profile.version !== snapshot.profile.version) throw new ProfileError("STAGE_TRANSITION_INVALID", "项目 Profile 已变化，请刷新", 409);
+      if (current.revisionEpoch !== snapshot.revisionEpoch) throw new ProfileError("STAGE_TRANSITION_INVALID", "修订代次已变化，请刷新后重试", 409);
+      const exactStage = current.profile.definition.stages.find(item => item.stageKey === stageKey);
+      if (!exactStage) throw new ProfileError("STAGE_NOT_FOUND", "Stage 不存在", 404);
+      const runs = await trx("o_stageRun").where({ projectId, scriptId, profileKey: current.profile.profileKey,
+        profileVersion: versionNumber(current.profile.version) }).select("stageKey", "state");
+      const states = new Map<string, string>(runs.map(row => [row.stageKey, row.state]));
+      if ((states.get(stageKey) ?? "PENDING") !== fromState) throw new ProfileError("STAGE_TRANSITION_INVALID", "Stage 状态已变化，请刷新", 409);
+      if (fromState === "PENDING") {
+        const predecessors = current.profile.definition.transitions.filter(edge => edge.toStageKey === stageKey).map(edge => edge.fromStageKey);
+        if (predecessors.some(key => !["COMPLETED", "SKIPPED"].includes(states.get(key) ?? "PENDING")))
+          throw new ProfileError("STAGE_NOT_READY", "前置工序已变化，请刷新", 409);
+      }
+      const gateKey = action === "complete" ? exactStage.exitGateKey : exactStage.entryGateKey;
+      const gate = await checkGate(gateKey, { projectId, scriptId, profileKey: current.profile.profileKey,
+        profileVersion: current.profile.version, stageKey }, trx);
+      if (!gate.pass) throw new ProfileError(gate.code, gate.reason ?? "当前 Gate 未通过", 409);
       const where = { projectId, scriptId, profileKey: snapshot.profile.profileKey, profileVersion: version, stageKey };
       if (fromState === "PENDING") await trx("o_stageRun").insert({ ...where, state: "PENDING", startedAt: null, completedAt: null, skippedAt: null, updatedAt: now, lastReason: null }).onConflict(["projectId", "scriptId", "profileKey", "profileVersion", "stageKey"]).ignore();
       const mutation: any = { state: toState, updatedAt: now, lastReason: reason };

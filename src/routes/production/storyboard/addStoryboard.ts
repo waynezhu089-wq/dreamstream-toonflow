@@ -4,6 +4,7 @@ import u from "@/utils";
 import { z } from "zod";
 import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
+import { rejectControlledSemanticWrite } from "@/services/orchestrator/revisionWriteSafety";
 const router = express.Router();
 interface Storyboard {
   id: number;
@@ -34,6 +35,8 @@ export default router.post(
       } catch (e: any) { return res.status(e.status ?? 400).send({ code: e.code ?? "STORYBOARD_PRODUCTION_INVALID", message: e.message }); }
     }
     const { prompt, duration, state, src, scriptId, projectId, videoDesc, shouldGenerateImage } = req.body;
+    try { await rejectControlledSemanticWrite(projectId, scriptId); }
+    catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code, message: e.message }); }
     const trackId = Date.now()
     await u.db("o_videoTrack").insert({
       id: trackId,

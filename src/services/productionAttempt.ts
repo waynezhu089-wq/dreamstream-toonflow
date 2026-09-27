@@ -51,7 +51,7 @@ const receiptKey = (assetId: number, imageId: number, filePath: string) => `${as
 // One transaction-local query set for one or many shots. The canonical builder
 // below is shared by begin, postflight and read-only freshness.
 async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: number, scriptId: number, ids: number[], extraPrimaryAssetIds: number[] = [], includeImageModel = false): Promise<StoryboardImageSourceContext> {
-  const rows = await q("o_storyboard").where({ projectId, scriptId }).whereIn("id", ids);
+  const rows = await q("o_storyboard").where({ projectId, scriptId }).whereNull("retiredAt").whereIn("id", ids);
   const project = await q("o_project").where({ id: projectId }).first();
   if (!project) fail("PRODUCTION_CONTEXT_INVALID", "项目不存在");
   const links = new Map<number, number[]>();

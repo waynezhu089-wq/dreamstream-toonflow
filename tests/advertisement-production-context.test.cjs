@@ -32,6 +32,7 @@ async function fixture(t) {
       if(id==='@/utils/agent/memory')return emptyMemory;
       if(id==='@/utils/agent/skillsTools')return {scanSkills:async()=>[],createSkillTools:()=>({}),parseFrontmatter:()=>({}),useSkill:()=>({})};
       if (id.startsWith('@/')) return load(id.slice(2));
+      if (id.startsWith('.')) return load(path.posix.normalize(path.posix.join(path.posix.dirname(name), id)));
       return require(id);
     }, module, module.exports);
     return module.exports;
