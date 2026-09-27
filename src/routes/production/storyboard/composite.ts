@@ -1,6 +1,7 @@
 import express from "express";
 import { ZodError } from "zod";
 import { CompositeError } from "@/services/compositeGeometry";
+import { ProductionGateError } from "@/services/advertisementGate";
 import { createCompositeAttempt, runCompositeBackground, readCompositeAttempt, finishCompositeAttempt } from "@/services/compositeAttempt";
 const router = express.Router();
 for (const action of ["start", "read", "finish"] as const) router.post(`/${action}`, async (req, res) => {
@@ -12,8 +13,8 @@ for (const action of ["start", "read", "finish"] as const) router.post(`/${actio
     } else data = await (action === "read" ? readCompositeAttempt(req.body) : finishCompositeAttempt(req.body));
     res.send({ code: 200, data });
   } catch (e) {
-    const status = e instanceof CompositeError ? e.status : e instanceof ZodError ? 400 : 500;
-    res.status(status).send({ code: status, message: e instanceof Error ? e.message : "合成操作失败", data: { reason: e instanceof CompositeError ? e.code : "COMPOSITE_FAILED" } });
+    const status = e instanceof CompositeError ? e.status : e instanceof ProductionGateError ? e.status : e instanceof ZodError ? 400 : 500;
+    res.status(status).send({ code: status, message: e instanceof Error ? e.message : "合成操作失败", data: { reason: e instanceof CompositeError || e instanceof ProductionGateError ? e.code : "COMPOSITE_FAILED" } });
   }
 });
 export default router;

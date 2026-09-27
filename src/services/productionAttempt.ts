@@ -65,7 +65,7 @@ async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: 
   for (const row of rows) {
     try {
       const spec = productionSpec(row);
-      if (spec.productionMode === "REAL_ASSET_DIRECT" && spec.primaryAssetId) directIds.add(spec.primaryAssetId);
+      if ((spec.productionMode === "REAL_ASSET_DIRECT" || spec.productionMode === "REAL_AI_COMPOSITE") && spec.primaryAssetId) directIds.add(spec.primaryAssetId);
       if (spec.productionMode === "AI_TEXT_TO_IMAGE") hasAi = true;
     } catch { /* The per-shot canonical builder will fail this row closed. */ }
   }
@@ -92,7 +92,7 @@ function buildStoryboardImageSource(context: SourceContext, scope: Scope) {
   const row = context.rows.get(scope.storyboardId);
   if (!row) fail("PRODUCTION_SUBJECT_CHANGED", "当前分镜不存在或不属于该制作单元");
   const spec = productionSpec(row);
-  if (spec.productionMode !== "REAL_ASSET_DIRECT" && spec.productionMode !== "AI_TEXT_TO_IMAGE") fail("CAPABILITY_INPUT_UNSUPPORTED", "当前生产方式不属于图片生成 Attempt V1");
+  if (spec.productionMode !== "REAL_ASSET_DIRECT" && spec.productionMode !== "AI_TEXT_TO_IMAGE" && spec.productionMode !== "REAL_AI_COMPOSITE") fail("CAPABILITY_INPUT_UNSUPPORTED", "当前生产方式不属于图片生产 Attempt");
   const linkedAssetIds = [...(context.links.get(row.id) ?? [])].sort((a, b) => a - b);
   const semantic = { id: row.id, index: row.index ?? null, track: row.track ?? null, duration: row.duration == null ? null : Number(row.duration),
     prompt: row.prompt ?? "", videoDesc: row.videoDesc ?? null, productionMode: spec.productionMode,
@@ -102,10 +102,10 @@ function buildStoryboardImageSource(context: SourceContext, scope: Scope) {
   let producerType: string;
   let producerRef: string | null;
   let producerInput: any;
-  if (spec.productionMode === "REAL_ASSET_DIRECT") {
+  if (spec.productionMode === "REAL_ASSET_DIRECT" || spec.productionMode === "REAL_AI_COMPOSITE") {
     if (!spec.primaryAssetId) fail("PRIMARY_ASSET_REQUIRED", "真实素材直用必须指定主素材");
-    if (spec.referenceAssetIds.length || spec.referenceAssetGroupIds.length) fail("CAPABILITY_INPUT_UNSUPPORTED", "真实素材直用不消费参考输入");
-    if (spec.capabilityId && spec.capabilityId !== directRef) fail("CAPABILITY_NOT_IMPLEMENTED", "当前直出能力不可用");
+    if (spec.referenceAssetIds.length || spec.referenceAssetGroupIds.length) fail("CAPABILITY_INPUT_UNSUPPORTED", "当前真实主素材生产不消费参考输入");
+    if (spec.productionMode === "REAL_ASSET_DIRECT" && spec.capabilityId && spec.capabilityId !== directRef) fail("CAPABILITY_NOT_IMPLEMENTED", "当前直出能力不可用");
     const plan = context.plans.get(spec.primaryAssetId);
     if (!plan || plan.sourcePolicy !== "REAL_REQUIRED") fail("PRIMARY_ASSET_INVALID", "主素材不是当前单元有效的真实素材计划绑定");
     const asset = context.assets.get(spec.primaryAssetId);
@@ -116,9 +116,12 @@ function buildStoryboardImageSource(context: SourceContext, scope: Scope) {
     if (!image?.filePath || image.assetsId !== asset.id || image.state !== "已完成" || image.model) fail("PRIMARY_ASSET_INVALID", "真实主素材当前图片或上传来源无效");
     const receipt = context.receipts.get(receiptKey(asset.id, image.id, image.filePath));
     if (!receipt) fail("PRIMARY_ASSET_INVALID", "真实主素材上传来源凭据已失效");
-    execution = { capabilityId: spec.capabilityId ?? directRef, asset: { assetId: asset.id, imageId: image.id, filePath: image.filePath,
-      assetKey: plan.assetKey, sourcePolicy: plan.sourcePolicy, uploadedAt: receipt.uploadedAt } };
-    producerType = "REAL_ASSET_DIRECT"; producerRef = directRef;
+    execution = { ...(spec.productionMode === "REAL_AI_COMPOSITE" ? { imagePrompt: row.imagePrompt ?? null,
+      promptSkillId: spec.promptSkillId, promptSkillVersion: spec.promptSkillVersion } : {}),
+      capabilityId: spec.capabilityId ?? (spec.productionMode === "REAL_ASSET_DIRECT" ? directRef : null),
+      asset: { assetId: asset.id, imageId: image.id, filePath: image.filePath,
+        assetKey: plan.assetKey, sourcePolicy: plan.sourcePolicy, uploadedAt: receipt.uploadedAt } };
+    producerType = spec.productionMode; producerRef = spec.productionMode === "REAL_ASSET_DIRECT" ? directRef : null;
     producerInput = execution.asset;
   } else {
     if (spec.primaryAssetId !== null || spec.referenceAssetIds.length || spec.referenceAssetGroupIds.length) fail("CAPABILITY_INPUT_UNSUPPORTED", "纯文生图不接受真实主素材或参考输入");
@@ -141,9 +144,16 @@ export async function captureStoryboardImageSource(q: Knex.Transaction, scope: S
 }
 
 type Producer = { producerType: string; producerRef: string | null; producerInput: any };
+export type CurrentImageAttemptHooks = {
+  onAttemptCreated?: (q: Knex.Transaction, attemptId: string) => Promise<void>;
+  validateOutput?: (q: Knex.Transaction, attempt: any, output: Output, scope: Scope) => Promise<string | null>;
+  onSuccess?: (q: Knex.Transaction, attempt: any, output: Output) => Promise<void>;
+  onStale?: (q: Knex.Transaction, attempt: any, output: Output | null, staleCode: string) => Promise<void>;
+  onFail?: (q: Knex.Transaction, attempt: any, code: string, message: string) => Promise<void>;
+};
 export async function beginCurrentImageAttempt(scope: Scope, operationKey: ProductionOperationKey,
   prepareProducer: (q: Knex.Transaction, source: Awaited<ReturnType<typeof captureStoryboardImageSource>>) => Promise<Producer> | Producer,
-  transaction?: Knex.Transaction) {
+  transaction?: Knex.Transaction, hooks: CurrentImageAttemptHooks = {}) {
   const begin = async (q: Knex.Transaction) => {
     const source = await captureStoryboardImageSource(q, scope);
     const producer = await prepareProducer(q, source);
@@ -162,6 +172,7 @@ export async function beginCurrentImageAttempt(scope: Scope, operationKey: Produ
       controlSnapshot: canonicalJson(controlSnapshot), status: "RUNNING", startedAt: now, updatedAt: now });
     await q("o_storyboard").where({ id: scope.storyboardId, projectId: scope.projectId, scriptId: scope.scriptId })
       .update({ activeImageAttemptId: attemptId, state: "生成中", reason: "" });
+    await hooks.onAttemptCreated?.(q, attemptId);
     return { attemptId, ...scope, ...producer };
   };
   return transaction ? begin(transaction) : database().transaction(begin);
@@ -169,6 +180,8 @@ export async function beginCurrentImageAttempt(scope: Scope, operationKey: Produ
 
 export async function beginStoryboardImageAttempt(scope: Scope, requestModel?: string, transaction?: Knex.Transaction) {
   return beginCurrentImageAttempt(scope, generateOperationKey, (_q, source) => {
+    if (source.producerType !== "REAL_ASSET_DIRECT" && source.producerType !== "AI_MODEL")
+      fail("CAPABILITY_INPUT_UNSUPPORTED", "当前生产方式不能进入普通分镜图片生成");
     if (requestModel && source.producerType === "AI_MODEL" && requestModel !== source.producerRef) fail("MODEL_CONFIG_MISMATCH", "所选模型与当前项目配置不同，请保存配置后重试");
     return { producerType: source.producerType, producerRef: source.producerRef, producerInput: source.producerInput };
   }, transaction);
@@ -191,7 +204,41 @@ async function outputProvenanceCode(q: Knex.Transaction, attempt: any, output: O
   return "PRODUCTION_OUTPUT_PROVENANCE_MISMATCH";
 }
 
-export async function finishCurrentImageAttempt(attemptId: string, output: Output) {
+async function currentImageDrift(q: Knex.Transaction, attempt: any, storyboard: any, scope: Scope) {
+  if (!storyboard) return "PRODUCTION_SUBJECT_CHANGED";
+  if (storyboard.activeImageAttemptId !== attempt.attemptId) return "PRODUCTION_ATTEMPT_SUPERSEDED";
+  try {
+    const source = await captureStoryboardImageSource(q, scope);
+    if (source.sourceHash !== attempt.sourceHash) return "PRODUCTION_SOURCE_CHANGED";
+  } catch { return "PRODUCTION_SOURCE_CHANGED"; }
+  const admission = await readProductionOperationAdmission(attempt.operationKey, scope, q);
+  if (!admission.enforced || !admission.allowed || !admission.snapshotConsistent || sha256(stableControl(admission)) !== attempt.controlContextHash) return "PRODUCTION_CONTROL_CHANGED";
+  return null;
+}
+
+export async function recheckCurrentImageAttempt(attemptId: string, hooks: CurrentImageAttemptHooks = {}, transaction?: Knex.Transaction) {
+  const check = async (q: Knex.Transaction) => {
+    const attempt = await q("o_productionAttempt").where({ attemptId }).first();
+    if (!attempt) fail("PRODUCTION_ATTEMPT_NOT_FOUND", "图片生产任务不存在");
+    if (attempt.status !== "RUNNING") {
+      if (attempt.status === "STALE") await hooks.onStale?.(q, attempt, null, attempt.staleCode ?? "PRODUCTION_ATTEMPT_SUPERSEDED");
+      return { attemptId, status: attempt.status, staleCode: attempt.staleCode ?? null };
+    }
+    const scope = { projectId: attempt.projectId, scriptId: attempt.scriptId, storyboardId: attempt.subjectId };
+    const storyboard = await q("o_storyboard").where({ id: scope.storyboardId, projectId: scope.projectId, scriptId: scope.scriptId }).first();
+    const staleCode = await currentImageDrift(q, attempt, storyboard, scope);
+    if (!staleCode) return { attemptId, status: "RUNNING", staleCode: null };
+    const now = Date.now();
+    await q("o_productionAttempt").where({ attemptId }).update({ status: "STALE", staleCode, staleReason: "生产来源或控制状态已变化", completedAt: now, updatedAt: now });
+    if (storyboard?.activeImageAttemptId === attemptId) await q("o_storyboard").where({ id: scope.storyboardId, projectId: scope.projectId, scriptId: scope.scriptId })
+      .update({ activeImageAttemptId: null, state: storyboard.filePath ? "已完成" : "未生成", reason: staleCode });
+    await hooks.onStale?.(q, attempt, null, staleCode);
+    return { attemptId, status: "STALE", staleCode };
+  };
+  return transaction ? check(transaction) : database().transaction(check);
+}
+
+export async function finishCurrentImageAttempt(attemptId: string, output: Output, hooks: CurrentImageAttemptHooks = {}) {
   return database().transaction(async q => {
     const attempt = await q("o_productionAttempt").where({ attemptId }).first();
     if (!attempt) fail("PRODUCTION_ATTEMPT_NOT_FOUND", "图片生产任务不存在");
@@ -199,31 +246,23 @@ export async function finishCurrentImageAttempt(attemptId: string, output: Outpu
     const now = Date.now(), outputRef = canonicalJson(output);
     if (attempt.status === "STALE") {
       await q("o_productionAttempt").where({ attemptId }).update({ outputRef, completedAt: now, updatedAt: now });
+      await hooks.onStale?.(q, attempt, output, attempt.staleCode ?? "PRODUCTION_ATTEMPT_SUPERSEDED");
       return { attemptId, status: "STALE", staleCode: attempt.staleCode };
     }
     if (attempt.status !== "RUNNING") return { attemptId, status: attempt.status };
     const storyboard = await q("o_storyboard").where({ id: scope.storyboardId, projectId: scope.projectId, scriptId: scope.scriptId }).first();
-    let staleCode: string | null = null;
-    if (!storyboard) staleCode = "PRODUCTION_SUBJECT_CHANGED";
-    else if (storyboard.activeImageAttemptId !== attemptId) staleCode = "PRODUCTION_ATTEMPT_SUPERSEDED";
-    if (!staleCode) staleCode = await outputProvenanceCode(q, attempt, output, scope);
-    if (!staleCode) {
-      try {
-        const source = await captureStoryboardImageSource(q, scope);
-        if (source.sourceHash !== attempt.sourceHash) staleCode = "PRODUCTION_SOURCE_CHANGED";
-      } catch { staleCode = "PRODUCTION_SOURCE_CHANGED"; }
-    }
-    if (!staleCode) {
-      const admission = await readProductionOperationAdmission(attempt.operationKey, scope, q);
-      if (!admission.enforced || !admission.allowed || !admission.snapshotConsistent || sha256(stableControl(admission)) !== attempt.controlContextHash) staleCode = "PRODUCTION_CONTROL_CHANGED";
-    }
+    let staleCode: string | null = !storyboard ? "PRODUCTION_SUBJECT_CHANGED" : storyboard.activeImageAttemptId !== attemptId ? "PRODUCTION_ATTEMPT_SUPERSEDED" : null;
+    if (!staleCode) staleCode = hooks.validateOutput ? await hooks.validateOutput(q, attempt, output, scope) : await outputProvenanceCode(q, attempt, output, scope);
+    if (!staleCode) staleCode = await currentImageDrift(q, attempt, storyboard, scope);
     if (staleCode) {
       await q("o_productionAttempt").where({ attemptId }).update({ status: "STALE", staleCode, staleReason: "生产来源或控制状态已变化，输出仅保留在任务记录中", outputRef, completedAt: now, updatedAt: now });
       if (storyboard?.activeImageAttemptId === attemptId) await q("o_storyboard").where({ id: scope.storyboardId, projectId: scope.projectId, scriptId: scope.scriptId })
         .update({ activeImageAttemptId: null, state: storyboard.filePath ? "已完成" : "未生成", reason: staleCode });
+      await hooks.onStale?.(q, attempt, output, staleCode);
       return { attemptId, status: "STALE", staleCode };
     }
     await q("o_productionAttempt").where({ attemptId }).update({ status: "SUCCEEDED", outputRef, completedAt: now, updatedAt: now });
+    await hooks.onSuccess?.(q, attempt, output);
     await q("o_storyboard").where({ id: scope.storyboardId, projectId: scope.projectId, scriptId: scope.scriptId })
       .update({ filePath: output.filePath, currentImageAttemptId: attemptId, activeImageAttemptId: null, state: "已完成", reason: "",
         ...(attempt.producerType === "MANUAL_ATTACH" ? { flowId: output.flowId, shouldGenerateImage: 1 } : {}) });
@@ -233,13 +272,16 @@ export async function finishCurrentImageAttempt(attemptId: string, output: Outpu
 
 export async function finishStoryboardImageAttempt(attemptId: string, output: Output) { return finishCurrentImageAttempt(attemptId, output); }
 
-export async function failCurrentImageAttempt(attemptId: string, error: unknown) {
+export async function failCurrentImageAttempt(attemptId: string, error: unknown, hooks: CurrentImageAttemptHooks = {}) {
   return database().transaction(async q => {
     const attempt = await q("o_productionAttempt").where({ attemptId }).first();
-    if (!attempt || attempt.status !== "RUNNING") return;
+    if (!attempt) return;
+    if (attempt.status === "STALE") { await hooks.onStale?.(q, attempt, null, attempt.staleCode ?? "PRODUCTION_ATTEMPT_SUPERSEDED"); return; }
+    if (attempt.status !== "RUNNING") return;
     const code = typeof error === "object" && error && "code" in error ? String(error.code) : "STORYBOARD_PRODUCTION_FAILED";
     const message = error instanceof Error ? error.message : String(error);
     await q("o_productionAttempt").where({ attemptId }).update({ status: "FAILED", errorCode: code, error: message, completedAt: Date.now(), updatedAt: Date.now() });
+    await hooks.onFail?.(q, attempt, code, message);
     const where = { id: attempt.subjectId, projectId: attempt.projectId, scriptId: attempt.scriptId, activeImageAttemptId: attemptId };
     const row = await q("o_storyboard").where(where).first();
     if (row) await q("o_storyboard").where(where).update({ activeImageAttemptId: null, state: row.filePath ? "已完成" : "生成失败", reason: row.filePath ? "" : `${code}: ${message}` });
