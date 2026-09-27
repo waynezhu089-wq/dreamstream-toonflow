@@ -2,6 +2,7 @@ import express from "express";
 import { success } from "@/lib/responseFormat";
 import { ProfileError } from "@/services/orchestrator/profileDefinition";
 import { actOnStage, readOrchestrator, stageEvents } from "@/services/orchestrator/stageOrchestrator";
+import { previewRevision } from "@/services/orchestrator/revisionPreview";
 
 const router = express.Router();
 function route(path: string, action: (body: any) => Promise<any>) {
@@ -18,4 +19,5 @@ route("/start", body => actOnStage("start", body));
 route("/complete", body => actOnStage("complete", body));
 route("/skip", body => actOnStage("skip", body));
 route("/events", stageEvents);
+route("/revision/preview", previewRevision);
 export default router;

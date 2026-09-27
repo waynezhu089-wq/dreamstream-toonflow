@@ -35,7 +35,7 @@ function stableControl(admission: OperationAdmission) {
   };
 }
 
-type SourceContext = {
+export type StoryboardImageSourceContext = {
   rows: Map<number, any>;
   links: Map<number, number[]>;
   plans: Map<number, any>;
@@ -50,7 +50,7 @@ const receiptKey = (assetId: number, imageId: number, filePath: string) => `${as
 
 // One transaction-local query set for one or many shots. The canonical builder
 // below is shared by begin, postflight and read-only freshness.
-async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: number, scriptId: number, ids: number[]): Promise<SourceContext> {
+async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: number, scriptId: number, ids: number[], extraPrimaryAssetIds: number[] = [], includeImageModel = false): Promise<StoryboardImageSourceContext> {
   const rows = await q("o_storyboard").where({ projectId, scriptId }).whereIn("id", ids);
   const project = await q("o_project").where({ id: projectId }).first();
   if (!project) fail("PRODUCTION_CONTEXT_INVALID", "项目不存在");
@@ -60,7 +60,7 @@ async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: 
     list.push(link.assetId);
     links.set(link.storyboardId, list);
   }
-  const directIds = new Set<number>();
+  const directIds = new Set<number>(extraPrimaryAssetIds);
   let hasAi = false;
   for (const row of rows) {
     try {
@@ -69,7 +69,7 @@ async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: 
       if (spec.productionMode === "AI_TEXT_TO_IMAGE") hasAi = true;
     } catch { /* The per-shot canonical builder will fail this row closed. */ }
   }
-  const imageModel = hasAi ? (await resolveModelsInTransaction(projectId, q, project)).models.image : null;
+  const imageModel = hasAi || includeImageModel ? (await resolveModelsInTransaction(projectId, q, project)).models.image : null;
   const plans = new Map<number, any>(), assets = new Map<number, any>(), scriptAssetIds = new Set<number>();
   const images = new Map<number, any>(), receipts = new Map<string, any>();
   if (directIds.size) {
@@ -88,7 +88,7 @@ async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: 
   return { rows: new Map(rows.map(row => [row.id, row])), links, plans, assets, scriptAssetIds, images, receipts, project, imageModel };
 }
 
-function buildStoryboardImageSource(context: SourceContext, scope: Scope) {
+function buildStoryboardImageSource(context: StoryboardImageSourceContext, scope: Scope) {
   const row = context.rows.get(scope.storyboardId);
   if (!row) fail("PRODUCTION_SUBJECT_CHANGED", "当前分镜不存在或不属于该制作单元");
   const spec = productionSpec(row);
@@ -141,6 +141,20 @@ function buildStoryboardImageSource(context: SourceContext, scope: Scope) {
 export async function captureStoryboardImageSource(q: Knex.Transaction, scope: Scope) {
   const context = await loadStoryboardImageSourceContext(q, scope.projectId, scope.scriptId, [scope.storyboardId]);
   return buildStoryboardImageSource(context, scope);
+}
+
+// B3-A captures this bounded context inside its one read transaction, then
+// uses the same pure B2 source builder for current/proposed in memory.
+export async function captureStoryboardImageSourceContext(q: Knex.Transaction, projectId: number, scriptId: number,
+  ids: number[], extraPrimaryAssetIds: number[] = []) {
+  return loadStoryboardImageSourceContext(q, projectId, scriptId, ids, extraPrimaryAssetIds, true);
+}
+export function storyboardImageSourceFromContext(context: StoryboardImageSourceContext, scope: Scope, row?: any, links?: number[]) {
+  if (!row && !links) return buildStoryboardImageSource(context, scope);
+  const local = { ...context, rows: new Map(context.rows), links: new Map(context.links) };
+  if (row) local.rows.set(scope.storyboardId, row);
+  if (links) local.links.set(scope.storyboardId, links);
+  return buildStoryboardImageSource(local, scope);
 }
 
 type Producer = { producerType: string; producerRef: string | null; producerInput: any };
