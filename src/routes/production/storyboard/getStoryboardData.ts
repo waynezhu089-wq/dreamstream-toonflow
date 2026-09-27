@@ -15,9 +15,10 @@ export default router.post(
     page: z.number(),
     limit: z.number(),
     name: z.string().optional().nullable(),
+    historyOnly: z.boolean().optional(),
   }),
   async (req, res) => {
-    const { scriptId, page, limit, name } = req.body;
+    const { scriptId, page, limit, name, historyOnly = false } = req.body;
     const script = await u.db("o_script").where({id:scriptId}).first();
     if (!script || (req.body.projectId !== undefined && req.body.projectId !== script.projectId)) return res.status(400).send({message:"制作单元不属于当前项目"});
     const projectId = script.projectId;
@@ -27,13 +28,17 @@ export default router.post(
       .db("o_storyboard")
       .where({ scriptId, projectId })
       .modify((qb) => {
+        if (historyOnly) qb.whereNotNull("retiredAt");
+        else qb.whereNull("retiredAt");
         if (name) {
           qb.andWhere("title", "like", `%${name}%`);
         }
       })
+      .orderBy(historyOnly ? "retiredAt" : "index", historyOnly ? "desc" : "asc")
+      .orderBy("id", historyOnly ? "desc" : "asc")
       .offset(offset)
       .limit(limit);
-    const imageProvenance = await readImageProvenance(Number(projectId), scriptId, storyboardData);
+    const imageProvenance = historyOnly ? new Map() : await readImageProvenance(Number(projectId), scriptId, storyboardData);
     const data = await Promise.all(
       storyboardData.map(async (i: any) => {
         return {
@@ -51,6 +56,8 @@ export default router.post(
       .db("o_storyboard")
       .where({ scriptId, projectId })
       .modify((qb) => {
+        if (historyOnly) qb.whereNotNull("retiredAt");
+        else qb.whereNull("retiredAt");
         if (name) {
           qb.andWhere("title", "like", `%${name}%`);
         }

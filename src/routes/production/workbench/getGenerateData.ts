@@ -170,7 +170,7 @@ export default router.post(
     for (const trackId of trackIdMap) {
       const item = trackData.find((t) => t.id === trackId);
       const selected = videoList.find(video => video.id === item?.videoId && video.videoTrackId === trackId);
-      const selectedCurrent = selected && (media.epoch === 0 || media.status(selected) === "CURRENT");
+      const selectedCurrent = selected && ["CURRENT", "LEGACY"].includes(media.status(selected));
       trackList.push({
         id: trackId,
         duration: item?.duration ?? 0,

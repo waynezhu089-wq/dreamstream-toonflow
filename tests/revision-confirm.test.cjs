@@ -46,6 +46,7 @@ async function setup(t, definition = graph) {
   app.use('/api/production/storyboard/removeFrame', f.load('routes/production/storyboard/removeFrame').default);
   app.use('/api/production/storyboard/batchDelete', f.load('routes/production/storyboard/batchDelete').default);
   app.use('/api/production/getStoryboardData', f.load('routes/production/getStoryboardData').default);
+  app.use('/api/production/storyboard/getStoryboardData', f.load('routes/production/storyboard/getStoryboardData').default);
   app.use('/api/production/workbench/getVideoList', f.load('routes/production/workbench/getVideoList').default);
   app.use('/api/production/workbench/delVideo', f.load('routes/production/workbench/delVideo').default);
   app.use('/api/production/workbench/deleteTrack', f.load('routes/production/workbench/deleteTrack').default);
@@ -392,6 +393,77 @@ test('retired storyboard and video stay in explicit scoped history, not normal p
   assert.equal(videos[0].id, videoId);
   assert.equal(videos[0].revisionStatus, 'HISTORICAL');
   assert.equal((await f.production('getStoryboardData', { projectId: 1, scriptId: 11, historyOnly: true })).length, 0);
+});
+
+test('paginated storyboard HTTP route excludes a RETIREd shot by default and exposes it only in history mode', async t => {
+  const f = await setup(t);
+  const request = { projectId: 1, scriptId: 10, page: 1, limit: 20 };
+  const before = await f.production('storyboard/getStoryboardData', request);
+  assert.deepEqual(before.data.map(row => row.id), [f.shot.id]);
+  assert.equal(Number(before.total), 1);
+  const retire = await f.preview({ operations: [{ type: 'RETIRE', storyboardId: f.shot.id }] });
+  await f.confirm(retire.command, retire.result);
+  const after = await f.production('storyboard/getStoryboardData', request);
+  assert.equal(after.data.some(row => row.id === f.shot.id), false);
+  assert.equal(Number(after.total), 0);
+  const history = await f.production('storyboard/getStoryboardData', { ...request, historyOnly: true });
+  assert.deepEqual(history.data.map(row => row.id), [f.shot.id]);
+  assert.equal(Number(history.total), 1);
+});
+
+test('epoch-zero legacy video remains selectable, but guarded failed or fenced video never becomes current', async t => {
+  const f = await setup(t);
+  const scope = { projectId: 1, scriptId: 10 };
+  await f.db('o_project').where({ id: 1 }).update({ videoModel: 'vendor:video' });
+  const [legacyId] = await f.db('o_video').insert({ ...scope, videoTrackId: f.shot.trackId,
+    filePath: '/1/video/pre-b3.mp4', state: '生成成功', time: 1 });
+  await f.workbench('selectVideo', { trackId: f.shot.trackId, videoId: legacyId });
+  let track = (await f.workbench('getGenerateData', scope)).trackList.find(row => row.id === f.shot.trackId);
+  assert.equal(track.selectVideoId, legacyId);
+  assert.equal(track.videoList.find(row => row.id === legacyId).revisionStatus, 'LEGACY');
+
+  const work = f.load('services/orchestrator/revisionWorkGuard');
+  const [failed] = await work.admitRevisionWork(scope, 'VIDEO_GENERATE', [
+    { trackId: f.shot.trackId, references: [], videoPath: '/1/video/failed.mp4' }]);
+  assert.equal(await work.settleRevisionWork(scope, failed, 'FAILED'), 'SETTLED');
+  await f.db('o_videoTrack').where({ id: f.shot.trackId }).update({ videoId: failed.videoId });
+  track = (await f.workbench('getGenerateData', scope)).trackList.find(row => row.id === f.shot.trackId);
+  assert.equal(track.selectVideoId, undefined);
+  assert.equal(track.historicalSelectedVideoId, failed.videoId);
+  assert.equal(track.videoList.find(row => row.id === failed.videoId).revisionStatus, 'HISTORICAL');
+  assert.equal((await f.workbench('getVideoList', scope)).find(row => row.id === failed.videoId).revisionStatus, 'HISTORICAL');
+  assert.equal((await f.workbench('selectVideo', { trackId: f.shot.trackId, videoId: failed.videoId }, 409)).code,
+    'REVISION_VIDEO_NOT_CURRENT');
+
+  const [fenced] = await work.admitRevisionWork(scope, 'VIDEO_GENERATE', [
+    { trackId: f.shot.trackId, references: [], videoPath: '/1/video/fenced.mp4' }]);
+  await work.fenceRevisionWork(scope, fenced.guardId, { id: 7 }, 'local test fence');
+  await f.db('o_videoTrack').where({ id: f.shot.trackId }).update({ videoId: fenced.videoId });
+  track = (await f.workbench('getGenerateData', scope)).trackList.find(row => row.id === f.shot.trackId);
+  assert.equal(track.selectVideoId, undefined);
+  assert.equal(track.videoList.find(row => row.id === fenced.videoId).revisionStatus, 'HISTORICAL');
+  assert.equal((await f.workbench('selectVideo', { trackId: f.shot.trackId, videoId: fenced.videoId }, 409)).code,
+    'REVISION_VIDEO_NOT_CURRENT');
+
+  const [uncertain] = await work.admitRevisionWork(scope, 'VIDEO_GENERATE', [
+    { trackId: f.shot.trackId, references: [], videoPath: '/1/video/uncertain.mp4' }]);
+  await f.db('o_revisionWorkGuard').where({ guardId: uncertain.guardId }).update({ state: 'UNCERTAIN' });
+  await f.db('o_videoTrack').where({ id: f.shot.trackId }).update({ videoId: uncertain.videoId });
+  track = (await f.workbench('getGenerateData', scope)).trackList.find(row => row.id === f.shot.trackId);
+  assert.equal(track.selectVideoId, undefined);
+  assert.equal(track.videoList.find(row => row.id === uncertain.videoId).revisionStatus, 'HISTORICAL');
+  assert.equal((await f.workbench('selectVideo', { trackId: f.shot.trackId, videoId: uncertain.videoId }, 409)).code,
+    'REVISION_ASYNC_WORK_BLOCKED');
+  assert.equal((await f.db('o_videoTrack').where({ id: f.shot.trackId }).first()).videoId, uncertain.videoId);
+  await work.fenceRevisionWork(scope, uncertain.guardId, { id: 7 }, 'resolve uncertain local test');
+
+  const [success] = await work.admitRevisionWork(scope, 'VIDEO_GENERATE', [
+    { trackId: f.shot.trackId, references: [], videoPath: '/1/video/success.mp4' }]);
+  assert.equal(await work.settleRevisionWork(scope, success, 'SUCCEEDED'), 'SETTLED');
+  await f.workbench('selectVideo', { trackId: f.shot.trackId, videoId: success.videoId });
+  track = (await f.workbench('getGenerateData', scope)).trackList.find(row => row.id === f.shot.trackId);
+  assert.equal(track.selectVideoId, success.videoId);
+  assert.equal(track.videoList.find(row => row.id === success.videoId).revisionStatus, 'CURRENT');
 });
 
 test('owner configuration denies Confirm and replay before any state change', async t => {
