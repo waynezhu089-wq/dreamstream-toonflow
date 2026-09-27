@@ -11,6 +11,7 @@ import buildRoute from "@/core";
 import path from "path";
 import fs from "fs";
 import u from "@/utils";
+import { dbReady } from "@/utils/db";
 import jwt from "jsonwebtoken";
 import socketInit from "@/socket/index";
 import { isEletron } from "@/utils/getPath";
@@ -68,6 +69,7 @@ async function checkPermissions() {
 
 export default async function startServe(randomPort: Boolean = false) {
   await checkPermissions();
+  await dbReady;
   await initializeAssetPlanSchema(u.db);
   await initializeModelPresetSchema(u.db);
   await initializeStoryboardProductionSchema(u.db);
