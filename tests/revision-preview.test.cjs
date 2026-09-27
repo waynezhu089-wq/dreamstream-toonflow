@@ -289,3 +289,91 @@ test('ADD can preview an empty production unit without reserving a storyboard id
   assert.equal(value.proposedSemantic[0].id, undefined);
   assert.deepEqual(await f.state(), before);
 });
+
+test('HF1 F1: untouched raw null index stays CURRENT and proposed Source matches an explicitly patched SQLite fixture', async t => {
+  const f = await setup(t);
+  const expected = await setup(t);
+  const b = await f.create({ prompt: 'Second', associateAssetsIds: [1] });
+  const expectedB = await expected.create({ prompt: 'Second', associateAssetsIds: [1] });
+  assert.equal(b.id, expectedB.id);
+  const [receipt] = await f.db('o_assetUploadSource').where({ assetId: 1, imageId: 1 });
+  await expected.db('o_assetUploadSource').where({ assetId: 1, imageId: 1 }).update({ uploadedAt: receipt.uploadedAt });
+  for (const fixture of [f, expected]) {
+    await fixture.db('o_storyboard').where({ id: fixture.storyboardId }).update({ index: null });
+    await fixture.db('o_storyboard').where({ id: b.id }).update({ index: 7 });
+  }
+  const source = await f.db.transaction(q => f.load('services/productionAttempt').captureStoryboardImageSource(q,
+    { ...scope, storyboardId: f.storyboardId }));
+  const profile = await f.db('o_productionProfileVersion').where({ profileKey: 'advertisement', version: 2 }).first();
+  const attemptId = randomUUID();
+  await f.db('o_productionAttempt').insert({
+    attemptId, ...scope, profileKey: 'advertisement', profileVersion: 2, profileDefinitionHash: profile.definitionHash,
+    recipeKey: null, recipeVersion: null, recipeDefinitionHash: null, stageKey: 'image-production',
+    operationKey: 'storyboard.image.generate', subjectType: 'STORYBOARD_IMAGE', subjectId: f.storyboardId,
+    sourceAdapterKey: 'storyboard.image-source.v1', sourceHash: source.sourceHash,
+    sourceSnapshot: JSON.stringify(source.snapshot), producerType: 'REAL_ASSET_DIRECT', producerRef: null,
+    producerInput: '{}', controlContextHash: 'control', controlSnapshot: '{}', status: 'SUCCEEDED',
+    outputRef: JSON.stringify({ filePath: '/generated/current' }), startedAt: 1, completedAt: 2, updatedAt: 2,
+  });
+  await f.db('o_storyboard').where({ id: f.storyboardId }).update({ currentImageAttemptId: attemptId, filePath: '/generated/current' });
+  const before = await f.state();
+  for (const patch of [{ prompt: null }, { prompt: '' }, { videoDesc: null }, { videoDesc: '' }, { track: '' }]) {
+    const result = await f.post({ operations: [{ type: 'EDIT', storyboardId: b.id, patch }] });
+    const aImpact = result.outputImpact.find(row => row.storyboardId === f.storyboardId);
+    assert.equal(aImpact.sourceChanged, false, JSON.stringify(patch));
+    assert.equal(aImpact.afterFreshness, 'CURRENT', JSON.stringify(patch));
+    await expected.db('o_storyboard').where({ id: b.id }).update(patch);
+    const accepted = await expected.db.transaction(q => expected.load('services/productionAttempt').captureStoryboardImageSource(q,
+      { ...scope, storyboardId: b.id }));
+    const bImpact = result.outputImpact.find(row => row.storyboardId === b.id);
+    assert.equal(bImpact.proposedSourceHash, accepted.sourceHash, JSON.stringify(patch));
+    await expected.db('o_storyboard').where({ id: b.id }).update({ prompt: 'Second', videoDesc: 'Screen', track: 'Main' });
+  }
+  assert.deepEqual(await f.state(), before);
+});
+
+test('HF1 F2: explicit and omitted ADD indices append in operation order, with or without complete REORDER', async t => {
+  const f = await setup(t);
+  const adds = [
+    { type: 'ADD', clientRef: 'explicit', storyboard: complete({ index: 1 }) },
+    { type: 'ADD', clientRef: 'implicit', storyboard: complete() },
+    { type: 'ADD', clientRef: 'later', storyboard: complete({ index: 5 }) },
+    { type: 'ADD', clientRef: 'last', storyboard: complete() },
+  ];
+  const before = await f.state();
+  const result = await f.post({ operations: adds });
+  assert.deepEqual(result.proposedSemantic.map(row => row.index), [0, 1, 2, 5, 6]);
+  const ordered = await f.post({ operations: [...adds, { type: 'REORDER', order: [
+    { clientRef: 'last' }, { storyboardId: f.storyboardId }, { clientRef: 'later' },
+    { clientRef: 'implicit' }, { clientRef: 'explicit' },
+  ] }] });
+  assert.deepEqual(ordered.proposedSemantic.map(row => row.clientRef ?? row.id),
+    ['last', f.storyboardId, 'later', 'implicit', 'explicit']);
+  assert.deepEqual(ordered.proposedSemantic.map(row => row.index), [0, 1, 2, 5, 6]);
+  await f.post({ operations: [{ type: 'ADD', clientRef: 'conflict', storyboard: complete({ index: 0 }) }] }, 409);
+  await f.post({ operations: [{ type: 'ADD', clientRef: 'conflict', storyboard: complete({ index: 0 }) },
+    { type: 'REORDER', order: [{ clientRef: 'conflict' }, { storyboardId: f.storyboardId }] }] }, 409);
+  assert.deepEqual(await f.state(), before);
+});
+
+test('HF1 F3: irrelevant historical receipts do not alter Preview and receipt rows read stay bounded', async t => {
+  const f = await setup(t);
+  const changeSet = { operations: [{ type: 'EDIT', storyboardId: f.storyboardId, patch: { prompt: 'Changed' } }] };
+  const baseline = await f.post(changeSet);
+  const history = Array.from({ length: 40 }, (_, n) => ({ id: n + 100, assetsId: 1,
+    filePath: `/historical/${n}`, state: '已完成', model: null }));
+  await f.db('o_image').insert(history);
+  await f.db('o_assetUploadSource').insert(history.map(image => ({ projectId: 1, assetId: 1,
+    imageId: image.id, filePath: image.filePath, uploadedAt: image.id })));
+  const received = [];
+  const listener = (response, obj) => { if (obj?.sql?.includes('o_assetUploadSource')) received.push(response.length); };
+  f.raw.on('query-response', listener);
+  let after;
+  try { after = await f.post(changeSet); } finally { f.raw.off('query-response', listener); }
+  assert.equal(after.previewHash, baseline.previewHash);
+  assert.deepEqual(received, [1]);
+  await f.db('o_assetUploadSource').where({ assetId: 1, imageId: 1 }).update({ uploadedAt: 123456789 });
+  const changed = await f.post(changeSet);
+  assert.notEqual(changed.previewHash, baseline.previewHash);
+  assert.notEqual(changed.outputImpact[0].currentSourceHash, baseline.outputImpact[0].currentSourceHash);
+});

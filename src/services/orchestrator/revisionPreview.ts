@@ -157,9 +157,11 @@ function plan(request: Request, captured: Awaited<ReturnType<typeof capture>>) {
   const active = original.map(row => ({ ...row })) as any[];
   const byId = new Map(active.map(row => [row.id, row]));
   const originalRows = new Map(captured.rows.map(row => [Number(row.id), row]));
+  // B1 normalizes for review hashing (notably null index -> 0). B2 must see
+  // original storage values except for fields explicitly changed by this plan.
+  const proposedRows = new Map(captured.rows.map(row => [Number(row.id), { ...row }]));
   const changed = new Set<number>(), retired = new Set<number>(), clientRefs = new Set<string>();
   let reorder: any[] | null = null;
-  let nextIndex = active.length ? Math.max(...active.map(row => row.index)) + 1 : 0;
   for (const op of request.changeSet.operations) {
     if (op.type === "EDIT") {
       if (!byId.has(op.storyboardId) || changed.has(op.storyboardId) || retired.has(op.storyboardId)) reject("REVISION_CHANGE_INVALID", "EDIT 目标不存在、重复或已退休");
@@ -167,6 +169,16 @@ function plan(request: Request, captured: Awaited<ReturnType<typeof capture>>) {
         reject("REVISION_UNSUPPORTED", "当前没有可验证归属的 Asset Group，不能增加或更换组引用");
       }
       Object.assign(byId.get(op.storyboardId)!, op.patch); changed.add(op.storyboardId);
+      const storage = proposedRows.get(op.storyboardId)!;
+      for (const field of ["track", "duration", "prompt", "videoDesc"] as const) {
+        if (Object.hasOwn(op.patch, field)) storage[field] = op.patch[field] as never;
+      }
+      const specFields = ["productionMode", "primaryAssetId", "referenceAssetIds", "referenceAssetGroupIds"] as const;
+      if (specFields.some(field => Object.hasOwn(op.patch, field))) {
+        const spec = productionSpec(storage);
+        storage.productionSpec = JSON.stringify({ ...spec, ...Object.fromEntries(specFields
+          .filter(field => Object.hasOwn(op.patch, field)).map(field => [field, op.patch[field]])) });
+      }
     } else if (op.type === "RETIRE") {
       if (!byId.has(op.storyboardId) || changed.has(op.storyboardId) || retired.has(op.storyboardId)) reject("REVISION_CHANGE_INVALID", "RETIRE 目标不存在、重复或冲突");
       retired.add(op.storyboardId);
@@ -176,13 +188,17 @@ function plan(request: Request, captured: Awaited<ReturnType<typeof capture>>) {
       if (op.storyboard.referenceAssetGroupIds.length) reject("REVISION_UNSUPPORTED", "当前没有可验证归属的 Asset Group，不能新增组引用");
       clientRefs.add(op.clientRef);
       const { index, ...fields } = op.storyboard;
-      active.push({ clientRef: op.clientRef, index: index ?? nextIndex++, ...fields });
+      const nextIndex = active.length ? Math.max(...active.map(row => row.index)) + 1 : 0;
+      active.push({ clientRef: op.clientRef, index: index ?? nextIndex, ...fields });
     } else {
       if (reorder) reject("REVISION_CHANGE_INVALID", "一个 Preview 只能包含一次完整 REORDER");
       reorder = op.order;
     }
   }
   if (active.length > MAX_SHOTS) reject("REVISION_SNAPSHOT_TOO_LARGE", "拟议分镜数量超过上限");
+  if (new Set(active.map(row => row.index)).size !== active.length) {
+    reject("REVISION_CHANGE_INVALID", "显式 ADD index 与现有或先前 ADD index 冲突");
+  }
   if (reorder) {
     const expected = new Set(active.map(keyOf)), actual = reorder.map(keyOf);
     if (actual.length !== expected.size || new Set(actual).size !== actual.length || actual.some(key => !expected.has(key))) {
@@ -193,10 +209,12 @@ function plan(request: Request, captured: Awaited<ReturnType<typeof capture>>) {
     active.length = 0;
     for (const [position, key] of actual.entries()) {
       const row = lookup.get(key)!; row.index = slots[position]; active.push(row);
-      if (row.id) changed.add(row.id);
+      if (row.id && row.index !== original.find(before => before.id === row.id)!.index) {
+        proposedRows.get(row.id)!.index = row.index;
+        changed.add(row.id);
+      }
     }
   }
-  if (new Set(active.map(row => row.index)).size !== active.length) reject("REVISION_CHANGE_INVALID", "拟议 index 重复；请提供完整 REORDER");
   active.sort((a, b) => a.index - b.index || (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0));
   const beforeHash = sha256(original);
   const proposed = active.map(row => ({
@@ -248,13 +266,7 @@ function plan(request: Request, captured: Awaited<ReturnType<typeof capture>>) {
     const after: any = byProposedId.get(before.id);
     let proposedSource: ReturnType<typeof safeSource> | null = null;
     if (after) {
-      let spec: any;
-      try { spec = productionSpec(oldRow); }
-      catch { spec = {}; }
-      const row = { ...oldRow, index: after.index, track: after.track, duration: after.duration, prompt: after.prompt,
-        videoDesc: after.videoDesc, productionSpec: JSON.stringify({ ...spec, productionMode: after.productionMode,
-          primaryAssetId: after.primaryAssetId, referenceAssetIds: after.referenceAssetIds, referenceAssetGroupIds: after.referenceAssetGroupIds }) };
-      proposedSource = safeSource(captured.sourceContext, scope, row, after.linkedAssetIds);
+      proposedSource = safeSource(captured.sourceContext, scope, proposedRows.get(before.id), after.linkedAssetIds);
     }
     const attempt: any = oldRow.currentImageAttemptId ? attempts.get(oldRow.currentImageAttemptId) : null;
     const output = attempt?.outputRef ? (() => { try { return JSON.parse(attempt.outputRef); } catch { return null; } })() : null;

@@ -81,7 +81,17 @@ async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: 
     for (const link of await q("o_scriptAssets").where({ scriptId }).whereIn("assetId", assetIds).select("assetId")) scriptAssetIds.add(link.assetId);
     const imageIds = [...new Set([...assets.values()].map(asset => asset.imageId).filter((id): id is number => id != null))];
     if (imageIds.length) for (const image of await q("o_image").whereIn("id", imageIds)) images.set(image.id, image);
-    for (const receipt of await q("o_assetUploadSource").where({ projectId }).whereIn("assetId", assetIds)) {
+    // Only the upload receipt for each asset's current image/path can affect
+    // the accepted B2 source. Historical receipts are neither read nor hashed.
+    for (const receipt of await q("o_assetUploadSource as receipt")
+      .join("o_assets as asset", function () {
+        this.on("receipt.assetId", "=", "asset.id").andOn("receipt.imageId", "=", "asset.imageId");
+      })
+      .join("o_image as image", function () {
+        this.on("image.id", "=", "asset.imageId").andOn("receipt.filePath", "=", "image.filePath");
+      })
+      .where("receipt.projectId", projectId).where("asset.projectId", projectId).whereIn("receipt.assetId", assetIds)
+      .select("receipt.*").limit(assetIds.length + 1)) {
       receipts.set(receiptKey(receipt.assetId, receipt.imageId, receipt.filePath), receipt);
     }
   }
