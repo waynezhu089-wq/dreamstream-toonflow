@@ -108,6 +108,91 @@ test('Recipe Capability changes only effective B2 Source; unsupported second sho
   assert.equal((await f.row()).filePath.length > 0, true);
 });
 
+test('Recipe Registry ID colliding with builtin sentinel is still checked before any batch write', async t => {
+  const capabilityId = 'toonflow.image.v1';
+  let unboundSource;
+  const f = await setup(t, 'AI_TEXT_TO_IMAGE', true, async (f, { secondShot }) => {
+    await f.load('lib/capabilitySchema').initializeCapabilitySchema(f.db);
+    await f.config();
+    unboundSource = await f.db.transaction(q => f.load('services/productionAttempt').captureStoryboardImageSource(q,
+      { ...scope, storyboardId: secondShot.id }));
+    const now = 1700000000000;
+    await f.db('o_capability').insert({ familyKey: 'toonflow.image', displayName: 'Registry collision', description: '',
+      category: 'image', provider: 'ComfyUI', executorType: 'COMFY_UI', createdAt: now, updatedAt: now });
+    await f.db('o_capabilityVersion').insert({ capabilityId, familyKey: 'toonflow.image', version: 1,
+      status: 'VERIFIED', workflowJson: JSON.stringify({ '1': { class_type: 'Test', inputs: { prompt: '' } } }),
+      inputPorts: JSON.stringify([{ name: 'prompt', type: 'text', required: true, label: 'Prompt' }]),
+      outputPorts: JSON.stringify([{ name: 'image', type: 'image', label: 'Image' }]),
+      inputMappings: JSON.stringify([{ portName: 'prompt', nodeId: '1', inputKey: 'prompt' }]),
+      outputMappings: JSON.stringify([{ portName: 'image', nodeId: '1', field: 'images' }]),
+      endpointId: '00000000-0000-4000-8000-000000000001',
+      runtimeConfig: JSON.stringify({ timeoutMs: 120000, pollIntervalMs: 1000 }), createdAt: now,
+      verifiedAt: now, updatedAt: now });
+    const recipe = f.load('services/recipeRegistry');
+    await recipe.createRecipeFamily({ recipeKey: 'ad.builtin-collision', displayName: 'Collision', description: '', tags: [] });
+    await recipe.createRecipeVersion({ recipeKey: 'ad.builtin-collision', definition: { schemaVersion: 1,
+      profileRef: { profileKey: 'advertisement', profileVersion: 'v2' }, skillRefs: [],
+      capabilityRefs: [{ roleKey: 'storyboard-image.text-to-image', stageKey: 'image-production', capabilityId }],
+      assetPlanTemplate: [], notes: [] } });
+    await recipe.activateRecipeVersion({ recipeKey: 'ad.builtin-collision', version: 'v1' });
+    await recipe.bindRecipe({ projectId: 1, recipeKey: 'ad.builtin-collision', version: 'v1' });
+  });
+  const recipeScope = { ...scope, storyboardId: f.secondShot.id };
+  const selected = await f.db.transaction(q => f.attempt.captureStoryboardImageSource(q, recipeScope));
+  assert.equal(selected.effectiveCapability.resolvedFrom, 'RECIPE');
+  assert.deepEqual(selected.snapshot, unboundSource.snapshot);
+  assert.equal(selected.sourceHash, unboundSource.sourceHash);
+  const previous = await f.attempt.beginStoryboardImageAttempt({ ...scope, storyboardId: f.storyboardId });
+  const rowsBefore = await f.db('o_storyboard').whereIn('id', [f.storyboardId, f.secondShot.id]).orderBy('id');
+  const attemptsBefore = await f.db('o_productionAttempt').where(scope).orderBy('attemptId');
+  const providerCalls = f.calls.length;
+  const rejected = await f.post('storyboard/batchGenerateImage', { ...scope,
+    storyboardIds: [f.storyboardId, f.secondShot.id] }, 409);
+  assert.equal(rejected.code, 'CAPABILITY_NOT_IMPLEMENTED');
+  await f.db('o_capabilityVersion').where({ capabilityId }).update({ status: 'DISABLED' });
+  await assert.rejects(f.attempt.beginStoryboardImageAttempt(recipeScope), e => e.code === 'CAPABILITY_DISABLED');
+  await f.db('o_capabilityVersion').where({ capabilityId }).update({ status: 'DRAFT' });
+  await assert.rejects(f.attempt.beginStoryboardImageAttempt(recipeScope), e => e.code === 'CAPABILITY_NOT_VERIFIED');
+  await f.db('o_capabilityVersion').where({ capabilityId }).delete();
+  await assert.rejects(f.attempt.beginStoryboardImageAttempt(recipeScope), e => e.code === 'CAPABILITY_NOT_FOUND');
+  assert.deepEqual(await f.db('o_storyboard').whereIn('id', [f.storyboardId, f.secondShot.id]).orderBy('id'), rowsBefore);
+  assert.deepEqual(await f.db('o_productionAttempt').where(scope).orderBy('attemptId'), attemptsBefore);
+  assert.equal((await f.attemptRow(previous.attemptId)).status, 'RUNNING');
+  assert.equal(f.calls.length, providerCalls);
+  const explicit = await f.attempt.beginStoryboardImageAttempt({ ...scope, storyboardId: f.storyboardId });
+  assert.equal(explicit.producerType, 'AI_MODEL');
+});
+
+test('no-Recipe AI and REAL Source snapshots match accepted pre-D-C B2 golden values', async t => {
+  // Captured with productionAttempt.ts from accepted backend 780ae7f194d6adf43cd7f655e71a81e2ded54f00,
+  // using this fixture, fixed upload timestamp, configured image model, then AI and Direct inserts.
+  const f = await fixture(t);
+  await f.db('o_assetUploadSource').update({ uploadedAt: 1700000000000 });
+  await f.config();
+  const ai = await f.create({ productionMode: 'AI_TEXT_TO_IMAGE', primaryAssetId: null,
+    associateAssetsIds: [], shouldGenerateImage: 1 });
+  const direct = await f.create();
+  const aiSource = await f.db.transaction(q => f.load('services/productionAttempt').captureStoryboardImageSource(q,
+    { ...scope, storyboardId: ai.id }));
+  const directSource = await f.db.transaction(q => f.load('services/productionAttempt').captureStoryboardImageSource(q,
+    { ...scope, storyboardId: direct.id }));
+  assert.deepEqual(aiSource.snapshot, { adapterKey: 'storyboard.image-source.v1',
+    semantic: { id: 1, index: 0, track: 'Main', duration: 3, prompt: 'A shot', videoDesc: 'Screen',
+      productionMode: 'AI_TEXT_TO_IMAGE', primaryAssetId: null, referenceAssetIds: [],
+      referenceAssetGroupIds: [], linkedAssetIds: [] },
+    execution: { imagePrompt: null, promptSkillId: null, promptSkillVersion: null,
+      capabilityId: 'toonflow.image.v1', imageModel: 'vendor:image', imageQuality: null, videoRatio: null } });
+  assert.equal(aiSource.sourceHash, '0ff0fa24a2f3abcefbc6849f54a05e84919a3aff026162aac80d2d1cdb9556d7');
+  assert.deepEqual(directSource.snapshot, { adapterKey: 'storyboard.image-source.v1',
+    semantic: { id: 2, index: 1, track: 'Main', duration: 3, prompt: 'A shot', videoDesc: 'Screen',
+      productionMode: 'REAL_ASSET_DIRECT', primaryAssetId: 1, referenceAssetIds: [],
+      referenceAssetGroupIds: [], linkedAssetIds: [1] },
+    execution: { capabilityId: 'toonflow.real-asset-direct.v1',
+      asset: { assetId: 1, imageId: 1, filePath: '/generated/1', assetKey: 'screen',
+        sourcePolicy: 'REAL_REQUIRED', uploadedAt: 1700000000000 } } });
+  assert.equal(directSource.sourceHash, 'af1627d1e19b733b21f3d27062aa8bd4011a62d93b87c34fb348d9192fc0bbe5');
+});
+
 test('schema is additive/idempotent and legacy files remain unprovenanced', async t => {
   const f = await fixture(t);
   const migrate = f.load('lib/storyboardProductionSchema').initializeStoryboardProductionSchema;

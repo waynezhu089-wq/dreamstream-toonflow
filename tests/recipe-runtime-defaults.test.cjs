@@ -89,3 +89,20 @@ test('template context is scoped, rejected binding is zero-write, and source cha
   assert.equal(refused.reason, 'RECIPE_TEMPLATE_BINDING_CONFLICT');
   assert.deepEqual(await f.db('o_advertisementAssetPlan').where(scope).orderBy('assetKey'), before);
 });
+
+test('valid Recipe key beyond the Asset Plan API limit cannot produce a template target', async t => {
+  const f = await setup(t), scope = { projectId: 1, scriptId: 10 };
+  const longKey = 'a'.repeat(129);
+  const next = f.definition(); next.assetPlanTemplate[0].assetKey = longKey;
+  await f.recipe.createRecipeVersion({ recipeKey: 'ad.defaults', sourceVersion: 'v1' });
+  await f.recipe.editRecipeVersion({ recipeKey: 'ad.defaults', version: 'v2', definition: next });
+  await f.recipe.activateRecipeVersion({ recipeKey: 'ad.defaults', version: 'v2' });
+  await f.recipe.bindRecipe({ projectId: 1, recipeKey: 'ad.defaults', version: 'v2' });
+  const before = await f.db('o_advertisementAssetPlan').where(scope).orderBy('assetKey');
+  const preview = await f.post('project/asset-plan-template/preview', scope, 409);
+  assert.equal(preview.reason, 'RECIPE_TEMPLATE_PLAN_INVALID');
+  const apply = await f.post('project/asset-plan-template/apply', { ...scope,
+    previewHash: 'a'.repeat(64), proposalContextHash: 'b'.repeat(64), proposedPlanHash: 'c'.repeat(64) }, 409);
+  assert.equal(apply.reason, 'RECIPE_TEMPLATE_PLAN_INVALID');
+  assert.deepEqual(await f.db('o_advertisementAssetPlan').where(scope).orderBy('assetKey'), before);
+});

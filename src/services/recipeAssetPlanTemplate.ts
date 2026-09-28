@@ -3,7 +3,7 @@ import { z } from "zod";
 import u from "@/utils";
 import { resolveProductionProfile } from "@/agents/productionAgent/profile";
 import { ASSET_PLAN_TABLE, UPLOAD_SOURCE_TABLE } from "@/lib/advertisementAssetPlanSchema";
-import { assertAssetPlanBinding, AssetPlanError } from "./advertisementAssetPlan";
+import { assertAssetPlanBinding, AssetPlanError, isManageableAssetPlanItem } from "./advertisementAssetPlan";
 import { RecipeError } from "./recipeContract";
 import { readExactRecipeRuntimeContext } from "./recipeRegistry";
 import { sha256 } from "./supervisor/contract";
@@ -51,6 +51,9 @@ async function context(q: Knex.Transaction, scope: Scope) {
   if (!recipe) throw new RecipeError("RECIPE_NOT_BOUND", "请先绑定精确 Recipe", 409);
   if (recipe.profile.profileKey !== "advertisement")
     throw new RecipeError("RECIPE_TEMPLATE_PROFILE_UNSUPPORTED", "当前 Profile 尚不支持素材模板应用", 409);
+  for (const item of recipe.definition.assetPlanTemplate) {
+    if (!isManageableAssetPlanItem({ ...item, assetId: null })) invalid();
+  }
   const proposalContextHash = sha256({ recipeKey: recipe.recipeKey, recipeVersion: recipe.recipeVersion,
     recipeDefinitionHash: recipe.recipeDefinitionHash, profile: recipe.profile });
   return { recipe, proposalContextHash };

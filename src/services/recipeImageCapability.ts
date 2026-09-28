@@ -6,9 +6,10 @@ import { ProductionGateError } from "./advertisementGate";
 
 type RecipeContext = Awaited<ReturnType<typeof readExactRecipeRuntimeContext>>;
 const builtin = "toonflow.image.v1";
+type ImageCapabilitySelection = { capabilityId: string | null; resolvedFrom: "SHOT" | "RECIPE" | "BUILTIN" };
 
 export function resolveEffectiveImageCapability(explicitId: string | null, mode: string | null,
-  recipe: RecipeContext) {
+  recipe: RecipeContext): ImageCapabilitySelection {
   if (mode !== "AI_TEXT_TO_IMAGE") return { capabilityId: explicitId, resolvedFrom: explicitId ? "SHOT" : "BUILTIN" };
   if (explicitId) return { capabilityId: explicitId, resolvedFrom: "SHOT" };
   const ref = recipe?.capabilityRefs.find(item => item.roleKey === "storyboard-image.text-to-image" &&
@@ -19,8 +20,9 @@ export function resolveEffectiveImageCapability(explicitId: string | null, mode:
 
 // Called only by the B2 pre-write prepareProducer hook, never by the Source
 // builder or a historical freshness read. Availability is not Source identity.
-export async function validateSelectedImageCapability(q: Knex.Transaction, capabilityId: string) {
-  if (capabilityId === builtin) return;
+export async function validateSelectedImageCapability(q: Knex.Transaction, selection: ImageCapabilitySelection) {
+  const { capabilityId, resolvedFrom } = selection;
+  if (capabilityId === builtin && resolvedFrom !== "RECIPE") return;
   if (!capabilityIdSchema.safeParse(capabilityId).success)
     throw new ProductionGateError("Capability ID 不合法或不存在", "CAPABILITY_NOT_FOUND", 409);
   const row = await q("o_capabilityVersion").where({ capabilityId }).first();

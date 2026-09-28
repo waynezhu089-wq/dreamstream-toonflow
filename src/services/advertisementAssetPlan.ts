@@ -15,6 +15,15 @@ const itemSchema = z.object({
   sourcePolicy: z.enum(["REAL_REQUIRED", "AI_ALLOWED"]),
   assetId: id.nullable(),
 }).strict();
+// Recipe templates may have a wider contract than persisted Advertisement
+// Plan items. Keep their compatibility check on this accepted API schema.
+export function isManageableAssetPlanItem(input: unknown): boolean {
+  const parsed = itemSchema.safeParse(input);
+  if (!parsed.success) return false;
+  const original = input as { assetKey: string; name: string; category: string };
+  return parsed.data.assetKey === original.assetKey && parsed.data.name === original.name &&
+    parsed.data.category === original.category;
+}
 const saveSchema = contextSchema.extend({ items: z.array(itemSchema).max(200) }).superRefine((plan, ctx) => {
   const keys = new Set<string>();
   plan.items.forEach((item, index) => {

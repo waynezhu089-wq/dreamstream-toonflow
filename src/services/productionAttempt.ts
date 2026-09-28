@@ -117,6 +117,7 @@ function buildStoryboardImageSource(context: StoryboardImageSourceContext, scope
   let producerType: string;
   let producerRef: string | null;
   let producerInput: any;
+  let effectiveCapability: ReturnType<typeof resolveEffectiveImageCapability> | null = null;
   if (spec.productionMode === "REAL_ASSET_DIRECT" || spec.productionMode === "REAL_AI_COMPOSITE") {
     if (!spec.primaryAssetId) fail("PRIMARY_ASSET_REQUIRED", "真实素材直用必须指定主素材");
     if (spec.referenceAssetIds.length || spec.referenceAssetGroupIds.length) fail("CAPABILITY_INPUT_UNSUPPORTED", "当前真实主素材生产不消费参考输入");
@@ -143,6 +144,7 @@ function buildStoryboardImageSource(context: StoryboardImageSourceContext, scope
     const project = context.project;
     const model = context.imageModel;
     const selected = resolveEffectiveImageCapability(spec.capabilityId, spec.productionMode, context.recipe);
+    effectiveCapability = selected;
     execution = { imagePrompt: row.imagePrompt ?? null, promptSkillId: spec.promptSkillId, promptSkillVersion: spec.promptSkillVersion,
       capabilityId: selected.capabilityId, imageModel: model,
       imageQuality: project?.imageQuality ?? null, videoRatio: project?.videoRatio ?? null };
@@ -150,7 +152,9 @@ function buildStoryboardImageSource(context: StoryboardImageSourceContext, scope
     producerInput = { prompt: effectiveImagePrompt(row), model, size: execution.imageQuality, aspectRatio: execution.videoRatio };
   }
   const snapshot = { adapterKey, semantic, execution };
-  return { row, snapshot, sourceHash: sha256(snapshot), producerType, producerRef, producerInput };
+  // Resolution branch is pre-write admission metadata, never part of the B2
+  // canonical Source snapshot/hash or persisted Attempt sourceSnapshot.
+  return { row, snapshot, sourceHash: sha256(snapshot), producerType, producerRef, producerInput, effectiveCapability };
 }
 
 export async function captureStoryboardImageSource(q: Knex.Transaction, scope: Scope) {
@@ -211,7 +215,10 @@ export async function beginStoryboardImageAttempt(scope: Scope, requestModel?: s
   return beginCurrentImageAttempt(scope, generateOperationKey, async (q, source) => {
     if (source.producerType !== "REAL_ASSET_DIRECT" && source.producerType !== "AI_MODEL")
       fail("CAPABILITY_INPUT_UNSUPPORTED", "当前生产方式不能进入普通分镜图片生成");
-    if (source.producerType === "AI_MODEL") await validateSelectedImageCapability(q, source.snapshot.execution.capabilityId);
+    if (source.producerType === "AI_MODEL") {
+      if (!source.effectiveCapability) fail("CAPABILITY_NOT_FOUND", "当前图片能力解析失败");
+      await validateSelectedImageCapability(q, source.effectiveCapability);
+    }
     if (requestModel && source.producerType === "AI_MODEL" && requestModel !== source.producerRef) fail("MODEL_CONFIG_MISMATCH", "所选模型与当前项目配置不同，请保存配置后重试");
     return { producerType: source.producerType, producerRef: source.producerRef, producerInput: source.producerInput };
   }, transaction);
