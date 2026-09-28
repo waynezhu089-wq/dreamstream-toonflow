@@ -99,6 +99,26 @@ test('failed/uncertain acknowledgement never reports semantic success', async ()
   await assert.rejects(tools.add_flowData_storyboard.execute(raw), /PROPOSAL_BUSY/);
   assert.equal(titles.at(-1), '新增分镜未应用');
   socket.connected = false;
-  await assert.rejects(tools.replace_flowData_storyboard.execute({ items: [raw] }), /可能仍有待确认提案/);
-  assert.equal(titles.at(-1), '整套替换分镜失败');
+  await assert.rejects(tools.replace_flowData_storyboard.execute({ items: [raw] }), error => {
+    assert.match(error.message, /交付结果不确定/);
+    assert.doesNotMatch(error.message, /未应用|applied=false/);
+    return true;
+  });
+  assert.equal(titles.at(-1), '整套替换分镜交付结果不确定');
+});
+
+test('timeout and disconnect leave Legacy and generation outcomes uncertain', async () => {
+  for (const event of ['addStoryboard', 'replaceStoryboard', 'generateStoryboard']) {
+    for (const failure of ['timeout', 'disconnect']) {
+      const socket = new FakeSocket();
+      socket.onEmit = (_event, _payload, _ack) => {
+        if (failure === 'disconnect') { socket.connected = false; socket.emit('disconnect'); }
+      };
+      await assert.rejects(emitStoryboardAcknowledged(socket, event, {}, failure === 'timeout' ? 5 : 50), error => {
+        assert.match(error.message, /交付结果不确定/);
+        assert.doesNotMatch(error.message, /语义变更未应用|一定没有执行|applied=false/);
+        return true;
+      });
+    }
+  }
 });

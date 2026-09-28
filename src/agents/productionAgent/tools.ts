@@ -85,7 +85,7 @@ export function createSocketQueue(delayMs = 800) {
 
 export class SocketDeliveryUncertain extends Error {
   constructor(reason: string) {
-    super(`交付回执不可用（${reason}）；语义变更未应用。浏览器中可能仍有待确认提案，请先检查。`);
+    super(`交付回执不可用（${reason}）；交付结果不确定，无法确认该操作最终是否已执行或接收。`);
     this.name = "SocketDeliveryUncertain";
   }
 }
@@ -265,8 +265,8 @@ export default (toolCpnfig: ToolConfig) => {
           thinking.complete();
           return res?.message ?? "分镜生产请求已接收，请检查最终状态";
         } catch (error) {
-          thinking.appendText("分镜生成失败:\n" + u.error(error).message);
-          thinking.updateTitle("分镜生成失败");
+          thinking.appendText("分镜生成请求未确认:\n" + u.error(error).message);
+          thinking.updateTitle(error instanceof SocketDeliveryUncertain ? "分镜生产交付结果不确定" : "分镜生成失败");
           thinking.complete();
           throw error;
         }
@@ -328,7 +328,7 @@ export default (toolCpnfig: ToolConfig) => {
           thinking.complete();
           return res?.message ?? "分镜已应用";
         } catch (error) {
-          thinking.updateTitle("新增分镜未应用");
+          thinking.updateTitle(error instanceof SocketDeliveryUncertain ? "新增分镜交付结果不确定" : "新增分镜未应用");
           thinking.appendText(u.error(error).message);
           thinking.complete();
           throw error;
@@ -387,8 +387,8 @@ export default (toolCpnfig: ToolConfig) => {
           thinking.complete();
           return res?.message ?? `已替换为 ${items.length} 条分镜`;
         } catch (e) {
-          thinking.appendText("整套替换分镜失败:\n" + u.error(e).message);
-          thinking.updateTitle("整套替换分镜失败");
+          thinking.appendText("整套替换分镜请求未确认:\n" + u.error(e).message);
+          thinking.updateTitle(e instanceof SocketDeliveryUncertain ? "整套替换分镜交付结果不确定" : "整套替换分镜失败");
           thinking.complete();
           throw e;
         }
