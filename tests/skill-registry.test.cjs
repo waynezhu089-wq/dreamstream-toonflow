@@ -273,7 +273,7 @@ test('point-of-use text model check, stale preview and scoped Compile read preve
  const preview=await f.compiler.compileImagePrompt({projectId:1,scriptId:10,storyboardId:shot.id});
  await assert.rejects(f.compiler.readCompile({compileId:preview.compileId,projectId:1,scriptId:11,storyboardId:shot.id}),e=>e.code==='SKILL_SOURCE_INVALID');
  await f.db('o_storyboard').where({id:shot.id}).update({prompt:'Human changed this prompt'});
- await assert.rejects(f.compiler.applyCompile({compileId:preview.compileId,projectId:1,scriptId:10,storyboardId:shot.id}),e=>e.code==='SKILL_BINDING_INVALID');
+ await assert.rejects(f.compiler.applyCompile({compileId:preview.compileId,projectId:1,scriptId:10,storyboardId:shot.id}),e=>e.code==='SKILL_COMPILE_STALE');
  assert.equal((await f.db('o_skillCompile').where({compileId:preview.compileId}).first()).appliedAt,null);
 });
 
@@ -284,11 +284,11 @@ test('B1 Apply rejects changed image prompt, exact Skill or ordered Override wit
  const scope={projectId:1,scriptId:10,storyboardId:shot.id};
  let preview=await f.compiler.compileImagePrompt(scope);
  await f.db('o_storyboard').where({id:shot.id}).update({imagePrompt:'Manual execution edit'});
- await assert.rejects(f.compiler.applyCompile({compileId:preview.compileId,...scope}),e=>e.code==='SKILL_BINDING_INVALID');
+ await assert.rejects(f.compiler.applyCompile({compileId:preview.compileId,...scope}),e=>e.code==='SKILL_COMPILE_STALE');
  await f.db('o_storyboard').where({id:shot.id}).update({imagePrompt:null});
  preview=await f.compiler.compileImagePrompt(scope);
  await f.registry.saveBinding({scopeType:'SHOT',scopeKey:`project:1:script:10:storyboard:${shot.id}`,skillType:'IMAGE_PROMPT',skillId:null,skillVersion:null,overrideText:'New shot override'});
- await assert.rejects(f.compiler.applyCompile({compileId:preview.compileId,...scope}),e=>e.code==='SKILL_BINDING_INVALID');
+ await assert.rejects(f.compiler.applyCompile({compileId:preview.compileId,...scope}),e=>e.code==='SKILL_COMPILE_STALE');
  assert.equal((await f.db('o_storyboard').where({id:shot.id}).first()).imagePrompt,null);
  assert.equal((await f.db('o_skillCompile').where({compileId:preview.compileId}).first()).appliedAt,null);
 });
@@ -300,4 +300,40 @@ test('selected Director and Production text snapshots are sourced from one scope
  const production=await f.registry.buildFromSelectedSource({family:f.family('image-prompt.from-production'),projectId:1,scriptId:10,sourceType:'PRODUCTION_TEXT_RESULT',sourceId:row[0]});
  assert.equal(production.version.content.style,'natural cinematic');
  await assert.rejects(f.registry.buildFromSelectedSource({family:f.family('image-prompt.cross-unit'),projectId:1,scriptId:11,sourceType:'PRODUCTION_TEXT_RESULT',sourceId:row[0]}),e=>e.code==='SKILL_SOURCE_INVALID');
+});
+
+test('D-C Compile uses exact Recipe Skill, ignores metadata-only rebind, and rejects model-time causal drift', async t => {
+ const f=await setup(t), id=await f.active();
+ await f.load('lib/recipeSchema').initializeRecipeSchema(f.db);
+ const recipe=f.load('services/recipeRegistry');
+ const definition=notes=>({schemaVersion:1,profileRef:{profileKey:'advertisement',profileVersion:'v1'},
+  skillRefs:[{skillType:'IMAGE_PROMPT',skillId:id,skillVersion:'v1'}],capabilityRefs:[],assetPlanTemplate:[],notes});
+ await recipe.createRecipeFamily({recipeKey:'ad.prompt-default',displayName:'Prompt default',description:'',tags:[]});
+ await recipe.createRecipeVersion({recipeKey:'ad.prompt-default',definition:definition([])});
+ await recipe.activateRecipeVersion({recipeKey:'ad.prompt-default',version:'v1'});
+ await recipe.bindRecipe({projectId:1,recipeKey:'ad.prompt-default',version:'v1',confirmProfileAlignment:true});
+ const shot=await f.create({productionMode:'AI_TEXT_TO_IMAGE',primaryAssetId:null,associateAssetsIds:[],prompt:'Approved semantic'});
+ const scope={projectId:1,scriptId:10,storyboardId:shot.id};
+ f.utils.Ai.Text=()=>({invoke:async()=>{
+  await recipe.bindRecipe({projectId:1,recipeKey:'ad.prompt-default',version:'v1'});
+  return {text:'A fully rewritten scene with soft natural light.'};
+ }});
+ const preview=await f.compiler.compileImagePrompt(scope);
+ assert.equal(preview.resolvedSkill.resolvedFrom.scopeType,'RECIPE');
+ const record=await f.compiler.readCompile({compileId:preview.compileId,...scope});
+ assert.equal(record.inputContext.recipeIdentity.recipeVersion,'v1');
+ assert.equal(record.inputContext.causalFingerprint.length,64);
+ await recipe.bindRecipe({projectId:1,recipeKey:'ad.prompt-default',version:'v1'});
+ const applied=await f.compiler.applyCompile({compileId:preview.compileId,...scope});
+ assert.equal(applied.storyboard.prompt,'Approved semantic');
+ assert.equal(applied.storyboard.imagePrompt,'A fully rewritten scene with soft natural light.');
+ await recipe.createRecipeVersion({recipeKey:'ad.prompt-default',definition:definition(['changed'])});
+ await recipe.activateRecipeVersion({recipeKey:'ad.prompt-default',version:'v2'});
+ f.utils.Ai.Text=()=>({invoke:async()=>{
+  await recipe.bindRecipe({projectId:1,recipeKey:'ad.prompt-default',version:'v2'});
+  return {text:'Another complete independent cinematic image prompt.'};
+ }});
+ const before=await f.db('o_skillCompile').count('* as n').first();
+ await assert.rejects(f.compiler.compileImagePrompt(scope),e=>e.code==='SKILL_COMPILE_STALE');
+ assert.deepEqual(await f.db('o_skillCompile').count('* as n').first(),before);
 });

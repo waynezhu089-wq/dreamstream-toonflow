@@ -8,6 +8,8 @@ import { textModelForProject } from "@/services/modelPreset";
 import { productionSpec, semanticProductionSpec, executionProductionSpec } from "@/services/storyboardProduction";
 import { SkillError, sourceHash, versionLabel } from "./skillContract";
 import { resolveSkill } from "./skillRegistry";
+import { readExactRecipeRuntimeContext } from "./recipeRegistry";
+import { resolveEffectiveImageCapability } from "./recipeImageCapability";
 
 const ids = z.object({ projectId: z.number().int().positive(), scriptId: z.number().int().positive(), storyboardId: z.number().int().positive() });
 const compileInput = ids.extend({ supportingSkillId: z.string().optional(), supportingSkillVersion: z.string().optional() }).strict();
@@ -48,28 +50,49 @@ function cleanModelOutput(text: unknown, currentImagePrompt: string, semanticPro
   }
   return value;
 }
-export async function compileImagePrompt(input: unknown) {
-  const value = compileInput.parse(input);
-  if ((value.supportingSkillId === undefined) !== (value.supportingSkillVersion === undefined)) throw new SkillError("SKILL_BINDING_INVALID", "Supporting Skill 必须提供精确 ID 和 Version");
-  const { project, shot, spec, assets } = await shotContext(value);
-  const resolved = await resolveSkill({ projectId: value.projectId, scriptId: value.scriptId, storyboardId: value.storyboardId, skillType: "IMAGE_PROMPT", profileKey: resolveProductionProfile(project).key });
-  // Explicit supporting CONTINUITY is optional; unrelated Skill types are never loaded.
+
+async function captureCompile(value: z.infer<typeof compileInput>, q: Knex.Transaction) {
+  const { project, shot, spec, assets } = await shotContext(value, q);
+  const recipe = await readExactRecipeRuntimeContext(q, value.projectId);
+  const resolved = await resolveSkill({ projectId: value.projectId, scriptId: value.scriptId,
+    storyboardId: value.storyboardId, skillType: "IMAGE_PROMPT", profileKey: resolveProductionProfile(project).key,
+    ...(recipe ? { recipeKey: recipe.recipeKey, recipeVersion: recipe.recipeVersion } : {}) }, q);
   let supportingInstruction: string | null = null;
   if (value.supportingSkillId) {
     const { loadSkill } = await import("./skillRegistry");
-    const supporting = await loadSkill(value.supportingSkillId, value.supportingSkillVersion!);
+    const supporting = await loadSkill(value.supportingSkillId, value.supportingSkillVersion!, q);
     if (supporting.skillType !== "CONTINUITY") throw new SkillError("SKILL_TEMPLATE_INVALID", "只允许显式加载 CONTINUITY Supporting Skill");
     supportingInstruction = supporting.runtimeInstruction;
   }
-  const capabilityContext = await stableCapabilityContext(spec.capabilityId);
+  const effective = resolveEffectiveImageCapability(spec.capabilityId, spec.productionMode, recipe);
+  const capabilityContext = await stableCapabilityContext(effective.capabilityId, q);
+  const recipeIdentity = recipe ? { recipeKey: recipe.recipeKey, recipeVersion: recipe.recipeVersion,
+    recipeDefinitionHash: recipe.recipeDefinitionHash, profile: recipe.profile } : null;
   const inputContext = {
     projectId: value.projectId, scriptId: value.scriptId, storyboardId: value.storyboardId,
     currentStoryboard: { id: shot.id, semanticPrompt: shot.prompt ?? "", currentImagePrompt: shot.imagePrompt ?? null, videoDesc: shot.videoDesc ?? "",
       productionSpecHash: sourceHash(JSON.stringify(spec)), semanticProductionSpec: semanticProductionSpec(spec), executionProductionSpec: executionProductionSpec(spec) },
-    assetConstraints: { assets, constraintsHash: sourceHash(JSON.stringify(assets)), preserveRealPixels: true, prohibition: "真实 UI、Logo、包装文字、产品标签不得由 AI 重画；REAL_AI_COMPOSITE 仅生成不含真实界面的背景" },
-    capabilityContext, overrideChain: resolved.overrideChain,
-    supportingSkill: supportingInstruction ? { skillId: value.supportingSkillId, skillVersion: value.supportingSkillVersion, runtimeInstruction: supportingInstruction } : null,
+    assetConstraints: { assets, constraintsHash: sourceHash(JSON.stringify(assets)), preserveRealPixels: true,
+      prohibition: "真实 UI、Logo、包装文字、产品标签不得由 AI 重画；REAL_AI_COMPOSITE 仅生成不含真实界面的背景" },
+    capabilityContext, effectiveCapability: effective, recipeIdentity,
+    overrideChain: resolved.overrideChain,
+    supportingSkill: supportingInstruction ? { skillId: value.supportingSkillId, skillVersion: value.supportingSkillVersion,
+      runtimeInstruction: supportingInstruction } : null,
   };
+  const skillIdentity = { skillId: resolved.skillId, skillVersion: resolved.skillVersion,
+    definitionHash: resolved.definitionHash, resolvedFrom: resolved.resolvedFrom,
+    resolutionTrace: resolved.resolutionTrace, overrideChain: resolved.overrideChain,
+    runtimeInstruction: resolved.runtimeInstruction };
+  const causalFingerprint = sourceHash(JSON.stringify({
+    inputContext: { ...inputContext, effectiveCapability: { capabilityId: effective.capabilityId } }, skillIdentity }));
+  return { shot, resolved, inputContext: { ...inputContext, causalFingerprint }, capabilityContext,
+    supportingInstruction, causalFingerprint };
+}
+export async function compileImagePrompt(input: unknown) {
+  const value = compileInput.parse(input);
+  if ((value.supportingSkillId === undefined) !== (value.supportingSkillVersion === undefined)) throw new SkillError("SKILL_BINDING_INVALID", "Supporting Skill 必须提供精确 ID 和 Version");
+  const pre = await db().transaction(q => captureCompile(value, q));
+  const { shot, resolved, inputContext, capabilityContext, supportingInstruction } = pre;
   let modelReference: string;
   try { modelReference = await textModelForProject(value.projectId, modelKey); }
   catch { throw new SkillError("SKILL_COMPILE_MODEL_UNAVAILABLE", "请先配置文本模型，再编译图片 Prompt", 409); }
@@ -90,15 +113,21 @@ export async function compileImagePrompt(input: unknown) {
   }
   const outputPrompt = cleanModelOutput(result?.text ?? result?._output, String(shot.imagePrompt ?? ""), String(shot.prompt ?? ""));
   const compileId = randomUUID(), now = Date.now();
-  await db().transaction(async trx => {
-    if (!await trx("o_storyboard").where({ id: value.storyboardId, projectId: value.projectId,
-      scriptId: value.scriptId }).whereNull("retiredAt").first("id"))
-      throw new SkillError("SKILL_SOURCE_INVALID", "镜头已退休，不能再编译图片 Prompt", 409);
+  try { await db().transaction(async trx => {
+    let post: Awaited<ReturnType<typeof captureCompile>>;
+    try { post = await captureCompile(value, trx); }
+    catch { throw new SkillError("SKILL_COMPILE_STALE", "编译期间来源已改变，请重新编译", 409); }
+    if (post.causalFingerprint !== pre.causalFingerprint)
+      throw new SkillError("SKILL_COMPILE_STALE", "编译期间来源已改变，请重新编译", 409);
     await trx("o_skillCompile").insert({ compileId, projectId: value.projectId, scriptId: value.scriptId, storyboardId: value.storyboardId,
       skillId: resolved.skillId, skillVersion: Number(resolved.skillVersion.slice(1)), skillDefinitionHash: resolved.definitionHash,
       resolutionTrace: JSON.stringify(resolved.resolutionTrace), overrideChain: JSON.stringify(resolved.overrideChain),
       inputContext: JSON.stringify(inputContext), outputPrompt, modelReference, createdAt: now, appliedAt: null });
-  });
+  }); } catch (error: any) {
+    if (/SQLITE_BUSY|SQLITE_CONSTRAINT/.test(String(error?.code)))
+      throw new SkillError("SKILL_COMPILE_STALE", "编译期间来源发生并发变化，请重新编译", 409);
+    throw error;
+  }
   return { compileId, currentSemanticPrompt: shot.prompt ?? "", currentImagePrompt: shot.imagePrompt ?? null, compiledImagePrompt: outputPrompt,
     resolvedSkill: { skillId: resolved.skillId, skillVersion: resolved.skillVersion, skillStatus: resolved.skillStatus, resolvedFrom: resolved.resolvedFrom, overrideChain: resolved.overrideChain, resolutionTrace: resolved.resolutionTrace },
     capabilityContext, createdAt: now, appliedAt: null };
@@ -115,18 +144,16 @@ export async function applyCompile(input: { compileId: string; projectId: number
     const row = await trx("o_skillCompile").where({ compileId: value.compileId, projectId: value.projectId, scriptId: value.scriptId, storyboardId: value.storyboardId }).first();
     if (!row) throw new SkillError("SKILL_SOURCE_INVALID", "Compile Preview 不属于当前镜头", 404);
     if (row.appliedAt) throw new SkillError("SKILL_BINDING_INVALID", "此 Compile 已应用，请重新编译", 409);
-    const { shot, spec, assets } = await shotContext(value, trx);
-    const snapshot = JSON.parse(row.inputContext), original = snapshot.currentStoryboard;
-    if (String(shot.prompt ?? "") !== String(original.semanticPrompt ?? "") || String(shot.videoDesc ?? "") !== String(original.videoDesc ?? "") ||
-      (shot.imagePrompt ?? null) !== (original.currentImagePrompt ?? null) || sourceHash(JSON.stringify(spec)) !== original.productionSpecHash ||
-      sourceHash(JSON.stringify(assets)) !== snapshot.assetConstraints.constraintsHash ||
-      JSON.stringify(await stableCapabilityContext(spec.capabilityId, trx)) !== JSON.stringify(snapshot.capabilityContext)) {
-      throw new SkillError("SKILL_BINDING_INVALID", "镜头或图片执行上下文已改变，请重新编译", 409);
-    }
-    const current = await resolveSkill({ projectId: value.projectId, scriptId: value.scriptId, storyboardId: value.storyboardId, skillType: "IMAGE_PROMPT", profileKey: "advertisement" }, trx);
-    if (current.skillId !== row.skillId || current.skillVersion !== versionLabel(Number(row.skillVersion)) || current.definitionHash !== row.skillDefinitionHash || JSON.stringify(current.overrideChain) !== row.overrideChain) {
-      throw new SkillError("SKILL_BINDING_INVALID", "Skill 绑定或 Override 已改变，请重新编译", 409);
-    }
+    const snapshot = JSON.parse(row.inputContext);
+    let current: Awaited<ReturnType<typeof captureCompile>>;
+    try { current = await captureCompile({ ...value,
+      ...(snapshot.supportingSkill ? { supportingSkillId: snapshot.supportingSkill.skillId,
+        supportingSkillVersion: snapshot.supportingSkill.skillVersion } : {}) }, trx); }
+    catch { throw new SkillError("SKILL_COMPILE_STALE", "图片执行上下文已改变，请重新编译", 409); }
+    if (current.causalFingerprint !== snapshot.causalFingerprint || current.resolved.skillId !== row.skillId ||
+      current.resolved.skillVersion !== versionLabel(Number(row.skillVersion)) || current.resolved.definitionHash !== row.skillDefinitionHash)
+      throw new SkillError("SKILL_COMPILE_STALE", "图片执行上下文已改变，请重新编译", 409);
+    const shot = current.shot;
     const appliedAt = Date.now();
     const changed = await trx("o_skillCompile").where({ compileId: value.compileId, appliedAt: null }).update({ appliedAt });
     if (changed !== 1) throw new SkillError("SKILL_BINDING_INVALID", "Compile 状态已改变，请重新编译", 409);
@@ -138,7 +165,7 @@ export async function applyCompile(input: { compileId: string; projectId: number
     const updated = await trx("o_storyboard").where({ id: value.storyboardId, projectId: value.projectId, scriptId: value.scriptId }).first();
     return { compileId: value.compileId, storyboard: { ...updated, ...productionSpec(updated) }, appliedAt };
   }); } catch (error: any) {
-    if (/SQLITE_BUSY|SQLITE_CONSTRAINT/.test(String(error?.code))) throw new SkillError("SKILL_BINDING_INVALID", "并发修改冲突，请重新编译", 409);
+    if (/SQLITE_BUSY|SQLITE_CONSTRAINT/.test(String(error?.code))) throw new SkillError("SKILL_COMPILE_STALE", "并发修改冲突，请重新编译", 409);
     throw error;
   }
 }

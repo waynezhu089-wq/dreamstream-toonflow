@@ -8,6 +8,9 @@ import { readProductionOperationAdmission, type OperationAdmission } from "@/ser
 import type { ProductionOperationKey } from "@/services/orchestrator/productionOperationRegistry";
 import { canonicalJson, sha256 } from "@/services/supervisor/contract";
 import { effectiveImagePrompt, productionSpec } from "@/services/storyboardProduction";
+import { readExactRecipeRuntimeContext } from "@/services/recipeRegistry";
+import { resolveEffectiveImageCapability, validateSelectedImageCapability } from "@/services/recipeImageCapability";
+import { RecipeError } from "@/services/recipeContract";
 
 const database = () => u.db as Knex;
 const generateOperationKey = "storyboard.image.generate";
@@ -45,6 +48,7 @@ export type StoryboardImageSourceContext = {
   receipts: Map<string, any>;
   project: any;
   imageModel: string | null;
+  recipe: Awaited<ReturnType<typeof readExactRecipeRuntimeContext>>;
 };
 const receiptKey = (assetId: number, imageId: number, filePath: string) => `${assetId}:${imageId}:${filePath}`;
 
@@ -54,6 +58,7 @@ async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: 
   const rows = await q("o_storyboard").where({ projectId, scriptId }).whereNull("retiredAt").whereIn("id", ids);
   const project = await q("o_project").where({ id: projectId }).first();
   if (!project) fail("PRODUCTION_CONTEXT_INVALID", "项目不存在");
+  const recipe = await readExactRecipeRuntimeContext(q, projectId);
   const links = new Map<number, number[]>();
   if (rows.length) for (const link of await q("o_assets2Storyboard").whereIn("storyboardId", rows.map(row => row.id)).select("storyboardId", "assetId")) {
     const list = links.get(link.storyboardId) ?? [];
@@ -95,7 +100,7 @@ async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: 
       receipts.set(receiptKey(receipt.assetId, receipt.imageId, receipt.filePath), receipt);
     }
   }
-  return { rows: new Map(rows.map(row => [row.id, row])), links, plans, assets, scriptAssetIds, images, receipts, project, imageModel };
+  return { rows: new Map(rows.map(row => [row.id, row])), links, plans, assets, scriptAssetIds, images, receipts, project, imageModel, recipe };
 }
 
 function buildStoryboardImageSource(context: StoryboardImageSourceContext, scope: Scope) {
@@ -135,11 +140,11 @@ function buildStoryboardImageSource(context: StoryboardImageSourceContext, scope
     producerInput = execution.asset;
   } else {
     if (spec.primaryAssetId !== null || spec.referenceAssetIds.length || spec.referenceAssetGroupIds.length) fail("CAPABILITY_INPUT_UNSUPPORTED", "纯文生图不接受真实主素材或参考输入");
-    if (spec.capabilityId && spec.capabilityId !== "toonflow.image.v1") fail("CAPABILITY_NOT_IMPLEMENTED", "当前图片能力不可用");
     const project = context.project;
     const model = context.imageModel;
+    const selected = resolveEffectiveImageCapability(spec.capabilityId, spec.productionMode, context.recipe);
     execution = { imagePrompt: row.imagePrompt ?? null, promptSkillId: spec.promptSkillId, promptSkillVersion: spec.promptSkillVersion,
-      capabilityId: spec.capabilityId ?? "toonflow.image.v1", imageModel: model,
+      capabilityId: selected.capabilityId, imageModel: model,
       imageQuality: project?.imageQuality ?? null, videoRatio: project?.videoRatio ?? null };
     producerType = "AI_MODEL"; producerRef = model;
     producerInput = { prompt: effectiveImagePrompt(row), model, size: execution.imageQuality, aspectRatio: execution.videoRatio };
@@ -203,9 +208,10 @@ export async function beginCurrentImageAttempt(scope: Scope, operationKey: Produ
 }
 
 export async function beginStoryboardImageAttempt(scope: Scope, requestModel?: string, transaction?: Knex.Transaction) {
-  return beginCurrentImageAttempt(scope, generateOperationKey, (_q, source) => {
+  return beginCurrentImageAttempt(scope, generateOperationKey, async (q, source) => {
     if (source.producerType !== "REAL_ASSET_DIRECT" && source.producerType !== "AI_MODEL")
       fail("CAPABILITY_INPUT_UNSUPPORTED", "当前生产方式不能进入普通分镜图片生成");
+    if (source.producerType === "AI_MODEL") await validateSelectedImageCapability(q, source.snapshot.execution.capabilityId);
     if (requestModel && source.producerType === "AI_MODEL" && requestModel !== source.producerRef) fail("MODEL_CONFIG_MISMATCH", "所选模型与当前项目配置不同，请保存配置后重试");
     return { producerType: source.producerType, producerRef: source.producerRef, producerInput: source.producerInput };
   }, transaction);
@@ -343,18 +349,21 @@ export async function readImageProvenance(projectId: number, scriptId: number, s
   if (!ids.length) return new Map<number, any>();
   return database().transaction(async q => {
     const attempts = await q("o_productionAttempt").where({ projectId, scriptId, subjectType }).whereIn("subjectId", ids).orderBy("startedAt", "desc").orderByRaw("rowid DESC");
-    const sourceContext = await loadStoryboardImageSourceContext(q, projectId, scriptId, ids);
+    let sourceContext: StoryboardImageSourceContext | null = null;
+    try { sourceContext = await loadStoryboardImageSourceContext(q, projectId, scriptId, ids); }
+    catch (error) { if (!(error instanceof RecipeError)) throw error; }
     const byId = new Map(attempts.map(a => [a.attemptId, a]));
     const latest = new Map<number, any>();
     for (const attempt of attempts) if (!latest.has(attempt.subjectId)) latest.set(attempt.subjectId, attempt);
     const result = new Map<number, any>();
     for (const requestedRow of storyboards) {
-      const row = sourceContext.rows.get(requestedRow.id) ?? requestedRow;
+      const row = sourceContext?.rows.get(requestedRow.id) ?? requestedRow;
       const current = row.currentImageAttemptId ? byId.get(row.currentImageAttemptId) : null;
       let freshness: "NONE" | "LEGACY" | "CURRENT" | "STALE" = !row.filePath ? "NONE" : !row.currentImageAttemptId ? "LEGACY" : "STALE";
       let staleCode: string | null = null;
       if (freshness === "STALE") {
         try {
+          if (!sourceContext) throw new RecipeError("RECIPE_CONTEXT_MISMATCH", "精确 Recipe 上下文不可证明", 409);
           const source = buildStoryboardImageSource(sourceContext, { projectId, scriptId, storyboardId: row.id });
           const output = parseJson(current?.outputRef);
           if (current?.status === "SUCCEEDED" && output?.filePath === row.filePath && source.sourceHash === current.sourceHash) freshness = "CURRENT";

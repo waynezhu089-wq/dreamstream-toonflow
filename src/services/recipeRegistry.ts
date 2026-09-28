@@ -207,3 +207,44 @@ export async function resolveExactRecipeSkill(q: Query, projectId: number, recip
   if (!profile || profile.profileKey !== definition.profileRef.profileKey || Number(profile.profileVersion) !== Number(definition.profileRef.profileVersion.slice(1))) throw new RecipeError("RECIPE_PROFILE_MISMATCH", "项目 Recipe 与 Profile 精确绑定不一致", 409);
   return definition.skillRefs.find(ref => ref.skillType === skillType) ?? null;
 }
+
+// A runtime read must share its caller's SQLite snapshot. Binding metadata is
+// deliberately diagnostic only: repeating the same exact bind changes no
+// production input.
+export async function readExactRecipeRuntimeContext(q: Knex.Transaction, projectId: number) {
+  // Databases that have not yet installed the optional Recipe registry retain
+  // the accepted no-Recipe B2 read behavior.
+  if (!await q.schema.hasTable("o_projectRecipeBinding")) return null;
+  const bound = await binding(q, projectId);
+  if (!bound) return null;
+  const version = await exact(q, bound.recipeKey, Number(bound.recipeVersion));
+  if (version.status === "DRAFT")
+    throw new RecipeError("RECIPE_VERSION_NOT_ACTIVE", "项目不能使用 Draft Recipe", 409);
+  if (version.definitionHash !== bound.recipeDefinitionHash)
+    throw new RecipeError("RECIPE_HASH_MISMATCH", "项目 Recipe 精确绑定 Hash 不一致", 409);
+  const definition = validateRecipeDefinition(JSON.parse(version.definition));
+  const profileBinding = await q("o_projectProfileBinding").where({ projectId }).first();
+  const ref = definition.profileRef;
+  if (!profileBinding || profileBinding.profileKey !== ref.profileKey ||
+      Number(profileBinding.profileVersion) !== recipeVersionNumber(ref.profileVersion))
+    throw new RecipeError("RECIPE_PROFILE_MISMATCH", "项目 Recipe 与精确 Profile 绑定不一致", 409);
+  const profileVersion = await q("o_productionProfileVersion")
+    .where({ profileKey: ref.profileKey, version: Number(profileBinding.profileVersion) }).first();
+  if (!profileVersion) throw new RecipeError("RECIPE_PROFILE_MISMATCH", "精确 Profile 版本不存在", 409);
+  if (profileVersion.status === "DRAFT") throw new RecipeError("RECIPE_PROFILE_MISMATCH", "项目不能使用 Draft Profile", 409);
+  let profileDefinition: ReturnType<typeof validateProfileDefinition>;
+  try { profileDefinition = validateProfileDefinition(JSON.parse(profileVersion.definition)); }
+  catch { throw new RecipeError("RECIPE_PROFILE_MISMATCH", "精确 Profile 定义无效", 409); }
+  if (profileHash(profileDefinition) !== profileVersion.definitionHash)
+    throw new RecipeError("RECIPE_PROFILE_MISMATCH", "精确 Profile 定义已变化", 409);
+  return {
+    recipeKey: bound.recipeKey as string,
+    recipeVersion: recipeVersionLabel(Number(bound.recipeVersion)),
+    recipeDefinitionHash: version.definitionHash as string,
+    definition,
+    profile: { profileKey: ref.profileKey, profileVersion: ref.profileVersion,
+      definitionHash: profileVersion.definitionHash as string },
+    skillRefs: definition.skillRefs,
+    capabilityRefs: definition.capabilityRefs,
+  };
+}

@@ -9,7 +9,7 @@ const stages = [
   { stageKey: 'image-production', displayName: 'Image Production', uiOrder: 30, entryGateKey: null, exitGateKey: null, operationKeys: ['storyboard.image.generate', 'storyboard.image.composite', 'storyboard.image.attach'] },
 ].map(s => ({ description: '', required: true, allowSkip: false, ...s }));
 
-async function setup(t, mode = 'REAL_ASSET_DIRECT') {
+async function setup(t, mode = 'REAL_ASSET_DIRECT', extraAiShot = false, beforeStage = null) {
   const f = await fixture(t);
   await f.load('lib/recipeSchema').initializeRecipeSchema(f.db);
   await f.load('lib/supervisorSchema').initializeSupervisorSchema(f.db);
@@ -21,8 +21,12 @@ async function setup(t, mode = 'REAL_ASSET_DIRECT') {
     transitions: [{ fromStageKey: 'asset-preparation', toStageKey: 'supervisor-review' }, { fromStageKey: 'supervisor-review', toStageKey: 'image-production' }] } });
   await registry.activateVersion({ profileKey: 'advertisement', version: 'v2' });
   await registry.bindProfile({ projectId: 1, profileKey: 'advertisement', version: 'v2' });
-  const created = await f.create(mode === 'REAL_ASSET_DIRECT' ? {} : { productionMode: mode, primaryAssetId: null, associateAssetsIds: [], shouldGenerateImage: 1 });
+  const created = await f.create(mode === 'REAL_ASSET_DIRECT' ? {} : { productionMode: mode, primaryAssetId: null, associateAssetsIds: [], shouldGenerateImage: 1,
+    ...(extraAiShot ? { capabilityId: 'toonflow.image.v1' } : {}) });
   const storyboardId = created.id;
+  const secondShot = extraAiShot ? await f.create({ productionMode: 'AI_TEXT_TO_IMAGE', primaryAssetId: null,
+    associateAssetsIds: [], shouldGenerateImage: 1 }) : null;
+  if (beforeStage) await beforeStage(f, { storyboardId, secondShot });
   const shot = { ...scope, storyboardId };
   async function decide() {
     const input = { ...scope, reviewKey: 'storyboard.semantic-approval.v2' };
@@ -39,8 +43,70 @@ async function setup(t, mode = 'REAL_ASSET_DIRECT') {
   const row = () => f.db('o_storyboard').where({ id: storyboardId }).first();
   const attemptRow = id => f.db('o_productionAttempt').where({ attemptId: id }).first();
   const provenance = async () => (await attempt.readImageProvenance(1, 10, [await row()])).get(storyboardId);
-  return { ...f, attempt, shot, storyboardId, row, attemptRow, provenance, decide, orchestrator };
+  return { ...f, attempt, shot, storyboardId, secondShot, row, attemptRow, provenance, decide, orchestrator };
 }
+
+test('Recipe Capability changes only effective B2 Source; unsupported second shot rolls back entire controlled HTTP batch', async t => {
+  const capabilityId = 'comfy.recipe-test.v1';
+  let oldSource;
+  const f = await setup(t, 'AI_TEXT_TO_IMAGE', true, async (f, { secondShot }) => {
+    await f.load('lib/capabilitySchema').initializeCapabilitySchema(f.db);
+    await f.config();
+    const recipe = f.load('services/recipeRegistry');
+    const now = Date.now();
+    oldSource = await f.db.transaction(q => f.load('services/productionAttempt').captureStoryboardImageSource(q,
+      { projectId: 1, scriptId: 10, storyboardId: secondShot.id }));
+    await f.db('o_capability').insert({ familyKey: 'comfy.recipe-test', displayName: 'Test', description: '',
+    category: 'image', provider: 'ComfyUI', executorType: 'COMFY_UI', createdAt: now, updatedAt: now });
+    await f.db('o_capabilityVersion').insert({ capabilityId, familyKey: 'comfy.recipe-test', version: 1,
+    status: 'VERIFIED', workflowJson: JSON.stringify({ '1': { class_type: 'Test', inputs: { prompt: '' } } }),
+    inputPorts: JSON.stringify([{ name: 'prompt', type: 'text', required: true, label: 'Prompt' }]),
+    outputPorts: JSON.stringify([{ name: 'image', type: 'image', label: 'Image' }]),
+    inputMappings: JSON.stringify([{ portName: 'prompt', nodeId: '1', inputKey: 'prompt' }]),
+    outputMappings: JSON.stringify([{ portName: 'image', nodeId: '1', field: 'images' }]),
+    endpointId: '00000000-0000-4000-8000-000000000001',
+    runtimeConfig: JSON.stringify({ timeoutMs: 120000, pollIntervalMs: 1000 }), createdAt: now,
+    verifiedAt: now, updatedAt: now });
+    await recipe.createRecipeFamily({ recipeKey: 'ad.image-default', displayName: 'Image default', description: '', tags: [] });
+    await recipe.createRecipeVersion({ recipeKey: 'ad.image-default', definition: { schemaVersion: 1,
+    profileRef: { profileKey: 'advertisement', profileVersion: 'v2' }, skillRefs: [],
+    capabilityRefs: [{ roleKey: 'storyboard-image.text-to-image', stageKey: 'image-production', capabilityId }],
+    assetPlanTemplate: [], notes: [] } });
+    await recipe.activateRecipeVersion({ recipeKey: 'ad.image-default', version: 'v1' });
+    await recipe.bindRecipe({ projectId: 1, recipeKey: 'ad.image-default', version: 'v1' });
+  });
+  const scope = { projectId: 1, scriptId: 10, storyboardId: f.secondShot.id };
+  const recipeSource = await f.db.transaction(q => f.attempt.captureStoryboardImageSource(q, scope));
+  assert.equal(recipeSource.snapshot.execution.capabilityId, capabilityId);
+  assert.notEqual(recipeSource.sourceHash, oldSource.sourceHash);
+  const explicit = await f.db.transaction(q => f.attempt.captureStoryboardImageSource(q,
+    { projectId: 1, scriptId: 10, storyboardId: f.storyboardId }));
+  assert.equal(explicit.snapshot.execution.capabilityId, 'toonflow.image.v1');
+  const previous = await f.attempt.beginStoryboardImageAttempt({ projectId: 1, scriptId: 10, storyboardId: f.storyboardId });
+  const rowsBefore = await f.db('o_storyboard').whereIn('id', [f.storyboardId, f.secondShot.id]).orderBy('id');
+  const attemptsBefore = await f.db('o_productionAttempt').where({ projectId: 1, scriptId: 10 }).orderBy('attemptId');
+  const callsBefore = f.calls.length;
+  const rejected = await f.post('storyboard/batchGenerateImage', { projectId: 1, scriptId: 10,
+    storyboardIds: [f.storyboardId, f.secondShot.id] }, 409);
+  assert.equal(rejected.code, 'CAPABILITY_NOT_IMPLEMENTED');
+  assert.deepEqual(await f.db('o_storyboard').whereIn('id', [f.storyboardId, f.secondShot.id]).orderBy('id'), rowsBefore);
+  assert.deepEqual(await f.db('o_productionAttempt').where({ projectId: 1, scriptId: 10 }).orderBy('attemptId'), attemptsBefore);
+  assert.equal((await f.attemptRow(previous.attemptId)).status, 'RUNNING');
+  assert.equal(f.calls.length, callsBefore);
+  await f.db('o_capabilityVersion').where({ capabilityId }).update({ status: 'DISABLED' });
+  assert.equal((await f.db.transaction(q => f.attempt.captureStoryboardImageSource(q, scope))).sourceHash, recipeSource.sourceHash);
+  assert.equal((await f.attempt.runStoryboardImageAttempt(previous)).status, 'SUCCEEDED');
+  assert.equal((await f.provenance()).freshness, 'CURRENT');
+  await assert.rejects(f.attempt.beginStoryboardImageAttempt(scope), e => e.code === 'CAPABILITY_DISABLED');
+  await f.db('o_capabilityVersion').where({ capabilityId }).update({ status: 'DRAFT' });
+  await assert.rejects(f.attempt.beginStoryboardImageAttempt(scope), e => e.code === 'CAPABILITY_NOT_VERIFIED');
+  await f.db('o_capabilityVersion').where({ capabilityId }).delete();
+  await assert.rejects(f.attempt.beginStoryboardImageAttempt(scope), e => e.code === 'CAPABILITY_NOT_FOUND');
+  await f.db('o_projectRecipeBinding').where({ projectId: 1 }).update({ recipeDefinitionHash: '0'.repeat(64) });
+  assert.equal((await f.provenance()).freshness, 'STALE');
+  assert.equal((await f.provenance()).staleCode, 'PRODUCTION_SOURCE_CHANGED');
+  assert.equal((await f.row()).filePath.length > 0, true);
+});
 
 test('schema is additive/idempotent and legacy files remain unprovenanced', async t => {
   const f = await fixture(t);

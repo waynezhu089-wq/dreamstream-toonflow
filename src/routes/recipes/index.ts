@@ -3,6 +3,7 @@ import { z } from "zod";
 import { success } from "@/lib/responseFormat";
 import { RecipeError } from "@/services/recipeContract";
 import { activateRecipeVersion, bindRecipe, createRecipeFamily, createRecipeVersion, deprecateRecipeVersion, editRecipeVersion, getRecipe, listRecipes, previewRecipeBind, resolveRecipe, unbindRecipe } from "@/services/recipeRegistry";
+import { applyRecipeAssetPlanTemplate, previewRecipeAssetPlanTemplate } from "@/services/recipeAssetPlanTemplate";
 
 const router = express.Router();
 function route(path: string, action: (body: any) => Promise<any>) {
@@ -26,4 +27,6 @@ route("/project/resolve", resolveRecipe);
 route("/project/preview-bind", previewRecipeBind);
 route("/project/bind", bindRecipe);
 route("/project/unbind", unbindRecipe);
+route("/project/asset-plan-template/preview", previewRecipeAssetPlanTemplate);
+route("/project/asset-plan-template/apply", applyRecipeAssetPlanTemplate);
 export default router;
