@@ -1,6 +1,7 @@
 import { productionFields } from "@/services/storyboardProduction";
 import { tool, jsonSchema, Tool } from "ai";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import _ from "lodash";
 import ResTool from "@/socket/resTool";
 import u from "@/utils";
@@ -73,17 +74,44 @@ interface ToolConfig {
  * 串行队列：确保 socket 操作排队执行，避免并发过高导致假死
  * @param delayMs 每个操作之间的最小间隔(ms)
  */
-function createSocketQueue(delayMs = 800) {
-  let lastPromise: Promise<any> = Promise.resolve();
+export function createSocketQueue(delayMs = 800) {
+  let lastPromise: Promise<void> = Promise.resolve();
   return <T>(fn: () => Promise<T>): Promise<T> => {
-    lastPromise = lastPromise.then(
-      () =>
-        new Promise<T>((resolve, reject) => {
-          setTimeout(() => fn().then(resolve, reject), delayMs);
-        }),
-    );
-    return lastPromise;
+    const item = lastPromise.then(() => new Promise<void>(resolve => setTimeout(resolve, delayMs))).then(fn);
+    lastPromise = item.then(() => undefined, () => undefined);
+    return item;
   };
+}
+
+export class SocketDeliveryUncertain extends Error {
+  constructor(reason: string) {
+    super(`交付回执不可用（${reason}）；语义变更未应用。浏览器中可能仍有待确认提案，请先检查。`);
+    this.name = "SocketDeliveryUncertain";
+  }
+}
+
+export function emitStoryboardAcknowledged(socket: ResTool["socket"], event: string, payload: unknown, timeoutMs = 10000): Promise<any> {
+  return new Promise((resolve, reject) => {
+    if (!socket.connected) return reject(new SocketDeliveryUncertain("连接已断开"));
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (error?: Error, response?: any) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      socket.off("disconnect", onDisconnect);
+      if (error) reject(error);
+      else resolve(response);
+    };
+    const onDisconnect = () => finish(new SocketDeliveryUncertain("连接中断"));
+    socket.on("disconnect", onDisconnect);
+    timer = setTimeout(() => finish(new SocketDeliveryUncertain("回执超时")), timeoutMs);
+    try {
+      socket.emit(event, payload, (response: any) => finish(undefined, response));
+    } catch {
+      finish(new SocketDeliveryUncertain("发送失败"));
+    }
+  });
 }
 
 export default (toolCpnfig: ToolConfig) => {
@@ -291,26 +319,26 @@ export default (toolCpnfig: ToolConfig) => {
           associateAssetsIds: raw.associateAssetsIds ?? [],
           shouldGenerateImage: raw.shouldGenerateImage,
         };
-        socketQueue(
-          () =>
-            new Promise((resolve, reject) =>
-              socket.emit("addStoryboard", { ...data }, (res: any) => {
-                if (res?.error) return reject(new Error(res.error));
-                resolve(res);
-              }),
-            ),
-        )
-          .then((res) => {
-            thinking.appendText("新增的分镜数据:\n" + JSON.stringify(data, null, 2));
-            thinking.updateTitle("新增分镜成功");
+        const proposalId = randomUUID();
+        try {
+          const res = await socketQueue(() => emitStoryboardAcknowledged(socket, "addStoryboard", {
+            ...data, proposalId, projectId: resTool.data.projectId, scriptId: resTool.data.scriptId,
+          }));
+          if (res?.status === "PENDING_HUMAN" && res?.applied === false && res?.proposalId === proposalId) {
+            thinking.updateTitle("分镜提案等待人工确认，尚未应用");
             thinking.complete();
-          })
-          .catch((e) => {
-            thinking.appendText("新增的分镜数据:\n" + JSON.stringify(data, null, 2));
-            thinking.updateTitle("新增分镜失败");
-            thinking.complete();
-          });
-        return true;
+            return `提案 ${proposalId} 已到当前浏览器会话，等待人工 Preview/Confirm；分镜尚未应用，不会自动完成。`;
+          }
+          if (!res?.success || res?.applied === false) throw new Error(res?.error || res?.status || "新增分镜未应用");
+          thinking.updateTitle("新增分镜成功");
+          thinking.complete();
+          return res?.message ?? "分镜已应用";
+        } catch (error) {
+          thinking.updateTitle("新增分镜未应用");
+          thinking.appendText(u.error(error).message);
+          thinking.complete();
+          throw error;
+        }
       },
     }),
     replace_flowData_storyboard: tool({
@@ -350,15 +378,16 @@ export default (toolCpnfig: ToolConfig) => {
         await assertAdvertisementAssetReferences(resTool.data.projectId, resTool.data.scriptId, items.flatMap(item => item.associateAssetsIds ?? []));
         const thinking = msg.thinking("正在整套替换分镜面板...");
         try {
-          const res = await socketQueue(
-            () =>
-              new Promise<any>((resolve, reject) =>
-                socket.emit("replaceStoryboard", { items }, (result: any) => {
-                  if (!result?.success) return reject(new Error(result?.error || result?.message || "整套替换分镜失败"));
-                  resolve(result);
-                }),
-              ),
-          );
+          const proposalId = randomUUID();
+          const res = await socketQueue(() => emitStoryboardAcknowledged(socket, "replaceStoryboard", {
+            items, proposalId, projectId: resTool.data.projectId, scriptId: resTool.data.scriptId,
+          }));
+          if (res?.status === "PENDING_HUMAN" && res?.applied === false && res?.proposalId === proposalId) {
+            thinking.updateTitle("替换提案等待人工确认，尚未应用");
+            thinking.complete();
+            return `提案 ${proposalId} 已到当前浏览器会话，等待人工 Preview/Confirm；分镜尚未应用，不会自动完成。`;
+          }
+          if (!res?.success || res?.applied === false) throw new Error(res?.error || res?.status || "整套替换分镜未应用");
           thinking.appendText(`已将当前分镜面板替换为 ${items.length} 条最终分镜。\n`);
           thinking.updateTitle("整套替换分镜完成");
           thinking.complete();

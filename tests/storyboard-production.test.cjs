@@ -204,7 +204,7 @@ test('legacy profiles preserve shouldGenerateImage dispatch, no productionMode r
 test('actual Agent schemas and Socket add/replace preserve production fields without choosing the first association',async t=>{
  const f=await fixture(t),events=[];
  const output={appendText(){},updateTitle(){},complete(){}};
- const resTool={data:f.ctx,socket:{emit:(event,data,callback)=>{events.push({event,data});callback({success:true});}}};
+ const resTool={data:f.ctx,socket:{connected:true,on(){},off(){},emit:(event,data,callback)=>{events.push({event,data});callback({success:true});}}};
  const tools=f.load('agents/productionAgent/tools').default({resTool,msg:{thinking:()=>output},advertisement:true});
  const shot=f.item({productionMode:'AI_REFERENCE_GENERATE',referenceAssetIds:[1],referenceAssetGroupIds:['multi-view'],promptSkillId:'layout',promptSkillVersion:'1',capabilityId:'future.ref',shouldGenerateImage:'false'});
  for(const key of Object.keys(f.load('services/storyboardProduction').productionFields))assert.ok(tools.add_flowData_storyboard.inputSchema.properties[key]);

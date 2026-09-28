@@ -72,7 +72,7 @@ async function fixture(t) {
   const noop=()=>{};const output={append:noop,appendText:noop,complete:noop,error:noop,updateTitle:noop};
   const msg={datetime:new Date().toISOString(),complete:noop,error:noop,text:()=>output,thinking:()=>output};
   const events=[];
-  const resTool={data:{projectId:1,scriptId:10},newMessage:()=>msg,socket:{emit:(name,data,callback)=>{events.push({name,data});callback(name==='getFlowData'?{assets:[{id:4,name:'Historical duplicate'}]}:{success:true});}}};
+  const resTool={data:{projectId:1,scriptId:10},newMessage:()=>msg,socket:{connected:true,on:noop,off:noop,emit:(name,data,callback)=>{events.push({name,data});callback(name==='getFlowData'?{assets:[{id:4,name:'Historical duplicate'}]}:{success:true});}}};
   const tools=(advertisement=true)=>load('agents/productionAgent/tools').default({resTool,msg,advertisement});
   return {db,raw,load,plan,item,streams,events,resTool,msg,tools,ctx:{projectId:1,scriptId:10}};
 }
@@ -110,7 +110,10 @@ test('storyboard association retains real assetId and rejects unbound, cross-uni
  }
  assert.equal(f.events.length,0);
  await tools.replace_flowData_storyboard.execute({items:[shot]});
- assert.deepEqual(f.events[0],{name:'replaceStoryboard',data:{items:[shot]}});
+ assert.equal(f.events[0].name,'replaceStoryboard');
+ assert.deepEqual(f.events[0].data.items,[shot]);
+ assert.equal(f.events[0].data.projectId,1);assert.equal(f.events[0].data.scriptId,10);
+ assert.ok(f.events[0].data.proposalId);
  await tools.add_flowData_storyboard.execute(shot);
  await new Promise(resolve=>setTimeout(resolve,850));
  assert.deepEqual(f.events[1].data.associateAssetsIds,[1]);
