@@ -29,10 +29,10 @@ class FakeSocket extends EventEmitter {
   }
 }
 const raw = { videoDesc: 'scene', prompt: 'prompt', track: 'A', duration: 3, associateAssetsIds: [], shouldGenerateImage: 'false' };
-function agent(socket) {
+function agent(socket, options = {}) {
   const titles = [];
   const tools = mod.exports.default({ resTool: { socket, data: { projectId: 1, scriptId: 2 } },
-    msg: { thinking: () => ({ appendText() {}, updateTitle: title => titles.push(title), complete() {} }) } });
+    msg: { thinking: () => ({ appendText() {}, updateTitle: title => titles.push(title), complete() {} }) }, ...options });
   return { tools, titles };
 }
 
@@ -40,15 +40,31 @@ test('rejected/timeout item does not poison serial Socket queue', async () => {
   const socket = new FakeSocket();
   let firstAck;
   const events = [];
-  socket.onEmit = (event, _payload, ack) => { events.push(event); if (event === 'first') firstAck = ack; else ack({ success: true }); };
+  socket.onEmit = (event, _payload, ack) => { events.push(event); if (event === 'generateStoryboard') firstAck = ack; else ack({ success: true }); };
   const queue = createSocketQueue(0);
-  const first = queue(() => emitStoryboardAcknowledged(socket, 'first', {}, 5));
-  const second = queue(() => emitStoryboardAcknowledged(socket, 'second', {}, 50));
+  const first = queue(() => emitStoryboardAcknowledged(socket, 'generateStoryboard', { projectId: 1, scriptId: 2, ids: [7] }, 5));
+  const second = queue(() => emitStoryboardAcknowledged(socket, 'addStoryboard', { projectId: 1, scriptId: 2 }, 50));
   await assert.rejects(first, /回执超时/);
   assert.deepEqual(await second, { success: true });
   firstAck({ success: true });
-  assert.deepEqual(events, ['first', 'second']);
+  assert.deepEqual(events, ['generateStoryboard', 'addStoryboard']);
   assert.equal(socket.listenerCount('disconnect'), 0);
+});
+
+test('generate tool sends its original unit envelope and a failed ACK does not strand a following add', async () => {
+  const socket = new FakeSocket(), { tools } = agent(socket, { storyboardGeneration: true });
+  const events = [];
+  socket.onEmit = (event, payload, ack) => {
+    events.push({ event, payload });
+    if (event === 'generateStoryboard') ack({ status: 'CONTEXT_MISMATCH', applied: false });
+    else ack({ status: 'PENDING_HUMAN', applied: false, proposalId: payload.proposalId });
+  };
+  const first = tools.generate_storyboard.execute({ ids: [7] });
+  const second = tools.add_flowData_storyboard.execute(raw);
+  await assert.rejects(first, /CONTEXT_MISMATCH/);
+  assert.match(await second, /尚未应用/);
+  assert.deepEqual(events.map(item => item.event), ['generateStoryboard', 'addStoryboard']);
+  assert.deepEqual(events[0].payload, { projectId: 1, scriptId: 2, ids: [7] });
 });
 
 test('disconnect and synchronous emit failure settle once and clean listeners', async () => {

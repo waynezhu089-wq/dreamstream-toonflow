@@ -255,27 +255,21 @@ export default (toolCpnfig: ToolConfig) => {
       ),
       execute: async ({ ids }) => {
         const thinking = msg.thinking("正在生成分镜...");
-        socketQueue(
-          () =>
-            new Promise((resolve, reject) =>
-              socket.emit("generateStoryboard", { ids }, (res: any) => {
-                if (res?.error) return reject(new Error(res.error));
-                resolve(res);
-              }),
-            ),
-        )
-          .then((res) => {
-            thinking.appendText("生成的分镜数据:\n" + JSON.stringify(res, null, 2));
-            thinking.updateTitle(toolCpnfig.advertisement ? "分镜生产请求已接收，请检查最终状态" : "分镜生成完成");
-            thinking.complete();
-          })
-          .catch((e) => {
-            thinking.appendText("分镜生成失败:\n" + u.error(e).message);
-            thinking.updateTitle("分镜生成失败");
-            thinking.complete();
-          });
-
-        return "开始生成分镜";
+        try {
+          const res = await socketQueue(() => emitStoryboardAcknowledged(socket, "generateStoryboard", {
+            projectId: resTool.data.projectId, scriptId: resTool.data.scriptId, ids,
+          }));
+          if (!res?.success || res?.applied === false) throw new Error(res?.error || res?.status || "分镜生产请求未被当前制作单元接收");
+          thinking.appendText("生成的分镜数据:\n" + JSON.stringify(res, null, 2));
+          thinking.updateTitle(toolCpnfig.advertisement ? "分镜生产请求已接收，请检查最终状态" : "分镜生成完成");
+          thinking.complete();
+          return res?.message ?? "分镜生产请求已接收，请检查最终状态";
+        } catch (error) {
+          thinking.appendText("分镜生成失败:\n" + u.error(error).message);
+          thinking.updateTitle("分镜生成失败");
+          thinking.complete();
+          throw error;
+        }
       },
     }),
     add_flowData_storyboard: tool({
