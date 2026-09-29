@@ -1,7 +1,8 @@
 import type { Knex } from "knex";
 import { z } from "zod";
 import u from "@/utils";
-import { captureStoryboardImageSourceContext, storyboardImageSourceFromContext } from "@/services/productionAttempt";
+import { assessCurrentImageOutput, captureStoryboardImageSourceContext, loadCurrentCapabilityEvidence,
+  storyboardImageSourceFromContext } from "@/services/productionAttempt";
 import { canonicalJson, sha256 } from "@/services/supervisor/contract";
 import { reviewForGate, storyboardSemanticV2Snapshot } from "@/services/supervisor/registry";
 import { productionSpec } from "@/services/storyboardProduction";
@@ -123,6 +124,8 @@ async function capture(q: Knex.Transaction, request: Request) {
     await q("o_advertisementAssetPlan").where({ projectId, scriptId }).whereIn("assetId", [...requestedAssets]).select("assetId") : [];
   const pointerIds = [...new Set(rows.flatMap(row => [row.currentImageAttemptId, row.activeImageAttemptId]).filter(Boolean))];
   const pointerAttempts = pointerIds.length ? await q("o_productionAttempt").whereIn("attemptId", pointerIds).orderBy("attemptId", "asc") : [];
+  const currentPointerIds = new Set(rows.map(row => row.currentImageAttemptId).filter(Boolean));
+  const capabilityEvidence = await loadCurrentCapabilityEvidence(q, pointerAttempts.filter(row => currentPointerIds.has(row.attemptId)));
   const activeAttempts = await q("o_productionAttempt").where({ projectId, scriptId, status: "RUNNING" }).orderBy("attemptId", "asc").limit(MAX_ATTEMPTS + 1);
   if (activeAttempts.length > MAX_ATTEMPTS) reject("REVISION_SNAPSHOT_TOO_LARGE", "进行中的生产任务过多");
   const byAttempt = new Map(pointerAttempts.map(row => [row.attemptId, row]));
@@ -150,7 +153,7 @@ async function capture(q: Knex.Transaction, request: Request) {
       persisted: profile.persisted, definitionHash: definitionHash(profile.definition), bindingUpdatedAt: binding?.updatedAt ?? null,
       definition: profile.definition }, recipe, ownerStageKey: definition.ownerStageKey, descendants: [...descendants].sort(),
     stageKeys, stageRuns, lastStageEventId: event?.id ?? null, reviewEvidence, rows, semantic, byShot,
-    scopedAssets, scriptAssets, plans, pointerAttempts, activeAttempts, sourceContext };
+    scopedAssets, scriptAssets, plans, pointerAttempts, activeAttempts, sourceContext, capabilityEvidence };
   if (tooLarge({ ...result, sourceContext: undefined, stageKeys: undefined })) reject("REVISION_SNAPSHOT_TOO_LARGE", "Preview 快照过大");
   return result;
 }
@@ -272,12 +275,9 @@ function plan(request: Request, captured: Awaited<ReturnType<typeof capture>>) {
       proposedSource = safeSource(captured.sourceContext, scope, proposedRows.get(before.id), after.linkedAssetIds);
     }
     const attempt: any = oldRow.currentImageAttemptId ? attempts.get(oldRow.currentImageAttemptId) : null;
-    const output = attempt?.outputRef ? (() => { try { return JSON.parse(attempt.outputRef); } catch { return null; } })() : null;
-    const assess = (sourceHash: string | null): string => !oldRow.filePath ? "NONE" :
-      !oldRow.currentImageAttemptId ? "LEGACY" : !sourceHash ? "UNKNOWN" :
-      attempt?.status === "SUCCEEDED" && output?.filePath === oldRow.filePath && attempt.sourceHash === sourceHash ? "CURRENT" : "STALE";
-    const beforeFreshness = assess(current.sourceHash);
-    const afterFreshness = after ? assess(proposedSource?.sourceHash ?? null) : "UNKNOWN";
+    const beforeFreshness = assessCurrentImageOutput(oldRow, attempt, current.sourceHash, captured.capabilityEvidence.byId).freshness;
+    const afterFreshness = after ? !proposedSource?.sourceHash ? "UNKNOWN" :
+      assessCurrentImageOutput(oldRow, attempt, proposedSource.sourceHash, captured.capabilityEvidence.byId).freshness : "UNKNOWN";
     if (afterFreshness === "UNKNOWN" || afterFreshness === "LEGACY") warnings.push(`镜头 ${before.id} 的既有输出不可证明可复用`);
     sourceEvidence.push({ storyboardId: before.id, currentSourceHash: current.sourceHash, proposedSourceHash: proposedSource?.sourceHash ?? null,
       currentUnavailableCode: current.unavailableCode, proposedUnavailableCode: proposedSource?.unavailableCode ?? null });
@@ -312,7 +312,7 @@ function plan(request: Request, captured: Awaited<ReturnType<typeof capture>>) {
     stageRuns: captured.stageRuns.filter(row => captured.stageKeys.has(row.stageKey)),
     lastStageEventId: captured.lastStageEventId, reviewEvidence: captured.reviewEvidence,
     pointerAttempts: captured.pointerAttempts, activeAttempts: captured.activeAttempts.filter(row => captured.stageKeys.has(row.stageKey)),
-    sourceEvidence, provenanceEvidence, impact };
+    sourceEvidence, capabilityExecutionEvidence: captured.capabilityEvidence.projection, provenanceEvidence, impact };
   if (tooLarge(hashInput)) reject("REVISION_SNAPSHOT_TOO_LARGE", "Preview 影响证据过大");
   return { schemaVersion: 1, revisionId: request.revisionId, revisionKey: definition.revisionKey,
     baseRevisionEpoch: captured.revisionEpoch,

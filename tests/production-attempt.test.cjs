@@ -11,6 +11,7 @@ const stages = [
 
 async function setup(t, mode = 'REAL_ASSET_DIRECT', extraAiShot = false, beforeStage = null) {
   const f = await fixture(t);
+  if (mode === 'AI_TEXT_TO_IMAGE') await f.db('o_project').where({ id: 1 }).update({ imageQuality: '1K', videoRatio: '16:9' });
   await f.load('lib/recipeSchema').initializeRecipeSchema(f.db);
   await f.load('lib/supervisorSchema').initializeSupervisorSchema(f.db);
   const registry = f.load('services/orchestrator/profileRegistry');
@@ -88,7 +89,7 @@ test('Recipe Capability changes only effective B2 Source; unsupported second sho
   const callsBefore = f.calls.length;
   const rejected = await f.post('storyboard/batchGenerateImage', { projectId: 1, scriptId: 10,
     storyboardIds: [f.storyboardId, f.secondShot.id] }, 409);
-  assert.equal(rejected.code, 'CAPABILITY_NOT_IMPLEMENTED');
+  assert.equal(rejected.code, 'CAPABILITY_ROLE_INCOMPATIBLE');
   assert.deepEqual(await f.db('o_storyboard').whereIn('id', [f.storyboardId, f.secondShot.id]).orderBy('id'), rowsBefore);
   assert.deepEqual(await f.db('o_productionAttempt').where({ projectId: 1, scriptId: 10 }).orderBy('attemptId'), attemptsBefore);
   assert.equal((await f.attemptRow(previous.attemptId)).status, 'RUNNING');
@@ -140,15 +141,16 @@ test('Recipe Registry ID colliding with builtin sentinel is still checked before
   const recipeScope = { ...scope, storyboardId: f.secondShot.id };
   const selected = await f.db.transaction(q => f.attempt.captureStoryboardImageSource(q, recipeScope));
   assert.equal(selected.effectiveCapability.resolvedFrom, 'RECIPE');
-  assert.deepEqual(selected.snapshot, unboundSource.snapshot);
-  assert.equal(selected.sourceHash, unboundSource.sourceHash);
+  assert.equal(selected.snapshot.adapterKey, 'storyboard.image-source.registry.v1');
+  assert.notDeepEqual(selected.snapshot, unboundSource.snapshot);
+  assert.notEqual(selected.sourceHash, unboundSource.sourceHash);
   const previous = await f.attempt.beginStoryboardImageAttempt({ ...scope, storyboardId: f.storyboardId });
   const rowsBefore = await f.db('o_storyboard').whereIn('id', [f.storyboardId, f.secondShot.id]).orderBy('id');
   const attemptsBefore = await f.db('o_productionAttempt').where(scope).orderBy('attemptId');
   const providerCalls = f.calls.length;
   const rejected = await f.post('storyboard/batchGenerateImage', { ...scope,
     storyboardIds: [f.storyboardId, f.secondShot.id] }, 409);
-  assert.equal(rejected.code, 'CAPABILITY_NOT_IMPLEMENTED');
+  assert.equal(rejected.code, 'CAPABILITY_ROLE_INCOMPATIBLE');
   await f.db('o_capabilityVersion').where({ capabilityId }).update({ status: 'DISABLED' });
   await assert.rejects(f.attempt.beginStoryboardImageAttempt(recipeScope), e => e.code === 'CAPABILITY_DISABLED');
   await f.db('o_capabilityVersion').where({ capabilityId }).update({ status: 'DRAFT' });

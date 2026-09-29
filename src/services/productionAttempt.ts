@@ -11,6 +11,9 @@ import { effectiveImagePrompt, productionSpec } from "@/services/storyboardProdu
 import { readExactRecipeRuntimeContext } from "@/services/recipeRegistry";
 import { resolveEffectiveImageCapability, validateSelectedImageCapability } from "@/services/recipeImageCapability";
 import { RecipeError } from "@/services/recipeContract";
+import { createPinnedImageProducer, imageDimensions, isRegistryImageSelection, provenanceMismatchCode,
+  readRegistryVersions, registrySourceAdapterKey, type RegistryVersion, type RegistryVersions } from "@/services/storyboardImageCapability";
+import { executePinnedImageCapability, proveCapabilityImageOutput, type CapabilityImageOutput } from "@/services/executeCapability";
 
 const database = () => u.db as Knex;
 const generateOperationKey = "storyboard.image.generate";
@@ -20,7 +23,9 @@ const adapterKey = "storyboard.image-source.v1";
 const directRef = "toonflow.real-asset-direct.v1";
 type Scope = { projectId: number; scriptId: number; storyboardId: number };
 type Output = { filePath: string; mediaType: string; outputHash?: string; byteLength?: number; flowId?: number;
-  candidateNodeType?: string; candidateNodeId?: string; assetId?: number; imageId?: number; assetKey?: string };
+  candidateNodeType?: string; candidateNodeId?: string; assetId?: number; imageId?: number; assetKey?: string;
+  capabilityExecutionId?: string; capabilityId?: string; definitionHash?: string; endpointId?: string;
+  endpointOrigin?: string; promptId?: string; outputPort?: string };
 
 function fail(code: string, message: string): never { throw new ProductionGateError(message, code, 409); }
 function parseJson(value: string | null | undefined) { return value ? JSON.parse(value) : null; }
@@ -49,12 +54,15 @@ export type StoryboardImageSourceContext = {
   project: any;
   imageModel: string | null;
   recipe: Awaited<ReturnType<typeof readExactRecipeRuntimeContext>>;
+  registryVersions: RegistryVersions;
+  registryEndpoints: Map<string, any>;
 };
 const receiptKey = (assetId: number, imageId: number, filePath: string) => `${assetId}:${imageId}:${filePath}`;
 
 // One transaction-local query set for one or many shots. The canonical builder
 // below is shared by begin, postflight and read-only freshness.
-async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: number, scriptId: number, ids: number[], extraPrimaryAssetIds: number[] = [], includeImageModel = false): Promise<StoryboardImageSourceContext> {
+async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: number, scriptId: number, ids: number[], extraPrimaryAssetIds: number[] = [], includeImageModel = false,
+  extraRegistryCapabilityIds: string[] = []): Promise<StoryboardImageSourceContext> {
   const rows = await q("o_storyboard").where({ projectId, scriptId }).whereNull("retiredAt").whereIn("id", ids);
   const project = await q("o_project").where({ id: projectId }).first();
   if (!project) fail("PRODUCTION_CONTEXT_INVALID", "项目不存在");
@@ -67,14 +75,24 @@ async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: 
   }
   const directIds = new Set<number>(extraPrimaryAssetIds);
   let hasAi = false;
+  const registryIds = new Set(extraRegistryCapabilityIds);
   for (const row of rows) {
     try {
       const spec = productionSpec(row);
       if ((spec.productionMode === "REAL_ASSET_DIRECT" || spec.productionMode === "REAL_AI_COMPOSITE") && spec.primaryAssetId) directIds.add(spec.primaryAssetId);
-      if (spec.productionMode === "AI_TEXT_TO_IMAGE") hasAi = true;
+      if (spec.productionMode === "AI_TEXT_TO_IMAGE") {
+        hasAi = true;
+        const selected = resolveEffectiveImageCapability(spec.capabilityId, spec.productionMode, recipe);
+        if (isRegistryImageSelection(selected) && selected.capabilityId) registryIds.add(selected.capabilityId);
+      }
     } catch { /* The per-shot canonical builder will fail this row closed. */ }
   }
   const imageModel = hasAi || includeImageModel ? (await resolveModelsInTransaction(projectId, q, project)).models.image : null;
+  const registryVersions = await readRegistryVersions(q, [...registryIds]);
+  const endpointIds = [...new Set([...registryVersions.values()].filter((item): item is Exclude<typeof item, "INVALID" | null> => !!item && item !== "INVALID")
+    .map(item => item.version.endpointId))];
+  const registryEndpoints = new Map<string, any>(endpointIds.length ?
+    (await q("o_capabilityEndpoint").whereIn("id", endpointIds)).map(row => [row.id, row]) : []);
   const plans = new Map<number, any>(), assets = new Map<number, any>(), scriptAssetIds = new Set<number>();
   const images = new Map<number, any>(), receipts = new Map<string, any>();
   if (directIds.size) {
@@ -100,7 +118,7 @@ async function loadStoryboardImageSourceContext(q: Knex.Transaction, projectId: 
       receipts.set(receiptKey(receipt.assetId, receipt.imageId, receipt.filePath), receipt);
     }
   }
-  return { rows: new Map(rows.map(row => [row.id, row])), links, plans, assets, scriptAssetIds, images, receipts, project, imageModel, recipe };
+  return { rows: new Map(rows.map(row => [row.id, row])), links, plans, assets, scriptAssetIds, images, receipts, project, imageModel, recipe, registryVersions, registryEndpoints };
 }
 
 function buildStoryboardImageSource(context: StoryboardImageSourceContext, scope: Scope) {
@@ -118,6 +136,8 @@ function buildStoryboardImageSource(context: StoryboardImageSourceContext, scope
   let producerRef: string | null;
   let producerInput: any;
   let effectiveCapability: ReturnType<typeof resolveEffectiveImageCapability> | null = null;
+  let registryVersion: RegistryVersion | null = null;
+  let registryEndpoint: any = null;
   if (spec.productionMode === "REAL_ASSET_DIRECT" || spec.productionMode === "REAL_AI_COMPOSITE") {
     if (!spec.primaryAssetId) fail("PRIMARY_ASSET_REQUIRED", "真实素材直用必须指定主素材");
     if (spec.referenceAssetIds.length || spec.referenceAssetGroupIds.length) fail("CAPABILITY_INPUT_UNSUPPORTED", "当前真实主素材生产不消费参考输入");
@@ -145,16 +165,32 @@ function buildStoryboardImageSource(context: StoryboardImageSourceContext, scope
     const model = context.imageModel;
     const selected = resolveEffectiveImageCapability(spec.capabilityId, spec.productionMode, context.recipe);
     effectiveCapability = selected;
-    execution = { imagePrompt: row.imagePrompt ?? null, promptSkillId: spec.promptSkillId, promptSkillVersion: spec.promptSkillVersion,
-      capabilityId: selected.capabilityId, imageModel: model,
-      imageQuality: project?.imageQuality ?? null, videoRatio: project?.videoRatio ?? null };
-    producerType = "AI_MODEL"; producerRef = model;
-    producerInput = { prompt: effectiveImagePrompt(row), model, size: execution.imageQuality, aspectRatio: execution.videoRatio };
+    if (isRegistryImageSelection(selected)) {
+      const exact = selected.capabilityId ? context.registryVersions.get(selected.capabilityId) : null;
+      if (exact === "INVALID") fail("CAPABILITY_ROLE_INCOMPATIBLE", "精确 Capability Version 定义无效");
+      if (!exact) fail("CAPABILITY_NOT_FOUND", "精确 Capability Version 不存在或定义无效");
+      registryVersion = exact;
+      registryEndpoint = context.registryEndpoints.get(exact.version.endpointId) ?? null;
+      const { width, height } = imageDimensions(project?.imageQuality ?? null, project?.videoRatio ?? null);
+      execution = { imagePrompt: row.imagePrompt ?? null, promptSkillId: spec.promptSkillId, promptSkillVersion: spec.promptSkillVersion,
+        capabilityId: selected.capabilityId, imageModel: null, imageQuality: project?.imageQuality ?? null,
+        videoRatio: project?.videoRatio ?? null, roleAdapterKey: "storyboard-image.text-to-image", roleAdapterVersion: 1,
+        width, height, capabilityDefinitionHash: exact.definitionHash };
+      producerType = "CAPABILITY"; producerRef = selected.capabilityId;
+      producerInput = { prompt: effectiveImagePrompt(row), width, height };
+    } else {
+      execution = { imagePrompt: row.imagePrompt ?? null, promptSkillId: spec.promptSkillId, promptSkillVersion: spec.promptSkillVersion,
+        capabilityId: selected.capabilityId, imageModel: model,
+        imageQuality: project?.imageQuality ?? null, videoRatio: project?.videoRatio ?? null };
+      producerType = "AI_MODEL"; producerRef = model;
+      producerInput = { prompt: effectiveImagePrompt(row), model, size: execution.imageQuality, aspectRatio: execution.videoRatio };
+    }
   }
-  const snapshot = { adapterKey, semantic, execution };
+  const snapshot = { adapterKey: producerType === "CAPABILITY" ? registrySourceAdapterKey : adapterKey, semantic, execution };
   // Resolution branch is pre-write admission metadata, never part of the B2
   // canonical Source snapshot/hash or persisted Attempt sourceSnapshot.
-  return { row, snapshot, sourceHash: sha256(snapshot), producerType, producerRef, producerInput, effectiveCapability };
+  return { row, snapshot, sourceHash: sha256(snapshot), producerType, producerRef, producerInput, effectiveCapability,
+    registryVersion, registryEndpoint };
 }
 
 export async function captureStoryboardImageSource(q: Knex.Transaction, scope: Scope) {
@@ -165,8 +201,8 @@ export async function captureStoryboardImageSource(q: Knex.Transaction, scope: S
 // B3-A captures this bounded context inside its one read transaction, then
 // uses the same pure B2 source builder for current/proposed in memory.
 export async function captureStoryboardImageSourceContext(q: Knex.Transaction, projectId: number, scriptId: number,
-  ids: number[], extraPrimaryAssetIds: number[] = []) {
-  return loadStoryboardImageSourceContext(q, projectId, scriptId, ids, extraPrimaryAssetIds, true);
+  ids: number[], extraPrimaryAssetIds: number[] = [], extraRegistryCapabilityIds: string[] = []) {
+  return loadStoryboardImageSourceContext(q, projectId, scriptId, ids, extraPrimaryAssetIds, true, extraRegistryCapabilityIds);
 }
 export function storyboardImageSourceFromContext(context: StoryboardImageSourceContext, scope: Scope, row?: any, links?: number[]) {
   if (!row && !links) return buildStoryboardImageSource(context, scope);
@@ -179,6 +215,7 @@ export function storyboardImageSourceFromContext(context: StoryboardImageSourceC
 type Producer = { producerType: string; producerRef: string | null; producerInput: any };
 export type CurrentImageAttemptHooks = {
   onAttemptCreated?: (q: Knex.Transaction, attemptId: string) => Promise<void>;
+  preRecordOutput?: (q: Knex.Transaction, attempt: any, output: Output) => Promise<string | null>;
   validateOutput?: (q: Knex.Transaction, attempt: any, output: Output, scope: Scope) => Promise<string | null>;
   onSuccess?: (q: Knex.Transaction, attempt: any, output: Output) => Promise<void>;
   onStale?: (q: Knex.Transaction, attempt: any, output: Output | null, staleCode: string) => Promise<void>;
@@ -186,9 +223,9 @@ export type CurrentImageAttemptHooks = {
 };
 export async function beginCurrentImageAttempt(scope: Scope, operationKey: ProductionOperationKey,
   prepareProducer: (q: Knex.Transaction, source: Awaited<ReturnType<typeof captureStoryboardImageSource>>) => Promise<Producer> | Producer,
-  transaction?: Knex.Transaction, hooks: CurrentImageAttemptHooks = {}) {
+  transaction?: Knex.Transaction, hooks: CurrentImageAttemptHooks = {}, sourceContext?: StoryboardImageSourceContext) {
   const begin = async (q: Knex.Transaction) => {
-    const source = await captureStoryboardImageSource(q, scope);
+    const source = sourceContext ? buildStoryboardImageSource(sourceContext, scope) : await captureStoryboardImageSource(q, scope);
     const producer = await prepareProducer(q, source);
     const admission = await readProductionOperationAdmission(operationKey, scope, q);
     if (!admission.enforced || !admission.allowed || !admission.snapshotConsistent) fail(admission.code, admission.reason ?? "当前生产工序未放行");
@@ -199,7 +236,7 @@ export async function beginCurrentImageAttempt(scope: Scope, operationKey: Produ
     await q("o_productionAttempt").insert({ attemptId, projectId: scope.projectId, scriptId: scope.scriptId,
       profileKey: admission.profileKey, profileVersion: Number(admission.profileVersion!.slice(1)), profileDefinitionHash: admission.profileDefinitionHash,
       recipeKey: admission.recipeKey, recipeVersion: admission.recipeVersion, recipeDefinitionHash: admission.recipeDefinitionHash,
-      stageKey: admission.stageKey, operationKey, subjectType, subjectId: scope.storyboardId, sourceAdapterKey: adapterKey,
+      stageKey: admission.stageKey, operationKey, subjectType, subjectId: scope.storyboardId, sourceAdapterKey: source.snapshot.adapterKey,
       sourceHash: source.sourceHash, sourceSnapshot: canonicalJson(source.snapshot), producerType: producer.producerType,
       producerRef: producer.producerRef, producerInput: canonicalJson(producer.producerInput), controlContextHash: sha256(controlSnapshot),
       controlSnapshot: canonicalJson(controlSnapshot), status: "RUNNING", startedAt: now, updatedAt: now });
@@ -211,17 +248,29 @@ export async function beginCurrentImageAttempt(scope: Scope, operationKey: Produ
   return transaction ? begin(transaction) : database().transaction(begin);
 }
 
-export async function beginStoryboardImageAttempt(scope: Scope, requestModel?: string, transaction?: Knex.Transaction) {
+export async function beginStoryboardImageAttempt(scope: Scope, requestModel?: string, transaction?: Knex.Transaction,
+  sourceContext?: StoryboardImageSourceContext) {
   return beginCurrentImageAttempt(scope, generateOperationKey, async (q, source) => {
-    if (source.producerType !== "REAL_ASSET_DIRECT" && source.producerType !== "AI_MODEL")
+    if (source.producerType !== "REAL_ASSET_DIRECT" && source.producerType !== "AI_MODEL" && source.producerType !== "CAPABILITY")
       fail("CAPABILITY_INPUT_UNSUPPORTED", "当前生产方式不能进入普通分镜图片生成");
+    if (source.producerType === "CAPABILITY") {
+      if (requestModel) fail("MODEL_CONFIG_MISMATCH", "Registry Capability 不接受旧图片模型覆盖");
+      const input = source.producerInput;
+      const plan = await createPinnedImageProducer(q, source.registryVersion, source.producerRef!, input.prompt, input.width, input.height,
+        source.registryEndpoint);
+      return { producerType: "CAPABILITY", producerRef: source.producerRef, producerInput: plan };
+    }
     if (source.producerType === "AI_MODEL") {
       if (!source.effectiveCapability) fail("CAPABILITY_NOT_FOUND", "当前图片能力解析失败");
       await validateSelectedImageCapability(q, source.effectiveCapability);
     }
     if (requestModel && source.producerType === "AI_MODEL" && requestModel !== source.producerRef) fail("MODEL_CONFIG_MISMATCH", "所选模型与当前项目配置不同，请保存配置后重试");
     return { producerType: source.producerType, producerRef: source.producerRef, producerInput: source.producerInput };
-  }, transaction);
+  }, transaction, {}, sourceContext);
+}
+
+export async function captureStoryboardImageSourceBatch(q: Knex.Transaction, projectId: number, scriptId: number, ids: number[]) {
+  return loadStoryboardImageSourceContext(q, projectId, scriptId, ids);
 }
 
 async function outputProvenanceCode(q: Knex.Transaction, attempt: any, output: Output, scope: Scope): Promise<string | null> {
@@ -281,6 +330,21 @@ export async function finishCurrentImageAttempt(attemptId: string, output: Outpu
     if (!attempt) fail("PRODUCTION_ATTEMPT_NOT_FOUND", "图片生产任务不存在");
     const scope = { projectId: attempt.projectId, scriptId: attempt.scriptId, storyboardId: attempt.subjectId };
     const now = Date.now(), outputRef = canonicalJson(output);
+    if (attempt.status !== "RUNNING" && attempt.status !== "STALE") return { attemptId, status: attempt.status };
+    if (hooks.preRecordOutput) {
+      const rejected = await hooks.preRecordOutput(q, attempt, output);
+      if (rejected) {
+        if (attempt.status === "STALE") return { attemptId, status: "STALE", staleCode: attempt.staleCode ?? rejected };
+        await q("o_productionAttempt").where({ attemptId }).update({ status: "STALE", staleCode: rejected,
+          staleReason: "Capability 输出来源证明失败", completedAt: now, updatedAt: now });
+        const owned = await q("o_storyboard").where({ id: scope.storyboardId, projectId: scope.projectId, scriptId: scope.scriptId,
+          activeImageAttemptId: attemptId }).first();
+        if (owned) await q("o_storyboard").where({ id: scope.storyboardId, projectId: scope.projectId, scriptId: scope.scriptId,
+          activeImageAttemptId: attemptId }).update({ activeImageAttemptId: null, state: owned.filePath ? "已完成" : "未生成", reason: rejected });
+        await hooks.onStale?.(q, attempt, null, rejected);
+        return { attemptId, status: "STALE", staleCode: rejected };
+      }
+    }
     if (attempt.status === "STALE") {
       await q("o_productionAttempt").where({ attemptId }).update({ outputRef, completedAt: now, updatedAt: now });
       await hooks.onStale?.(q, attempt, output, attempt.staleCode ?? "PRODUCTION_ATTEMPT_SUPERSEDED");
@@ -289,7 +353,8 @@ export async function finishCurrentImageAttempt(attemptId: string, output: Outpu
     if (attempt.status !== "RUNNING") return { attemptId, status: attempt.status };
     const storyboard = await q("o_storyboard").where({ id: scope.storyboardId, projectId: scope.projectId, scriptId: scope.scriptId }).first();
     let staleCode: string | null = !storyboard ? "PRODUCTION_SUBJECT_CHANGED" : storyboard.activeImageAttemptId !== attemptId ? "PRODUCTION_ATTEMPT_SUPERSEDED" : null;
-    if (!staleCode) staleCode = hooks.validateOutput ? await hooks.validateOutput(q, attempt, output, scope) : await outputProvenanceCode(q, attempt, output, scope);
+    if (!staleCode) staleCode = hooks.validateOutput ? await hooks.validateOutput(q, attempt, output, scope) :
+      hooks.preRecordOutput ? null : await outputProvenanceCode(q, attempt, output, scope);
     if (!staleCode) staleCode = await currentImageDrift(q, attempt, storyboard, scope);
     if (staleCode) {
       await q("o_productionAttempt").where({ attemptId }).update({ status: "STALE", staleCode, staleReason: "生产来源或控制状态已变化，输出仅保留在任务记录中", outputRef, completedAt: now, updatedAt: now });
@@ -333,6 +398,14 @@ export async function runStoryboardImageAttempt(attempt: Awaited<ReturnType<type
     if (attempt.producerType === "REAL_ASSET_DIRECT") {
       output = { filePath: attempt.producerInput.filePath, mediaType: "image/*", assetId: attempt.producerInput.assetId,
         imageId: attempt.producerInput.imageId, assetKey: attempt.producerInput.assetKey };
+    } else if (attempt.producerType === "CAPABILITY") {
+      const execution = await executePinnedImageCapability(attempt.attemptId);
+      if (execution.status === "RUNNING") {
+        const current = await database()("o_productionAttempt").where({ attemptId: attempt.attemptId }).first();
+        return { attemptId: attempt.attemptId, status: current?.status ?? "RUNNING" };
+      }
+      output = execution.output;
+      return finishCurrentImageAttempt(attempt.attemptId, output, { preRecordOutput: preRecordCapabilityOutput });
     } else {
       const input = attempt.producerInput;
       const model = await requireModel(attempt.projectId, "image");
@@ -347,8 +420,57 @@ export async function runStoryboardImageAttempt(attempt: Awaited<ReturnType<type
     return finishStoryboardImageAttempt(attempt.attemptId, output);
   } catch (error) {
     await failStoryboardImageAttempt(attempt.attemptId, error);
-    return { attemptId: attempt.attemptId, status: "FAILED" };
+    const row = await database()("o_productionAttempt").where({ attemptId: attempt.attemptId }).first();
+    return { attemptId: attempt.attemptId, status: row?.status ?? "FAILED" };
   }
+}
+
+export async function preRecordCapabilityOutput(q: Knex.Transaction, attempt: any, output: Output) {
+  let reservedId: string | null = null;
+  try { reservedId = parseJson(attempt.producerInput)?.reservedExecutionId ?? null; } catch { /* invalid pin */ }
+  const execution = reservedId ? await q("o_capabilityExecution").where({ executionId: reservedId }).first() : null;
+  return proveCapabilityImageOutput(attempt, execution, output as CapabilityImageOutput) ? null : provenanceMismatchCode;
+}
+
+export async function loadCurrentCapabilityEvidence(q: Knex.Transaction, currentAttempts: any[]) {
+  const ids = [...new Set(currentAttempts.filter(row => row?.producerType === "CAPABILITY").map(row => {
+    try { return parseJson(row.producerInput)?.reservedExecutionId as string | undefined; } catch { return undefined; }
+  }).filter((id): id is string => !!id))].sort();
+  const rows = ids.length ? await q("o_capabilityExecution").whereIn("executionId", ids) : [];
+  const byId = new Map<string, any>(rows.map(row => [row.executionId, row]));
+  const projection = currentAttempts.filter(row => row?.producerType === "CAPABILITY").map(row => {
+    let id: string | null = null;
+    try { id = parseJson(row.producerInput)?.reservedExecutionId ?? null; } catch { /* corrupt pin is explicit missing evidence */ }
+    const execution = id ? byId.get(id) : null;
+    let inputs: any = null, image: any = null;
+    try { inputs = execution ? JSON.parse(execution.inputs) : null; } catch { /* corrupt evidence */ }
+    try { image = execution ? JSON.parse(execution.outputs)?.image ?? null : null; } catch { /* corrupt evidence */ }
+    return { attemptId: row.attemptId, reservedExecutionId: id, present: !!execution,
+      executionId: execution?.executionId ?? null, status: execution?.status ?? null,
+      capabilityId: execution?.capabilityId ?? null, definitionHash: execution?.definitionHash ?? null,
+      endpointId: execution?.endpointId ?? null, inputs, promptId: execution?.promptId ?? null,
+      image: image ? { filePath: image.filePath ?? null, mimeType: image.mimeType ?? null,
+        outputHash: image.outputHash ?? null, byteLength: image.byteLength ?? null } : null };
+  }).sort((a, b) => a.attemptId.localeCompare(b.attemptId));
+  return { byId, projection };
+}
+
+export function assessCurrentImageOutput(row: any, current: any, sourceHash: string | null,
+  evidence: Map<string, any>): { freshness: "NONE" | "LEGACY" | "CURRENT" | "STALE"; staleCode: string | null } {
+  if (!row.filePath) return { freshness: "NONE", staleCode: null };
+  if (!row.currentImageAttemptId) return { freshness: "LEGACY", staleCode: null };
+  let output: any = null;
+  try { output = parseJson(current?.outputRef); } catch { /* invalid persisted provenance */ }
+  if (!current || current.status !== "SUCCEEDED" || output?.filePath !== row.filePath)
+    return { freshness: "STALE", staleCode: "PRODUCTION_OUTPUT_PROVENANCE_MISMATCH" };
+  if (current.producerType === "CAPABILITY") {
+    let reservedId: string | null = null;
+    try { reservedId = parseJson(current.producerInput)?.reservedExecutionId ?? null; } catch { /* invalid pin */ }
+    if (!reservedId || !proveCapabilityImageOutput(current, evidence.get(reservedId), output))
+      return { freshness: "STALE", staleCode: provenanceMismatchCode };
+  }
+  if (!sourceHash || current.sourceHash !== sourceHash) return { freshness: "STALE", staleCode: "PRODUCTION_SOURCE_CHANGED" };
+  return { freshness: "CURRENT", staleCode: null };
 }
 
 export async function readImageProvenance(projectId: number, scriptId: number, storyboards: any[]) {
@@ -360,23 +482,23 @@ export async function readImageProvenance(projectId: number, scriptId: number, s
     try { sourceContext = await loadStoryboardImageSourceContext(q, projectId, scriptId, ids); }
     catch (error) { if (!(error instanceof RecipeError)) throw error; }
     const byId = new Map(attempts.map(a => [a.attemptId, a]));
+    const currentRows = storyboards.map(row => row.currentImageAttemptId ? byId.get(row.currentImageAttemptId) : null).filter(Boolean);
+    const capabilityEvidence = await loadCurrentCapabilityEvidence(q, currentRows);
     const latest = new Map<number, any>();
     for (const attempt of attempts) if (!latest.has(attempt.subjectId)) latest.set(attempt.subjectId, attempt);
     const result = new Map<number, any>();
     for (const requestedRow of storyboards) {
       const row = sourceContext?.rows.get(requestedRow.id) ?? requestedRow;
       const current = row.currentImageAttemptId ? byId.get(row.currentImageAttemptId) : null;
-      let freshness: "NONE" | "LEGACY" | "CURRENT" | "STALE" = !row.filePath ? "NONE" : !row.currentImageAttemptId ? "LEGACY" : "STALE";
-      let staleCode: string | null = null;
-      if (freshness === "STALE") {
+      let assessment = assessCurrentImageOutput(row, current, null, capabilityEvidence.byId);
+      if (assessment.freshness === "STALE") {
         try {
           if (!sourceContext) throw new RecipeError("RECIPE_CONTEXT_MISMATCH", "精确 Recipe 上下文不可证明", 409);
           const source = buildStoryboardImageSource(sourceContext, { projectId, scriptId, storyboardId: row.id });
-          const output = parseJson(current?.outputRef);
-          if (current?.status === "SUCCEEDED" && output?.filePath === row.filePath && source.sourceHash === current.sourceHash) freshness = "CURRENT";
-          else staleCode = !current || output?.filePath !== row.filePath ? "PRODUCTION_OUTPUT_PROVENANCE_MISMATCH" : "PRODUCTION_SOURCE_CHANGED";
-        } catch { staleCode = "PRODUCTION_SOURCE_CHANGED"; }
+          assessment = assessCurrentImageOutput(row, current, source.sourceHash, capabilityEvidence.byId);
+        } catch { if (assessment.staleCode !== provenanceMismatchCode) assessment = { freshness: "STALE", staleCode: "PRODUCTION_SOURCE_CHANGED" }; }
       }
+      const { freshness, staleCode } = assessment;
       result.set(row.id, { freshness, currentAttemptId: row.currentImageAttemptId ?? null, activeAttemptId: row.activeImageAttemptId ?? null,
         producerType: current?.producerType ?? null, producerRef: current?.producerRef ?? null, sourceHash: current?.sourceHash ?? null,
         staleCode, staleReason: staleCode ? "当前镜头来源与保留图片不一致" : null, latestAttemptStatus: latest.get(row.id)?.status ?? null });

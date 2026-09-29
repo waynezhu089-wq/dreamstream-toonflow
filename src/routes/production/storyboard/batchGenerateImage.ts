@@ -1,7 +1,7 @@
 import { isAdvertisement, produceAdvertisementStoryboard } from "@/services/storyboardProduction";
 import { resolveProfile } from "@/services/orchestrator/profileRegistry";
 import { isControlledSemanticV2 } from "@/services/orchestrator/revisionWriteSafety";
-import { beginStoryboardImageAttempt, runStoryboardImageAttempt } from "@/services/productionAttempt";
+import { beginStoryboardImageAttempt, captureStoryboardImageSourceBatch, runStoryboardImageAttempt } from "@/services/productionAttempt";
 import type { Knex } from "knex";
 import express from "express";
 import u from "@/utils";
@@ -49,7 +49,8 @@ export default router.post(
         try {
           const attempts = await (u.db as Knex).transaction(async trx => {
             const created = [];
-            for (const storyboardId of ids) created.push(await beginStoryboardImageAttempt({ projectId, scriptId, storyboardId }, req.body.model, trx));
+            const sourceContext = await captureStoryboardImageSourceBatch(trx, projectId, scriptId, ids);
+            for (const storyboardId of ids) created.push(await beginStoryboardImageAttempt({ projectId, scriptId, storyboardId }, req.body.model, trx, sourceContext));
             return created;
           });
           res.status(200).send(success(attempts.map(attempt => ({ id: attempt.storyboardId, attemptId: attempt.attemptId, state: "生成中", src: null }))));
