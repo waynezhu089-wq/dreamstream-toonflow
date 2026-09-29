@@ -6,6 +6,8 @@ import { assessCurrentImageOutput, captureStoryboardImageSourceContext, loadCurr
 import { canonicalJson, sha256 } from "@/services/supervisor/contract";
 import { reviewForGate, storyboardSemanticV2Snapshot } from "@/services/supervisor/registry";
 import { productionSpec } from "@/services/storyboardProduction";
+import { resolveEffectiveImageCapability } from "@/services/recipeImageCapability";
+import { isRegistryImageSelection } from "@/services/storyboardImageCapability";
 import { recipeHash, validateRecipeDefinition } from "@/services/recipeContract";
 import { definitionHash, positiveId, ProfileError, versionNumber } from "./profileDefinition";
 import { resolveProfile } from "./profileRegistry";
@@ -93,6 +95,7 @@ async function capture(q: Knex.Transaction, request: Request) {
   const binding = await q("o_projectProfileBinding").where({ projectId }).first();
   const recipeBinding = await q("o_projectRecipeBinding").where({ projectId }).first();
   let recipe: any = null;
+  let recipeDefinition: ReturnType<typeof validateRecipeDefinition> | null = null;
   if (recipeBinding) {
     const exact = await q("o_recipeVersion").where({ recipeKey: recipeBinding.recipeKey, version: recipeBinding.recipeVersion }).first();
     if (!exact) reject("REVISION_CONTEXT_INVALID", "精确 Recipe 版本不存在");
@@ -103,6 +106,7 @@ async function capture(q: Knex.Transaction, request: Request) {
     }
     recipe = { key: recipeBinding.recipeKey, version: recipeBinding.recipeVersion, definitionHash: exact.definitionHash,
       bindingUpdatedAt: recipeBinding.updatedAt };
+    recipeDefinition = parsed;
   }
   const rows = await q("o_storyboard").where({ projectId, scriptId }).whereNull("retiredAt").orderBy("index", "asc").orderBy("id", "asc");
   if (rows.length > MAX_SHOTS) reject("REVISION_SNAPSHOT_TOO_LARGE", "分镜数量超过 Preview 上限");
@@ -148,7 +152,23 @@ async function capture(q: Knex.Transaction, request: Request) {
   const reviewEvidence = await q("o_supervisorReview").where({ projectId, scriptId, reviewKey: review.reviewKey })
     .orderBy("createdAt", "desc").orderBy("reviewId", "desc")
     .first("reviewId", "targetHash", "controlContextHash", "decision", "source", "createdAt");
-  const sourceContext = await captureStoryboardImageSourceContext(q, projectId, scriptId, rows.map(row => row.id), [...requestedAssets]);
+  // EDIT/ADD can introduce a Registry producer absent from every persisted AI
+  // row. Resolve those IDs with the same D-C selector before the one bounded
+  // Source-context prefetch; the canonical Source builder remains shared.
+  const proposedRegistryIds = new Set<string>();
+  const persistedById = new Map(rows.map(row => [Number(row.id), row]));
+  for (const op of request.changeSet.operations) {
+    if (op.type !== "EDIT" && op.type !== "ADD") continue;
+    const persisted = op.type === "EDIT" ? persistedById.get(op.storyboardId) : null;
+    if (op.type === "EDIT" && !persisted) continue; // plan() rejects the invalid target.
+    const currentSpec = persisted ? productionSpec(persisted) : null;
+    const proposedMode = op.type === "ADD" ? op.storyboard.productionMode : op.patch.productionMode ?? currentSpec?.productionMode ?? null;
+    const selected = resolveEffectiveImageCapability(currentSpec?.capabilityId ?? null, proposedMode, recipeDefinition);
+    if (proposedMode === "AI_TEXT_TO_IMAGE" && isRegistryImageSelection(selected) && selected.capabilityId)
+      proposedRegistryIds.add(selected.capabilityId);
+  }
+  const sourceContext = await captureStoryboardImageSourceContext(q, projectId, scriptId, rows.map(row => row.id),
+    [...requestedAssets], [...proposedRegistryIds]);
   const result = { projectId, scriptId, revisionEpoch, profile: { key: profile.profileKey, version: profile.version, source: profile.source,
       persisted: profile.persisted, definitionHash: definitionHash(profile.definition), bindingUpdatedAt: binding?.updatedAt ?? null,
       definition: profile.definition }, recipe, ownerStageKey: definition.ownerStageKey, descendants: [...descendants].sort(),

@@ -9,7 +9,7 @@ const builtin = "toonflow.image.v1";
 type ImageCapabilitySelection = { capabilityId: string | null; resolvedFrom: "SHOT" | "RECIPE" | "BUILTIN" };
 
 export function resolveEffectiveImageCapability(explicitId: string | null, mode: string | null,
-  recipe: RecipeContext): ImageCapabilitySelection {
+  recipe: Pick<NonNullable<RecipeContext>, "capabilityRefs"> | null): ImageCapabilitySelection {
   if (mode !== "AI_TEXT_TO_IMAGE") return { capabilityId: explicitId, resolvedFrom: explicitId ? "SHOT" : "BUILTIN" };
   if (explicitId) return { capabilityId: explicitId, resolvedFrom: "SHOT" };
   const ref = recipe?.capabilityRefs.find(item => item.roleKey === "storyboard-image.text-to-image" &&
