@@ -178,6 +178,78 @@ test('explicit Shot Registry executes without a Recipe or builtin vendor branch'
   assert.equal(f.vendorCalls.length, 0);
 });
 
+test('authenticated Controlled V2 Shot override is execution-only, scoped, validated and clearable', async t => {
+  const f = await setup(t);
+  await f.db.schema.createTable('o_user', table => { table.integer('id').primary(); table.string('name'); });
+  await f.db('o_user').insert({ id: 17, name: 'Studio owner' });
+  const previousOwner = process.env.DS_STUDIO_OWNER_USER_ID;
+  process.env.DS_STUDIO_OWNER_USER_ID = '17';
+  t.after(() => { if (previousOwner === undefined) delete process.env.DS_STUDIO_OWNER_USER_ID;
+    else process.env.DS_STUDIO_OWNER_USER_ID = previousOwner; });
+  const express = require('express'), app = express(); app.use(express.json());
+  app.use((req, _res, next) => { req.user = req.headers.authorization === 'Bearer owner' ? { id: 17 } : null; next(); });
+  app.use('/api/storyboardCapability', f.load('routes/storyboardCapability').default);
+  app.use('/api/production/storyboard/getStoryboardData', f.load('routes/production/storyboard/getStoryboardData').default);
+  const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const post = async (path, body, owner = true) => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}${path}`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json', authorization: owner ? 'Bearer owner' : '' }, body: JSON.stringify(body) });
+    return { status: response.status, body: await response.json() };
+  };
+  const request = { ...scope, storyboardId: f.shotScope.storyboardId, capabilityId: f.capabilityId };
+  const running = await f.attempt.beginStoryboardImageAttempt(f.shotScope);
+  assert.equal((await f.attemptRow(running.attemptId)).status, 'RUNNING');
+  const before = await f.row(), stages = await f.db('o_stageRun').where(scope).orderBy('stageKey');
+  const semantic = row => f.load('services/supervisor/registry').storyboardSemanticV2Snapshot([row], new Map());
+  const semanticBefore = semantic(before);
+  const epoch = (await f.db('o_script').where({ id: scope.scriptId }).first()).revisionEpoch;
+  const count = () => f.db('o_productionAttempt').where(scope).count('* as n').first().then(row => Number(row.n));
+  const attempts = await count();
+  assert.equal((await post('/api/storyboardCapability', request, false)).status, 403);
+  assert.equal((await post('/api/storyboardCapability', { ...request, scriptId: 11 })).status, 409);
+  assert.equal((await post('/api/storyboardCapability', { ...request, projectId: 2 })).status, 404);
+  assert.equal((await post('/api/storyboardCapability', { ...request, storyboardId: 9999 })).status, 409);
+  assert.equal((await post('/api/storyboardCapability', { ...request, capabilityId: 'missing.v1' })).body.code, 'CAPABILITY_NOT_FOUND');
+  assert.equal((await f.row()).productionSpec, before.productionSpec);
+  const valid = await f.db('o_capabilityVersion').where({ capabilityId: f.capabilityId }).first();
+  await f.db('o_capabilityVersion').where({ capabilityId: f.capabilityId }).update({ status: 'DRAFT' });
+  assert.equal((await post('/api/storyboardCapability', request)).body.code, 'CAPABILITY_NOT_VERIFIED');
+  await f.db('o_capabilityVersion').where({ capabilityId: f.capabilityId }).update({ status: 'DISABLED' });
+  assert.equal((await post('/api/storyboardCapability', request)).body.code, 'CAPABILITY_DISABLED');
+  await f.db('o_capabilityVersion').where({ capabilityId: f.capabilityId }).update({ status: 'VERIFIED',
+    inputPorts: JSON.stringify([{ name: 'prompt', type: 'text', required: true, label: 'Prompt' }]) });
+  assert.equal((await post('/api/storyboardCapability', request)).body.code, 'CAPABILITY_ROLE_INCOMPATIBLE');
+  assert.equal((await f.row()).productionSpec, before.productionSpec);
+  assert.equal(await count(), attempts);
+  await f.db('o_capabilityVersion').where({ capabilityId: f.capabilityId }).update({ inputPorts: valid.inputPorts });
+  const saved = await post('/api/storyboardCapability', request);
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  const afterSave = await f.row();
+  assert.deepEqual(semantic(afterSave), semanticBefore);
+  for (const key of ['state', 'filePath', 'currentImageAttemptId', 'activeImageAttemptId'])
+    assert.equal(afterSave[key], before[key], key);
+  assert.equal(await count(), attempts);
+  const read = await post('/api/production/storyboard/getStoryboardData', { ...scope, page: 1, limit: 10 });
+  assert.equal(read.body.data.data.find(row => row.id === request.storyboardId).capabilityId, f.capabilityId);
+  const explicit = await f.db.transaction(q => f.attempt.captureStoryboardImageSource(q, f.shotScope));
+  assert.equal(explicit.effectiveCapability.resolvedFrom, 'SHOT');
+  assert.equal((await post('/api/storyboardCapability', { ...request, capabilityId: null })).status, 200);
+  const fallback = await f.db.transaction(q => f.attempt.captureStoryboardImageSource(q, f.shotScope));
+  assert.equal(fallback.effectiveCapability.resolvedFrom, 'RECIPE');
+  const after = await f.row();
+  assert.deepEqual(semantic(after), semanticBefore);
+  assert.deepEqual(f.load('services/storyboardProduction').semanticProductionSpec(
+    f.load('services/storyboardProduction').productionSpec(after)),
+  f.load('services/storyboardProduction').semanticProductionSpec(f.load('services/storyboardProduction').productionSpec(before)));
+  for (const key of ['prompt', 'videoDesc', 'state', 'filePath', 'currentImageAttemptId', 'activeImageAttemptId'])
+    assert.equal(after[key], before[key], key);
+  assert.equal((await f.db('o_script').where({ id: scope.scriptId }).first()).revisionEpoch, epoch);
+  assert.deepEqual(await f.db('o_stageRun').where(scope).orderBy('stageKey'), stages);
+  assert.equal(await count(), attempts);
+  assert.equal(f.calls.filter(item => item === '/prompt').length, 0);
+});
+
 test('B3 EDIT direct to Registry AI prefetches proposed exact Source and Confirm recapture detects definition drift', async t => {
   const f = await setup(t, { direct: true });
   const direct = await f.attempt.beginStoryboardImageAttempt(f.shotScope);

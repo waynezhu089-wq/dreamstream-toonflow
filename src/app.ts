@@ -221,6 +221,7 @@ export default async function startServe(randomPort: Boolean = false) {
 
   registerProductionGate(app);
   app.use("/api/production/storyboard/composite", composite);
+  app.use("/api/storyboardCapability", (await import("@/routes/storyboardCapability")).default);
   app.use("/api/capabilities", capabilities);
   app.use("/api/skills", skills);
   app.use("/api/productionProfiles", productionProfiles);
