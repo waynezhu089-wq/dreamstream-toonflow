@@ -100,6 +100,7 @@ export default async function startServe(randomPort: Boolean = false) {
     fs.mkdirSync(ossDir, { recursive: true });
   }
   console.log("文件目录:", ossDir);
+  const serveOriginalOssFile = express.static(ossDir, { acceptRanges: false });
   app.use(
     "/oss",
     (req, res, next) => {
@@ -129,7 +130,7 @@ export default async function startServe(randomPort: Boolean = false) {
           sizeOpts = { type: "percentage", value: pct };
         } else {
           // 无效的 size 参数，降级返回原图
-          express.static(ossDir, { acceptRanges: false })(req, res, next);
+          serveOriginalOssFile(req, res, next);
           return;
         }
 
@@ -138,19 +139,33 @@ export default async function startServe(randomPort: Boolean = false) {
         const dir = path.dirname(req.path);
         const smallImagePath = path.join(smallImageBaseDir, dir, `${base}_${sizeSubDir}${ext}`);
 
-        ensureThumbnail(originalPath, smallImagePath, sizeOpts).then((thumbnailPath) => {
-          if (thumbnailPath) {
-            res.sendFile(thumbnailPath);
-          } else {
-            // 缩略图生成失败，降级返回原图
-            express.static(ossDir, { acceptRanges: false })(req, res, next);
+        ensureThumbnail(originalPath, smallImagePath, sizeOpts).then(async (thumbnailPath) => {
+          if (!thumbnailPath) return serveOriginalOssFile(req, res, next);
+          try {
+            const stat = await fs.promises.stat(thumbnailPath);
+            if (!stat.isFile()) return serveOriginalOssFile(req, res, next);
+            const image = fs.createReadStream(thumbnailPath);
+            image.once("error", (error) => {
+              console.warn("[oss] 缩略图读取失败:", error);
+              if (res.headersSent) res.destroy(error);
+              else serveOriginalOssFile(req, res, next);
+            });
+            res.type(thumbnailPath);
+            image.pipe(res);
+          } catch (error) {
+            console.warn("[oss] 缩略图回传失败，降级返回原图:", error);
+            serveOriginalOssFile(req, res, next);
           }
+        }).catch((error) => {
+          console.warn("[oss] 缩略图处理失败，降级返回原图:", error);
+          if (res.headersSent) res.destroy(error);
+          else serveOriginalOssFile(req, res, next);
         });
         return;
       }
       next();
     },
-    express.static(ossDir, { acceptRanges: false }),
+    serveOriginalOssFile,
   );
   // skills 静态资源
   const skillsDir = u.getPath("skills");

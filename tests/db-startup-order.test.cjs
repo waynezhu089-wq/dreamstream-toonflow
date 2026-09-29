@@ -9,6 +9,7 @@ const knex = require('knex');
 const Database = require('better-sqlite3');
 const ts = require('typescript');
 const esbuild = require('esbuild');
+const sharp = require('sharp');
 
 const root = path.resolve(__dirname, '..');
 const sourceModel = path.join(root, 'data', 'models', 'all-MiniLM-L6-v2');
@@ -80,10 +81,12 @@ async function freePort() {
   return port;
 }
 
-async function startOnce(t, dir) {
+async function startOnce(t, dir, options = {}) {
   const port = await freePort();
   const bundle = await currentAppBundle();
-  const child = spawn(process.execPath, ['--require', path.join(__dirname, 'helpers', 'db-startup-port.cjs'), bundle], {
+  const preloads = ['--require', path.join(__dirname, 'helpers', 'db-startup-port.cjs')];
+  if (options.failThumbnailSendFile) preloads.push('--require', path.join(__dirname, 'helpers', 'oss-sendfile-failure.cjs'));
+  const child = spawn(process.execPath, [...preloads, bundle], {
     cwd: root, env: { ...process.env, NODE_ENV: 'prod', TOONFLOW_DATA_DIR: dir,
       TOONFLOW_DB_STARTUP_TEST_PORT: String(port), DS_REVISION_CONFIRM_ENABLED: 'false' },
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
@@ -111,7 +114,7 @@ async function startOnce(t, dir) {
         body: JSON.stringify({ username: account.name, password: account.password }),
       });
       assert.equal(response.status, 200, `startup HTTP route not ready: ${await response.text()}`);
-      return { stop, output: () => output, errors: () => errorOutput };
+      return { stop, port, output: () => output, errors: () => errorOutput };
     }
     await new Promise(resolve => setTimeout(resolve, 100));
   }
@@ -140,6 +143,50 @@ test('fresh empty SQLite first boot creates base and complete B3-B schema before
   assert.ok(schema.tableCount >= 45);
   assert.doesNotMatch(app.errors(), /SqliteError|UnhandledPromiseRejection|no such column/);
   await app.stop();
+});
+
+test('real /oss middleware serves original, generated thumbnail and original fallback', async t => {
+  const { dir } = temporaryData(t);
+  const original = path.join(dir, 'oss', 'capability', 'thumbnail-test', 'image-0.png');
+  fs.mkdirSync(path.dirname(original), { recursive: true });
+  const source = await sharp({ create: { width: 64, height: 64, channels: 4, background: '#164070' } }).png().toBuffer();
+  fs.writeFileSync(original, source);
+  const app = await startOnce(t, dir, { failThumbnailSendFile: true });
+  try {
+    const base = `http://127.0.0.1:${app.port}/oss/capability/thumbnail-test`;
+    const full = await fetch(`${base}/image-0.png`);
+    assert.equal(full.status, 200);
+    assert.match(full.headers.get('content-type'), /^image\/png/);
+    assert.deepEqual(Buffer.from(await full.arrayBuffer()), source);
+
+    const thumb = await fetch(`${base}/image-0.png?size=20`);
+    assert.equal(thumb.status, 200);
+    assert.match(thumb.headers.get('content-type'), /^image\/png/);
+    const thumbBytes = Buffer.from(await thumb.arrayBuffer());
+    assert.deepEqual(await sharp(thumbBytes).metadata().then(({ width, height }) => ({ width, height })),
+      { width: 13, height: 13 });
+    assert.ok(fs.existsSync(path.join(dir, 'oss', 'smallImage', 'capability', 'thumbnail-test', 'image-0_20p.png')));
+
+    const invalid = await fetch(`${base}/image-0.png?size=not-a-size`);
+    assert.equal(invalid.status, 200);
+    assert.deepEqual(Buffer.from(await invalid.arrayBuffer()), source);
+
+    const bad = path.join(dir, 'oss', 'capability', 'thumbnail-test', 'bad.png');
+    const badBytes = Buffer.from('invalid image bytes');
+    fs.writeFileSync(bad, badBytes);
+    const fallback = await fetch(`${base}/bad.png?size=20`);
+    assert.equal(fallback.status, 200);
+    assert.deepEqual(Buffer.from(await fallback.arrayBuffer()), badBytes);
+
+    const unreadable = path.join(dir, 'oss', 'capability', 'thumbnail-test', 'unreadable.png');
+    fs.writeFileSync(unreadable, source);
+    // ensureThumbnail considers an existing path ready; a directory at that
+    // location makes the HTTP send fail and must still preserve original fallback.
+    fs.mkdirSync(path.join(dir, 'oss', 'smallImage', 'capability', 'thumbnail-test', 'unreadable_20p.png'));
+    const sendFailure = await fetch(`${base}/unreadable.png?size=20`);
+    assert.equal(sendFailure.status, 200);
+    assert.deepEqual(Buffer.from(await sendFailure.arrayBuffer()), source);
+  } finally { await app.stop(); }
 });
 
 test('one startup upgrades an existing real base schema while retaining business rows', async t => {
