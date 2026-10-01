@@ -40,6 +40,7 @@ import { initializeSupervisorSchema } from "@/lib/supervisorSchema";
 import { initializeRevisionSchema } from "@/lib/revisionSchema";
 import { initializeVideoProductionSchema } from "@/lib/videoProductionSchema";
 import supervisor from "@/routes/supervisor";
+import validateAcceptedVideoMaterialRoute from "@/routes/production/workbench/validateAcceptedVideoMaterial";
 
 const app = express();
 const server = http.createServer(app);
@@ -222,6 +223,7 @@ export default async function startServe(randomPort: Boolean = false) {
   });
 
   registerProductionGate(app);
+  app.use("/api/production/workbench/validateAcceptedVideoMaterial", validateAcceptedVideoMaterialRoute);
   app.use("/api/production/storyboard/composite", composite);
   app.use("/api/storyboardCapability", (await import("@/routes/storyboardCapability")).default);
   app.use("/api/capabilities", capabilities);
