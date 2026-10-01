@@ -8,17 +8,37 @@ import { assertCurrentPermission } from "@/services/orchestrator/revisionWorkGua
 import { ProfileError } from "@/services/orchestrator/profileDefinition";
 import { currentRevisionEpoch } from "@/services/orchestrator/revisionBoundary";
 import { guardedVideoIsCurrent } from "@/services/orchestrator/revisionMediaRead";
+import { acceptE001Video } from "@/services/orchestrator/videoProduction";
+import { videoProfileClassForProject } from "@/services/orchestrator/videoProductionProfile";
 const router = express.Router();
 
 export default router.post(
   "/",
   validateFields({
+    projectId: z.number().optional(),
+    scriptId: z.number().optional(),
     trackId: z.number(),
     videoId: z.number(),
+    acceptanceId: z.string().uuid().optional(),
+    reason: z.string().max(1000).nullable().optional(),
   }),
   async (req, res) => {
-    const { trackId, videoId } = req.body;
+    const { projectId, scriptId, trackId, videoId, acceptanceId, reason } = req.body;
     try {
+      const track = await u.db("o_videoTrack").where({ id: trackId }).first("projectId", "scriptId");
+      if (!track) throw new ProfileError("REVISION_WORK_SCOPE_INVALID", "轨道不存在", 404);
+      const resolvedProjectId = Number(track.projectId), resolvedScriptId = Number(track.scriptId);
+      if (projectId != null && Number(projectId) !== resolvedProjectId || scriptId != null && Number(scriptId) !== resolvedScriptId)
+        throw new ProfileError("REVISION_WORK_SCOPE_INVALID", "Accept 制作单元与轨道不一致", 409);
+      const profileClass = await videoProfileClassForProject(resolvedProjectId);
+      if (profileClass === "MANAGED_V2_UNSUPPORTED")
+        throw new ProfileError("VIDEO_PROFILE_COMPAT_UNSUPPORTED", "当前受控 Profile 未声明受支持的视频生产合同", 409);
+      if (profileClass === "E001_ENABLED") {
+        if (!acceptanceId) throw new ProfileError("VIDEO_ACCEPTANCE_ID_CONFLICT", "001E Accept 必须提供 acceptanceId", 400);
+        const result = await acceptE001Video({ projectId: resolvedProjectId, scriptId: resolvedScriptId,
+          trackId, videoId, acceptanceId, reason }, (req as any).user);
+        return res.status(200).send(success(result));
+      }
       await u.db.transaction(async trx => {
         const context = await controlledTrackContext(trx, trackId);
         const video = await trx("o_video").where({ id: videoId }).first();
