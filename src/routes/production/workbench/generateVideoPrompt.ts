@@ -31,7 +31,7 @@ export default router.post(
       if (!target) return res.status(404).send({ code: "REVISION_WORK_SCOPE_INVALID", message: "轨道不属于当前项目" });
       const scope = { projectId, scriptId: Number(target.scriptId) };
       let guarded;
-      try { guarded = await admitRevisionWork(scope, "VIDEO_PROMPT", [{ trackId, references: info }]); }
+      try { guarded = await admitRevisionWork(scope, "VIDEO_PROMPT", [{ trackId, references: info }], "video.prompt.generate"); }
       catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code ?? "REVISION_RUNTIME_UNSAFE", message: e.message }); }
       if (!guarded) return res.status(409).send({ code: "REVISION_RUNTIME_UNSAFE", message: "受控 Profile 已变化，请重试" });
       const text = await runControlledVideoPrompt(scope, guarded[0], info, model, mode);
