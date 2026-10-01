@@ -118,11 +118,20 @@ export async function settleRevisionWorkInTransaction(q: Knex.Transaction, scope
   if (epoch !== guard.admittedEpoch) {
     await q("o_revisionWorkGuard").where({ guardId: guard.guardId, state: "ACTIVE" }).update({ state: "UNCERTAIN",
       resolutionJson: JSON.stringify({ code: "REVISION_EPOCH_CHANGED" }) });
+    if (row.kind === "VIDEO_GENERATE" && guard.videoId != null) await q("o_video")
+      .where({ ...scope, id: guard.videoId, revisionWorkGuardId: guard.guardId, sourceAdapter: "video.track-source.v1" })
+      .update({ state: "生成失败", errorReason: "REVISION_EPOCH_CHANGED: 视频任务状态不确定" });
     return "UNCERTAIN";
   }
   try { if (!await assertCurrentPermission(q, scope, epoch)) return "FENCED"; }
-  catch { await q("o_revisionWorkGuard").where({ guardId: guard.guardId, state: "ACTIVE" }).update({ state: "UNCERTAIN",
-    resolutionJson: JSON.stringify({ code: "REVISION_PERMISSION_CHANGED" }) }); return "UNCERTAIN"; }
+  catch {
+    await q("o_revisionWorkGuard").where({ guardId: guard.guardId, state: "ACTIVE" }).update({ state: "UNCERTAIN",
+      resolutionJson: JSON.stringify({ code: "REVISION_PERMISSION_CHANGED" }) });
+    if (row.kind === "VIDEO_GENERATE" && guard.videoId != null) await q("o_video")
+      .where({ ...scope, id: guard.videoId, revisionWorkGuardId: guard.guardId, sourceAdapter: "video.track-source.v1" })
+      .update({ state: "生成失败", errorReason: "REVISION_PERMISSION_CHANGED: 视频任务状态不确定" });
+    return "UNCERTAIN";
+  }
   if (row.kind === "VIDEO_GENERATE") {
     const video = await q("o_video").where({ ...scope, id: guard.videoId, videoTrackId: row.trackId,
       revisionWorkGuardId: guard.guardId }).first("id");
