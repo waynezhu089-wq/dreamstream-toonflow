@@ -5,6 +5,7 @@ import { success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 import { revisionMediaProjection } from "@/services/orchestrator/revisionMediaRead";
 import { readVideoProductionProjection } from "@/services/orchestrator/videoProduction";
+import { resolveModels } from "@/services/modelPreset";
 const router = express.Router();
 
 interface VideoItem {
@@ -48,8 +49,9 @@ export default router.post(
   async (req, res) => {
     const { projectId, scriptId } = req.body;
     const projectData = await u.db("o_project").where("id", projectId).select("id", "videoModel", "mode").first();
+    const effectiveVideoModel = projectData ? (await resolveModels(projectId)).models.video : null;
 
-    if (!projectData?.videoModel) {
+    if (!effectiveVideoModel) {
       return res.status(400).json(success("项目未配置视频模型"));
     }
     let videoMode = "";
@@ -243,6 +245,7 @@ export default router.post(
           })),
         ),
         trackList,
+        effectiveVideoModel,
       }),
     );
   },
