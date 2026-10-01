@@ -154,8 +154,13 @@ export const productionGate: RequestHandler = async (req, res, next) => {
       default:
         throw new ProductionGateError("未识别的 Production 操作，无法校验资产门禁");
     }
-    for (const scope of scopes.values()) await assertProductionReady(scope.projectId, scope.scriptId);
-    if (!scopes.size && requestedProject !== undefined) await assertProductionReady(requestedProject, requestedScript);
+    const e001AcceptReplayBoundary = route === "/workbench/selectvideo" && scopes.size > 0 &&
+      (await Promise.all([...scopes.values()].map(scope => classifyVideoProfile(u.db, scope.projectId))))
+        .every(profileClass => profileClass === "E001_ENABLED");
+    if (!e001AcceptReplayBoundary) {
+      for (const scope of scopes.values()) await assertProductionReady(scope.projectId, scope.scriptId);
+      if (!scopes.size && requestedProject !== undefined) await assertProductionReady(requestedProject, requestedScript);
+    }
     const operationKey = operationForProductionRoute(route);
     if (operationKey) {
       if (!scopes.size) throw new ProductionGateError("无法确定生产操作的当前制作单元", "PRODUCTION_CONTEXT_INVALID", 400);
@@ -165,7 +170,7 @@ export const productionGate: RequestHandler = async (req, res, next) => {
           continue;
         }
         const profileClass = await classifyVideoProfile(u.db, scope.projectId);
-        if (profileClass === "E001_ENABLED") await assertProductionOperationAllowed(operationKey, scope);
+        if (profileClass === "E001_ENABLED" && !e001AcceptReplayBoundary) await assertProductionOperationAllowed(operationKey, scope);
         else if (profileClass === "MANAGED_V2_UNSUPPORTED")
           throw new ProductionGateError("当前受控 Profile 未声明受支持的视频生产合同", "VIDEO_PROFILE_COMPAT_UNSUPPORTED", 409);
       }
