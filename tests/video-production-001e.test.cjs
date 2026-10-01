@@ -278,3 +278,13 @@ test('AiVideo saveWithProof writes exactly proved MP4 bytes and preserves post-p
     aspectRatio: '16:9', resolution: '720p', audio: false }), e =>
       e.code === 'PROVIDER_SUBMISSION_UNCERTAIN' && e.providerSubmissionUncertain === true);
 });
+
+
+test('Workbench generate data uses effective Model Preset video authority instead of legacy project field only', async t => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = fs.readFileSync(path.join(__dirname, '../src/routes/production/workbench/getGenerateData.ts'), 'utf8');
+  assert.match(source, /resolveModels\(projectId\)/);
+  assert.match(source, /effectiveVideoModel/);
+  assert.doesNotMatch(source, /if \(!projectData\?\.videoModel\)/);
+});
