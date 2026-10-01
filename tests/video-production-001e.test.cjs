@@ -72,14 +72,6 @@ async function setupE001(t, descriptor = null) {
   return { ...f, shot, vp, video: f.load('services/orchestrator/videoProduction'), profiles, files, version };
 }
 
-async function acceptWithDiagnostics(f, input, actor) {
-  try { return await f.video.acceptE001Video(input, actor); }
-  catch (e) {
-    console.error('001E_ACCEPT_DIAGNOSTIC', e?.message, e?.stack, e);
-    throw e;
-  }
-}
-
 async function seedCandidate(f, outputByte = 'c') {
   const path = `/1/video/${randomUUID()}.mp4`;
   const reserved = await f.video.reserveE001VideoGeneration({ projectId: 1, scriptId: 10 }, [{
@@ -143,14 +135,14 @@ test('Accept command is ABA-safe, replayable after Stage completion, and immutab
   const b = await seedCandidate(f, 'b');
   const cmdA = randomUUID(), cmdB = randomUUID();
   const actor = { id: 1, name: 'Studio Owner' };
-  assert.equal((await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,
+  assert.equal((await f.video.acceptE001Video({ projectId: 1, scriptId: 10, trackId: f.shot.trackId,
     videoId: a.videoId, acceptanceId: cmdA, reason: null }, actor)).delivery, 'APPLIED');
-  assert.equal((await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,
+  assert.equal((await f.video.acceptE001Video({ projectId: 1, scriptId: 10, trackId: f.shot.trackId,
     videoId: b.videoId, acceptanceId: cmdB, reason: null }, actor)).delivery, 'APPLIED');
   assert.equal((await f.db('o_videoTrack').where({ id: f.shot.trackId }).first()).videoId, b.videoId);
 
   await f.db('o_stageRun').where({ projectId: 1, scriptId: 10, stageKey: 'video-production' }).update({ state: 'COMPLETED' });
-  const replay = await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,
+  const replay = await f.video.acceptE001Video({ projectId: 1, scriptId: 10, trackId: f.shot.trackId,
     videoId: a.videoId, acceptanceId: cmdA, reason: null }, actor);
   assert.equal(replay.delivery, 'REPLAYED');
   assert.equal((await f.db('o_videoTrack').where({ id: f.shot.trackId }).first()).videoId, b.videoId);
@@ -165,7 +157,7 @@ test('Accept command is ABA-safe, replayable after Stage completion, and immutab
 test('accepted-current Gate/read follows Source drift without rewriting historical Accept', async t => {
   const f = await setupE001(t);
   const candidate = await seedCandidate(f);
-  await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,
+  await f.video.acceptE001Video({ projectId: 1, scriptId: 10, trackId: f.shot.trackId,
     videoId: candidate.videoId, acceptanceId: randomUUID(), reason: null }, { id: 1 });
   assert.equal((await f.video.videoAcceptedCurrentGate({ projectId: 1, scriptId: 10 })).code, 'VIDEO_ACCEPTED_CURRENT_READY');
   await f.db('o_videoTrack').where({ id: f.shot.trackId }).update({ prompt: 'Drifted prompt' });
