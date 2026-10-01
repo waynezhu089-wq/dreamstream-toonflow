@@ -42,7 +42,7 @@ export default router.post(
       let guarded;
       try { guarded = await admitRevisionWork(scope, "VIDEO_PROMPT",
         trackData.map((item: { trackId: number; info: { id: number; sources: string }[] }) =>
-          ({ trackId: item.trackId, references: item.info }))); }
+          ({ trackId: item.trackId, references: item.info })), "video.prompt.generate"); }
       catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code ?? "REVISION_RUNTIME_UNSAFE", message: e.message }); }
       if (!guarded) return res.status(409).send({ code: "REVISION_RUNTIME_UNSAFE", message: "受控 Profile 已变化，请重试" });
       res.status(200).send(success("开始生成提示词"));
