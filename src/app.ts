@@ -38,6 +38,7 @@ import recipes from "@/routes/recipes";
 import stageOrchestrator from "@/routes/stageOrchestrator";
 import { initializeSupervisorSchema } from "@/lib/supervisorSchema";
 import { initializeRevisionSchema } from "@/lib/revisionSchema";
+import { initializeVideoProductionSchema } from "@/lib/videoProductionSchema";
 import supervisor from "@/routes/supervisor";
 
 const app = express();
@@ -80,6 +81,7 @@ export default async function startServe(randomPort: Boolean = false) {
   await initializeRecipeSchema(u.db);
   await initializeSupervisorSchema(u.db);
   await initializeRevisionSchema(u.db);
+  await initializeVideoProductionSchema(u.db);
 
   await u.writeVersion();
   const io = new Server(server, { cors: { origin: "*" } });
