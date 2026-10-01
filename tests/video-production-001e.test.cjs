@@ -73,7 +73,7 @@ async function setupE001(t, descriptor = null) {
 }
 
 async function acceptWithDiagnostics(f, input, actor) {
-  try { return await acceptWithDiagnostics(f, input, actor); }
+  try { return await f.video.acceptE001Video(input, actor); }
   catch (e) {
     console.error('001E_ACCEPT_DIAGNOSTIC', e?.message, e?.stack, e);
     throw e;
