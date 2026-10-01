@@ -488,7 +488,8 @@ export async function acceptE001Video(input: { projectId: number; scriptId: numb
     if (live) fail("REVISION_ASYNC_WORK_BLOCKED", "轨道存在未结算的后台任务");
     const video = await q("o_video").where({ projectId: input.projectId, scriptId: input.scriptId,
       id: input.videoId, videoTrackId: input.trackId }).first();
-    if (!(await assessE001Candidate(q, input, video)).selectionEligible) fail("VIDEO_CANDIDATE_NOT_CURRENT", "候选视频不是当前可接受结果");
+    if (!(await assessE001Candidate(q, { projectId: input.projectId, scriptId: input.scriptId }, video)).selectionEligible)
+      fail("VIDEO_CANDIDATE_NOT_CURRENT", "候选视频不是当前可接受结果");
     const acceptedAt = Date.now();
     await q("o_videoAcceptance").insert({ acceptanceId: input.acceptanceId, projectId: input.projectId,
       scriptId: input.scriptId, trackId: input.trackId, videoId: input.videoId,
