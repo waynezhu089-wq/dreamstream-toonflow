@@ -43,7 +43,8 @@
     "test:composite": "node --test tests/composite-attempt.test.cjs",
     "test:capabilities": "node --test tests/capability-registry.test.cjs",
     "test:production-profiles": "node --test tests/production-profiles.test.cjs",
-    "test:recipes": "node --test tests/recipe-registry.test.cjs"
+    "test:recipes": "node --test tests/recipe-registry.test.cjs",
+    "test:video-production": "node --test tests/video-production-001e.test.cjs tests/revision-video-guard.test.cjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.35",
