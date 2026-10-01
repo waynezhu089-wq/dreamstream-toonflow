@@ -143,12 +143,15 @@ test('Accept command is ABA-safe, replayable after Stage completion, and immutab
   const b = await seedCandidate(f, 'b');
   const cmdA = randomUUID(), cmdB = randomUUID();
   const actor = { id: 1, name: 'Studio Owner' };
-  assert.equal((await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,\n    videoId: a.videoId, acceptanceId: cmdA, reason: null }, actor)).delivery, 'APPLIED');
-  assert.equal((await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,\n    videoId: b.videoId, acceptanceId: cmdB, reason: null }, actor)).delivery, 'APPLIED');
+  assert.equal((await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,
+    videoId: a.videoId, acceptanceId: cmdA, reason: null }, actor)).delivery, 'APPLIED');
+  assert.equal((await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,
+    videoId: b.videoId, acceptanceId: cmdB, reason: null }, actor)).delivery, 'APPLIED');
   assert.equal((await f.db('o_videoTrack').where({ id: f.shot.trackId }).first()).videoId, b.videoId);
 
   await f.db('o_stageRun').where({ projectId: 1, scriptId: 10, stageKey: 'video-production' }).update({ state: 'COMPLETED' });
-  const replay = await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,\n    videoId: a.videoId, acceptanceId: cmdA, reason: null }, actor);
+  const replay = await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,
+    videoId: a.videoId, acceptanceId: cmdA, reason: null }, actor);
   assert.equal(replay.delivery, 'REPLAYED');
   assert.equal((await f.db('o_videoTrack').where({ id: f.shot.trackId }).first()).videoId, b.videoId);
   assert.equal((await f.db('o_videoAcceptance')).length, 2);
@@ -162,7 +165,8 @@ test('Accept command is ABA-safe, replayable after Stage completion, and immutab
 test('accepted-current Gate/read follows Source drift without rewriting historical Accept', async t => {
   const f = await setupE001(t);
   const candidate = await seedCandidate(f);
-  await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,\n    videoId: candidate.videoId, acceptanceId: randomUUID(), reason: null }, { id: 1 });
+  await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,
+    videoId: candidate.videoId, acceptanceId: randomUUID(), reason: null }, { id: 1 });
   assert.equal((await f.video.videoAcceptedCurrentGate({ projectId: 1, scriptId: 10 })).code, 'VIDEO_ACCEPTED_CURRENT_READY');
   await f.db('o_videoTrack').where({ id: f.shot.trackId }).update({ prompt: 'Drifted prompt' });
   const track = await f.db('o_videoTrack').where({ id: f.shot.trackId }).first();
