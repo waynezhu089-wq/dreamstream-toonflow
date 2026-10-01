@@ -153,7 +153,8 @@ export default async function startServe(randomPort: Boolean = false) {
               if (res.headersSent) res.destroy(error);
               else serveOriginalOssFile(req, res, next);
             });
-            res.type(thumbnailPath);
+            // Express 5 treats strings containing '/' as literal MIME values; pass only the extension.
+            res.type(path.extname(thumbnailPath));
             image.pipe(res);
           } catch (error) {
             console.warn("[oss] 缩略图回传失败，降级返回原图:", error);
