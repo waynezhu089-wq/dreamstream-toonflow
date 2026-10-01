@@ -7,17 +7,19 @@ import { supervisorStageGate } from "@/services/supervisor/review";
 import { acquireRevisionBoundary, currentRevisionEpoch } from "./revisionBoundary";
 import { ProfileError, positiveId, versionNumber } from "./profileDefinition";
 import { resolveProfile } from "./profileRegistry";
+import { assertVideoOperationAllowedInTransaction } from "./videoProductionProfile";
+import type { ProductionOperationKey } from "./productionOperationRegistry";
 
 const db = () => u.db as Knex;
 const ownerRunId = randomUUID();
 const blocked = (code: string, message: string): never => { throw new ProfileError(code, message, 409); };
-type Kind = "VIDEO_GENERATE" | "VIDEO_PROMPT";
+export type RevisionWorkKind = "VIDEO_GENERATE" | "VIDEO_PROMPT";
 type Reference = { id: number; sources: string };
-type WorkItem = { trackId: number; references: Reference[]; videoPath?: string };
-type Scope = { projectId: number; scriptId: number };
-type Guard = { guardId: string; trackId: number; kind: Kind; admittedEpoch: number; videoId: number | null };
+export type RevisionWorkItem = { trackId: number; references: Reference[]; videoPath?: string };
+export type RevisionWorkScope = { projectId: number; scriptId: number };
+export type RevisionWorkGuard = { guardId: string; trackId: number; kind: RevisionWorkKind; admittedEpoch: number; videoId: number | null };
 
-export async function assertCurrentPermission(q: Knex.Transaction, scope: Scope, epoch: number) {
+export async function assertCurrentPermission(q: Knex.Transaction, scope: RevisionWorkScope, epoch: number) {
   const profile = await resolveProfile({ projectId: scope.projectId }, q);
   if (!profile.managed || profile.definition.schemaVersion !== 2) return false;
   const reviewStage = profile.definition.stages.find(stage => stage.exitGateKey && (() => {
@@ -42,7 +44,7 @@ export async function assertCurrentPermission(q: Knex.Transaction, scope: Scope,
   return true;
 }
 
-async function validateItem(q: Knex.Transaction, scope: Scope, item: WorkItem) {
+export async function validateRevisionWorkItem(q: Knex.Transaction, scope: RevisionWorkScope, item: RevisionWorkItem) {
   positiveId(item.trackId);
   const track = await q("o_videoTrack").where({ ...scope, id: item.trackId }).first();
   if (!track) blocked("REVISION_WORK_SCOPE_INVALID", "视频轨道不属于当前制作单元");
@@ -63,84 +65,117 @@ async function validateItem(q: Knex.Transaction, scope: Scope, item: WorkItem) {
   }
 }
 
+export async function createRevisionWorkGuardInTransaction(q: Knex.Transaction, scope: RevisionWorkScope,
+  kind: RevisionWorkKind, item: RevisionWorkItem, epoch: number, videoPatch: Record<string, unknown> = {}): Promise<RevisionWorkGuard> {
+  const now = Date.now(), guardId = randomUUID();
+  await q("o_revisionWorkGuard").insert({ guardId, ...scope, kind, trackId: item.trackId,
+    admittedEpoch: epoch, ownerRunId, state: "ACTIVE", outcome: null, createdAt: now, settledAt: null, resolutionJson: null });
+  let videoId: number | null = null;
+  if (kind === "VIDEO_GENERATE") {
+    if (!item.videoPath) blocked("REVISION_WORK_SCOPE_INVALID", "视频输出路径缺失");
+    [videoId] = await q("o_video").insert({ ...scope, videoTrackId: item.trackId,
+      filePath: item.videoPath, time: now, state: "生成中", revisionWorkGuardId: guardId, ...videoPatch });
+  } else {
+    await q("o_videoTrack").where({ ...scope, id: item.trackId }).update({ state: "生成中" });
+  }
+  return { guardId, trackId: item.trackId, kind, admittedEpoch: epoch, videoId };
+}
+
+export async function ownedActiveRevisionWork(q: Knex.Transaction, scope: RevisionWorkScope, guard: RevisionWorkGuard) {
+  const row = await q("o_revisionWorkGuard").where({ ...scope, guardId: guard.guardId }).first();
+  if (!row || row.state !== "ACTIVE" || row.ownerRunId !== ownerRunId || Number(row.admittedEpoch) !== guard.admittedEpoch)
+    blocked("REVISION_WORK_NOT_RECOVERABLE", "视频任务已失去当前写入权");
+  return row;
+}
+
 // Returns null only for Legacy/non-ENFORCED scopes. For controlled V2, every
 // admitted worker gets its own durable identity before any media preparation.
-export async function admitRevisionWork(scope: Scope, kind: Kind, items: WorkItem[]): Promise<Guard[] | null> {
+export async function admitRevisionWork(scope: RevisionWorkScope, kind: RevisionWorkKind, items: RevisionWorkItem[],
+  operationKey?: ProductionOperationKey): Promise<RevisionWorkGuard[] | null> {
   if (!items.length || items.length > 200 || new Set(items.map(item => item.trackId)).size !== items.length && kind === "VIDEO_PROMPT")
     blocked("REVISION_WORK_SCOPE_INVALID", "任务列表为空、过长或包含重复提示词轨道");
   return db().transaction(async q => {
     await acquireRevisionBoundary(q, scope.projectId, scope.scriptId);
     const epoch = await currentRevisionEpoch(q, scope.projectId, scope.scriptId);
+    if (operationKey) await assertVideoOperationAllowedInTransaction(q, operationKey, scope);
     if (!await assertCurrentPermission(q, scope, epoch)) return null;
-    const now = Date.now(), result: Guard[] = [];
+    const result: RevisionWorkGuard[] = [];
     for (const item of items) {
-      await validateItem(q, scope, item);
+      await validateRevisionWorkItem(q, scope, item);
       if (kind === "VIDEO_PROMPT" && await q("o_revisionWorkGuard").where(scope).where({ kind, trackId: item.trackId })
         .whereIn("state", ["ACTIVE", "UNCERTAIN"]).first("guardId")) blocked("REVISION_ASYNC_WORK_BLOCKED", "该轨道已有提示词任务");
     }
-    for (const item of items) {
-      const guardId = randomUUID();
-      await q("o_revisionWorkGuard").insert({ guardId, ...scope, kind, trackId: item.trackId,
-        admittedEpoch: epoch, ownerRunId, state: "ACTIVE", outcome: null, createdAt: now,
-        settledAt: null, resolutionJson: null });
-      let videoId: number | null = null;
-      if (kind === "VIDEO_GENERATE") {
-        if (!item.videoPath) blocked("REVISION_WORK_SCOPE_INVALID", "视频输出路径缺失");
-        [videoId] = await q("o_video").insert({ ...scope, videoTrackId: item.trackId,
-          filePath: item.videoPath, time: now, state: "生成中", revisionWorkGuardId: guardId });
-      } else {
-        await q("o_videoTrack").where({ ...scope, id: item.trackId }).update({ state: "生成中" });
-      }
-      result.push({ guardId, trackId: item.trackId, kind, admittedEpoch: epoch, videoId });
-    }
+    for (const item of items) result.push(await createRevisionWorkGuardInTransaction(q, scope, kind, item, epoch));
     return result;
   });
 }
 
-export async function settleRevisionWork(scope: Scope, guard: Guard, outcome: "SUCCEEDED" | "FAILED",
+export async function settleRevisionWorkInTransaction(q: Knex.Transaction, scope: RevisionWorkScope,
+  guard: RevisionWorkGuard, outcome: "SUCCEEDED" | "FAILED", payload: { prompt?: string; error?: string } = {}) {
+  const row = await q("o_revisionWorkGuard").where({ ...scope, guardId: guard.guardId }).first();
+  if (!row || row.state !== "ACTIVE" || row.ownerRunId !== ownerRunId || Number(row.admittedEpoch) !== guard.admittedEpoch) return "FENCED";
+  const epoch = await currentRevisionEpoch(q, scope.projectId, scope.scriptId);
+  if (epoch !== guard.admittedEpoch) {
+    await q("o_revisionWorkGuard").where({ guardId: guard.guardId, state: "ACTIVE" }).update({ state: "UNCERTAIN",
+      resolutionJson: JSON.stringify({ code: "REVISION_EPOCH_CHANGED" }) });
+    return "UNCERTAIN";
+  }
+  try { if (!await assertCurrentPermission(q, scope, epoch)) return "FENCED"; }
+  catch { await q("o_revisionWorkGuard").where({ guardId: guard.guardId, state: "ACTIVE" }).update({ state: "UNCERTAIN",
+    resolutionJson: JSON.stringify({ code: "REVISION_PERMISSION_CHANGED" }) }); return "UNCERTAIN"; }
+  if (row.kind === "VIDEO_GENERATE") {
+    const video = await q("o_video").where({ ...scope, id: guard.videoId, videoTrackId: row.trackId,
+      revisionWorkGuardId: guard.guardId }).first("id");
+    if (!video) {
+      await q("o_revisionWorkGuard").where({ guardId: guard.guardId, state: "ACTIVE" }).update({ state: "UNCERTAIN",
+        resolutionJson: JSON.stringify({ code: "VIDEO_TARGET_MISSING" }) });
+      return "UNCERTAIN";
+    }
+    await q("o_video").where({ ...scope, id: guard.videoId, revisionWorkGuardId: guard.guardId })
+      .update(outcome === "SUCCEEDED" ? { state: "生成成功" } : { state: "生成失败", errorReason: payload.error ?? "视频生成失败" });
+  } else {
+    const track = await q("o_videoTrack").where({ ...scope, id: row.trackId }).first("id");
+    if (!track) {
+      await q("o_revisionWorkGuard").where({ guardId: guard.guardId, state: "ACTIVE" }).update({ state: "UNCERTAIN",
+        resolutionJson: JSON.stringify({ code: "PROMPT_TRACK_MISSING" }) });
+      return "UNCERTAIN";
+    }
+    await q("o_videoTrack").where({ ...scope, id: row.trackId }).update(outcome === "SUCCEEDED" ?
+      { state: "已完成", prompt: payload.prompt ?? "", promptRevisionEpoch: epoch } :
+      { state: "生成失败", reason: payload.error ?? "提示词生成失败" });
+  }
+  const changed = await q("o_revisionWorkGuard").where({ guardId: guard.guardId, state: "ACTIVE", ownerRunId })
+    .update({ state: "SETTLED", outcome, settledAt: Date.now(), resolutionJson: payload.error ? JSON.stringify({ error: payload.error.slice(0, 1000) }) : null });
+  if (changed !== 1) blocked("REVISION_CONCURRENT_UPDATE", "任务归属已变化");
+  return "SETTLED";
+}
+
+export async function settleRevisionWork(scope: RevisionWorkScope, guard: RevisionWorkGuard, outcome: "SUCCEEDED" | "FAILED",
   payload: { prompt?: string; error?: string } = {}) {
   return db().transaction(async q => {
     await acquireRevisionBoundary(q, scope.projectId, scope.scriptId);
-    const row = await q("o_revisionWorkGuard").where({ ...scope, guardId: guard.guardId }).first();
-    if (!row || row.state !== "ACTIVE" || row.ownerRunId !== ownerRunId || row.admittedEpoch !== guard.admittedEpoch) return "FENCED";
-    const epoch = await currentRevisionEpoch(q, scope.projectId, scope.scriptId);
-    if (epoch !== guard.admittedEpoch) {
-      await q("o_revisionWorkGuard").where({ guardId: guard.guardId, state: "ACTIVE" }).update({ state: "UNCERTAIN",
-        resolutionJson: JSON.stringify({ code: "REVISION_EPOCH_CHANGED" }) });
-      return "UNCERTAIN";
-    }
-    try { if (!await assertCurrentPermission(q, scope, epoch)) return "FENCED"; }
-    catch { await q("o_revisionWorkGuard").where({ guardId: guard.guardId, state: "ACTIVE" }).update({ state: "UNCERTAIN",
-      resolutionJson: JSON.stringify({ code: "REVISION_PERMISSION_CHANGED" }) }); return "UNCERTAIN"; }
-    if (row.kind === "VIDEO_GENERATE") {
-      const video = await q("o_video").where({ ...scope, id: guard.videoId, videoTrackId: row.trackId,
-        revisionWorkGuardId: guard.guardId }).first("id");
-      if (!video) {
-        await q("o_revisionWorkGuard").where({ guardId: guard.guardId, state: "ACTIVE" }).update({ state: "UNCERTAIN",
-          resolutionJson: JSON.stringify({ code: "VIDEO_TARGET_MISSING" }) });
-        return "UNCERTAIN";
-      }
-      await q("o_video").where({ ...scope, id: guard.videoId, revisionWorkGuardId: guard.guardId })
-        .update(outcome === "SUCCEEDED" ? { state: "生成成功" } : { state: "生成失败", errorReason: payload.error ?? "视频生成失败" });
-    } else {
-      const track = await q("o_videoTrack").where({ ...scope, id: row.trackId }).first("id");
-      if (!track) {
-        await q("o_revisionWorkGuard").where({ guardId: guard.guardId, state: "ACTIVE" }).update({ state: "UNCERTAIN",
-          resolutionJson: JSON.stringify({ code: "PROMPT_TRACK_MISSING" }) });
-        return "UNCERTAIN";
-      }
-      await q("o_videoTrack").where({ ...scope, id: row.trackId }).update(outcome === "SUCCEEDED" ?
-        { state: "已完成", prompt: payload.prompt ?? "", promptRevisionEpoch: epoch } :
-        { state: "生成失败", reason: payload.error ?? "提示词生成失败" });
-    }
-    const changed = await q("o_revisionWorkGuard").where({ guardId: guard.guardId, state: "ACTIVE", ownerRunId })
-      .update({ state: "SETTLED", outcome, settledAt: Date.now(), resolutionJson: payload.error ? JSON.stringify({ error: payload.error.slice(0, 1000) }) : null });
-    if (changed !== 1) blocked("REVISION_CONCURRENT_UPDATE", "任务归属已变化");
-    return "SETTLED";
+    return settleRevisionWorkInTransaction(q, scope, guard, outcome, payload);
   });
 }
 
-export async function fenceRevisionWork(scope: Scope, guardId: string, actor: { id?: number | string } | null | undefined, reason: string) {
+export async function markProviderSubmissionUncertain(scope: RevisionWorkScope, guard: RevisionWorkGuard, error: unknown) {
+  return db().transaction(async q => {
+    await acquireRevisionBoundary(q, scope.projectId, scope.scriptId);
+    const row = await ownedActiveRevisionWork(q, scope, guard);
+    const message = error instanceof Error ? error.message : String(error), at = Date.now();
+    await q("o_revisionWorkGuard").where({ guardId: row.guardId, state: "ACTIVE", ownerRunId }).update({
+      state: "UNCERTAIN", resolutionJson: JSON.stringify({
+        code: "PROVIDER_SUBMISSION_UNCERTAIN", phase: "videoRequest", error: message.slice(0, 1000), at,
+      }),
+    });
+    if (row.kind === "VIDEO_GENERATE" && guard.videoId != null) await q("o_video")
+      .where({ ...scope, id: guard.videoId, revisionWorkGuardId: guard.guardId })
+      .update({ state: "生成失败", errorReason: "PROVIDER_SUBMISSION_UNCERTAIN: " + message.slice(0, 900) });
+    return "UNCERTAIN" as const;
+  });
+}
+
+export async function fenceRevisionWork(scope: RevisionWorkScope, guardId: string, actor: { id?: number | string } | null | undefined, reason: string) {
   const configured = process.env.DS_STUDIO_OWNER_USER_ID;
   const actorId = Number(actor?.id);
   if (!configured || !/^[1-9]\d*$/.test(configured) || !Number.isSafeInteger(Number(configured)) ||
