@@ -72,6 +72,14 @@ async function setupE001(t, descriptor = null) {
   return { ...f, shot, vp, video: f.load('services/orchestrator/videoProduction'), profiles, files, version };
 }
 
+async function acceptWithDiagnostics(f, input, actor) {
+  try { return await acceptWithDiagnostics(f, input, actor); }
+  catch (e) {
+    console.error('001E_ACCEPT_DIAGNOSTIC', e?.message, e?.stack, e);
+    throw e;
+  }
+}
+
 async function seedCandidate(f, outputByte = 'c') {
   const path = `/1/video/${randomUUID()}.mp4`;
   const reserved = await f.video.reserveE001VideoGeneration({ projectId: 1, scriptId: 10 }, [{
@@ -135,15 +143,12 @@ test('Accept command is ABA-safe, replayable after Stage completion, and immutab
   const b = await seedCandidate(f, 'b');
   const cmdA = randomUUID(), cmdB = randomUUID();
   const actor = { id: 1, name: 'Studio Owner' };
-  assert.equal((await f.video.acceptE001Video({ projectId: 1, scriptId: 10, trackId: f.shot.trackId,
-    videoId: a.videoId, acceptanceId: cmdA, reason: null }, actor)).delivery, 'APPLIED');
-  assert.equal((await f.video.acceptE001Video({ projectId: 1, scriptId: 10, trackId: f.shot.trackId,
-    videoId: b.videoId, acceptanceId: cmdB, reason: null }, actor)).delivery, 'APPLIED');
+  assert.equal((await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,\n    videoId: a.videoId, acceptanceId: cmdA, reason: null }, actor)).delivery, 'APPLIED');
+  assert.equal((await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,\n    videoId: b.videoId, acceptanceId: cmdB, reason: null }, actor)).delivery, 'APPLIED');
   assert.equal((await f.db('o_videoTrack').where({ id: f.shot.trackId }).first()).videoId, b.videoId);
 
   await f.db('o_stageRun').where({ projectId: 1, scriptId: 10, stageKey: 'video-production' }).update({ state: 'COMPLETED' });
-  const replay = await f.video.acceptE001Video({ projectId: 1, scriptId: 10, trackId: f.shot.trackId,
-    videoId: a.videoId, acceptanceId: cmdA, reason: null }, actor);
+  const replay = await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,\n    videoId: a.videoId, acceptanceId: cmdA, reason: null }, actor);
   assert.equal(replay.delivery, 'REPLAYED');
   assert.equal((await f.db('o_videoTrack').where({ id: f.shot.trackId }).first()).videoId, b.videoId);
   assert.equal((await f.db('o_videoAcceptance')).length, 2);
@@ -157,8 +162,7 @@ test('Accept command is ABA-safe, replayable after Stage completion, and immutab
 test('accepted-current Gate/read follows Source drift without rewriting historical Accept', async t => {
   const f = await setupE001(t);
   const candidate = await seedCandidate(f);
-  await f.video.acceptE001Video({ projectId: 1, scriptId: 10, trackId: f.shot.trackId,
-    videoId: candidate.videoId, acceptanceId: randomUUID(), reason: null }, { id: 1 });
+  await acceptWithDiagnostics(f, { projectId: 1, scriptId: 10, trackId: f.shot.trackId,\n    videoId: candidate.videoId, acceptanceId: randomUUID(), reason: null }, { id: 1 });
   assert.equal((await f.video.videoAcceptedCurrentGate({ projectId: 1, scriptId: 10 })).code, 'VIDEO_ACCEPTED_CURRENT_READY');
   await f.db('o_videoTrack').where({ id: f.shot.trackId }).update({ prompt: 'Drifted prompt' });
   const track = await f.db('o_videoTrack').where({ id: f.shot.trackId }).first();
@@ -199,10 +203,10 @@ test('sealed mixed references preserve exact image/video/audio provider types fr
     name: 'Mixed', modelName: 'video', type: 'video', mode: [mode],
     durationResolutionMap: [{ duration: [5], resolution: ['720p'] }], audio: false,
   });
-  await f.db('o_image').where({ id: 1 }).update({ filePath: '/ref/image.png', type: 'image', state: '已完成' });
   for (const item of [
-    { asset: 4, image: 4, path: '/ref/video.mp4', type: 'video' },
-    { asset: 5, image: 5, path: '/ref/audio.mp3', type: 'audio' },
+    { asset: 4, image: 4, path: '/ref/image.png', type: 'image' },
+    { asset: 5, image: 5, path: '/ref/video.mp4', type: 'video' },
+    { asset: 6, image: 6, path: '/ref/audio.mp3', type: 'audio' },
   ]) {
     await f.db('o_assets').insert({ id: item.asset, projectId: 1, imageId: item.image, type: 'clip' });
     await f.db('o_image').insert({ id: item.image, assetsId: item.asset, filePath: item.path, state: '已完成', type: item.type });
@@ -214,7 +218,7 @@ test('sealed mixed references preserve exact image/video/audio provider types fr
 
   const reserved = await f.video.reserveE001VideoGeneration({ projectId: 1, scriptId: 10 }, [{
     trackId: f.shot.trackId, references: [
-      { id: 1, sources: 'assets' }, { id: 4, sources: 'assets' }, { id: 5, sources: 'assets' },
+      { id: 4, sources: 'assets' }, { id: 5, sources: 'assets' }, { id: 6, sources: 'assets' },
     ], prompt: 'Shot', duration: 5, videoPath: `/1/video/${randomUUID()}.mp4`,
   }], { model: 'vendor:video', mode: JSON.stringify(mode), resolution: '720p' });
   const sealed = await f.video.sealE001VideoSource({ projectId: 1, scriptId: 10 }, reserved.guards[0]);
