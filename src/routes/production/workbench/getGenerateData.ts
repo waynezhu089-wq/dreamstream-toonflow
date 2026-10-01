@@ -4,6 +4,7 @@ import { z } from "zod";
 import { success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 import { revisionMediaProjection } from "@/services/orchestrator/revisionMediaRead";
+import { readVideoProductionProjection } from "@/services/orchestrator/videoProduction";
 const router = express.Router();
 
 interface VideoItem {
@@ -11,6 +12,10 @@ interface VideoItem {
   src: string;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
   revisionStatus?: "CURRENT" | "HISTORICAL" | "LEGACY";
+  candidateStatus?: "GENERATING" | "FAILED" | "UNRESOLVED" | "RETIRED" | "STALE" | "SELECTION_ELIGIBLE";
+  selectionEligible?: boolean;
+  workGuardState?: string | null;
+  retired?: boolean;
 }
 
 interface TrackMedia {
@@ -165,12 +170,14 @@ export default router.post(
       trackData.map((t) => t.id),
     );
     const media = await revisionMediaProjection(projectId, scriptId, videoList);
+    const productionProjection = await readVideoProductionProjection(projectId, scriptId, videoList, trackData);
     const trackList: TrackItem[] = [];
     const trackIdMap = [...new Set<number>(trackData.map((t) => t.id!))];
     for (const trackId of trackIdMap) {
       const item = trackData.find((t) => t.id === trackId);
       const selected = videoList.find(video => video.id === item?.videoId && video.videoTrackId === trackId);
-      const selectedCurrent = selected && ["CURRENT", "LEGACY"].includes(media.status(selected));
+      const selectedCurrent = productionProjection ? productionProjection.accepted[trackId] === Number(item?.videoId) :
+        Boolean(selected && ["CURRENT", "LEGACY"].includes(media.status(selected)));
       trackList.push({
         id: trackId,
         duration: item?.duration ?? 0,
@@ -216,6 +223,10 @@ export default router.post(
             .map(async (v) => ({
               id: v.id!,
               revisionStatus: media.status(v),
+              candidateStatus: productionProjection?.candidates[Number(v.id)]?.status,
+              selectionEligible: productionProjection?.candidates[Number(v.id)]?.selectionEligible,
+              workGuardState: productionProjection?.candidates[Number(v.id)]?.workGuardState ?? null,
+              retired: v.retiredAt != null,
               src: v.filePath ? await u.oss.getFileUrl(v.filePath) : "",
               state: v.state === "已完成" || v.state === "生成成功" ? "已完成" : v.state === "生成中" ? "生成中" : v.state === "生成失败" ? "生成失败" : "未生成",
               errorReason: v?.errorReason ?? "",
