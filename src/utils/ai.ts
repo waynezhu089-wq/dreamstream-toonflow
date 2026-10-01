@@ -1,4 +1,5 @@
 import { generateText, generateObject, streamText, wrapLanguageModel, stepCountIs, extractReasoningMiddleware } from "ai";
+import { createHash } from "node:crypto";
 import type { ZodType } from "zod";
 import { devToolsMiddleware } from "@ai-sdk/devtools";
 import axios from "axios";
@@ -160,7 +161,9 @@ async function withTaskRecord<T>(
     return result;
   } catch (e) {
     taskRecord(-1, u.error(e).message);
-    throw new Error(u.error(e).message);
+    const wrapped = e instanceof Error ? e : new Error(u.error(e).message);
+    if (wrapped.message !== u.error(e).message) wrapped.message = u.error(e).message;
+    throw wrapped;
   }
 }
 
@@ -307,11 +310,11 @@ type VideoMode =
 interface VideoConfig {
   duration: number;
   resolution: string;
-  aspectRatio: "16:9" | "9:16";
+  aspectRatio: `${number}:${number}`;
   prompt: string;
   referenceList?: ReferenceList[];
   audio?: boolean;
-  mode: VideoMode[];
+  mode: VideoMode;
 }
 
 class AiVideo {
@@ -327,10 +330,20 @@ class AiVideo {
       const exec = async (mn: `${string}:${string}`) => {
         const fn = await getVendorTemplateFn("videoRequest", mn);
         await referenceList2imageBase642(mn.split(/:(.+)/)[0], input);
-
-        this.result = await fn(input);
-
-        if (this.result.startsWith("http")) this.result = await urlToBase64(this.result);
+        let entered = false;
+        try {
+          entered = true;
+          this.result = await fn(input);
+          if (this.result.startsWith("http")) this.result = await urlToBase64(this.result);
+        } catch (error: any) {
+          if (entered) {
+            const wrapped: any = error instanceof Error ? error : new Error(String(error));
+            wrapped.code = wrapped.code || "PROVIDER_SUBMISSION_UNCERTAIN";
+            wrapped.providerSubmissionUncertain = true;
+            throw wrapped;
+          }
+          throw error;
+        }
       };
       if (taskRecord) {
         await withTaskRecord(modelName, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
@@ -345,6 +358,25 @@ class AiVideo {
   async save(path: string) {
     await u.oss.writeFile(path, this.result);
     return this;
+  }
+  async saveWithProof(path: string) {
+    const bytes = Buffer.from(this.result.replace(/^data:[^;]+;base64,/, ""), "base64");
+    if (bytes.length < 16 || bytes.subarray(4, 8).toString("ascii") !== "ftyp") {
+      const error: any = new Error("视频输出不是受支持的 MP4 字节");
+      error.code = "VIDEO_OUTPUT_PROVENANCE_MISMATCH";
+      throw error;
+    }
+    const brands: string[] = [bytes.subarray(8, 12).toString("ascii")];
+    for (let offset = 16; offset + 4 <= Math.min(bytes.length, 64); offset += 4)
+      brands.push(bytes.subarray(offset, offset + 4).toString("ascii"));
+    if (brands.every(brand => brand === "qt  " || !brand.trim())) {
+      const error: any = new Error("QuickTime-only 输出不属于 001E MP4 合同");
+      error.code = "VIDEO_OUTPUT_PROVENANCE_MISMATCH";
+      throw error;
+    }
+    await u.oss.writeFile(path, bytes);
+    return { filePath: path, mime: "video/mp4" as const,
+      sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.length };
   }
 }
 class AiAudio {
