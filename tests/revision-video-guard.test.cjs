@@ -3,15 +3,6 @@ const assert = require('node:assert/strict');
 const express = require('express');
 const { fixture } = require('./composite-fixture.cjs');
 
-const stage = (stageKey, uiOrder, exitGateKey = null) => ({ stageKey, displayName: stageKey,
-  description: '', required: true, allowSkip: false, uiOrder, entryGateKey: null, exitGateKey, operationKeys: [] });
-const graph = { schemaVersion: 2, runtimeControl: 'ENFORCED', initialStageKey: 'root',
-  stages: [stage('root', 1), stage('storyboard-board', 2), stage('supervisor-review', 3,
-    'supervisor.storyboard-approved.v2'), stage('image-production', 4)],
-  transitions: [{ fromStageKey: 'root', toStageKey: 'storyboard-board' },
-    { fromStageKey: 'storyboard-board', toStageKey: 'supervisor-review' },
-    { fromStageKey: 'supervisor-review', toStageKey: 'image-production' }] };
-
 async function setup(t) {
   const f = await fixture(t);
   await f.load('lib/supervisorSchema').initializeSupervisorSchema(f.db);
@@ -21,6 +12,7 @@ async function setup(t) {
   await f.db('o_prompt').insert({ type: 'videoPromptGeneration', data: 'Generate a video prompt' });
   const shot = await f.create();
   const profiles = f.load('services/orchestrator/profileRegistry');
+  const graph = f.load('services/orchestrator/videoProductionProfile').advertisementPreE001SemanticV2;
   await profiles.createVersion({ profileKey: 'advertisement', definition: graph });
   await profiles.activateVersion({ profileKey: 'advertisement', version: 'v2' });
   await profiles.bindProfile({ projectId: 1, profileKey: 'advertisement', version: 'v2' });
