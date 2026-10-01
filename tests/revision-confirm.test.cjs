@@ -15,6 +15,7 @@ const graph = { schemaVersion: 2, runtimeControl: 'ENFORCED', initialStageKey: '
 
 async function setup(t, definition = graph) {
   const f = await fixture(t);
+  if (definition === 'PRE_001E_EXACT') definition = f.load('services/orchestrator/videoProductionProfile').advertisementPreE001SemanticV2;
   await f.raw.schema.createTable('o_user', tb => { tb.integer('id').primary(); tb.text('name'); });
   await f.db('o_user').insert({ id: 7, name: 'Studio Owner' });
   await f.load('lib/recipeSchema').initializeRecipeSchema(f.db);
@@ -306,7 +307,7 @@ test('an AI Supervisor result arriving after Confirm cannot become a current rev
 });
 
 test('old selected video remains historical after revision; a current guarded result can be selected', async t => {
-  const f = await setup(t);
+  const f = await setup(t, 'PRE_001E_EXACT');
   const scope = { projectId: 1, scriptId: 10 };
   await f.db('o_project').where({ id: 1 }).update({ videoModel: 'vendor:video' });
   const [oldVideoId] = await f.db('o_video').insert({ ...scope, videoTrackId: f.shot.trackId,
@@ -412,7 +413,7 @@ test('paginated storyboard HTTP route excludes a RETIREd shot by default and exp
 });
 
 test('epoch-zero legacy video remains selectable, but guarded failed or fenced video never becomes current', async t => {
-  const f = await setup(t);
+  const f = await setup(t, 'PRE_001E_EXACT');
   const scope = { projectId: 1, scriptId: 10 };
   await f.db('o_project').where({ id: 1 }).update({ videoModel: 'vendor:video' });
   const [legacyId] = await f.db('o_video').insert({ ...scope, videoTrackId: f.shot.trackId,
@@ -579,7 +580,7 @@ test('lost-response replay uses persisted audit through a fresh SQLite adapter s
 });
 
 test('live guard blocks target deletion and same-track prompt or duration writes', async t => {
-  const f = await setup(t);
+  const f = await setup(t, 'PRE_001E_EXACT');
   const scope = { projectId: 1, scriptId: 10 };
   const work = f.load('services/orchestrator/revisionWorkGuard');
   const [guard] = await work.admitRevisionWork(scope, 'VIDEO_GENERATE', [
