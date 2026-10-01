@@ -361,15 +361,18 @@ class AiVideo {
   }
   async saveWithProof(path: string) {
     const bytes = Buffer.from(this.result.replace(/^data:[^;]+;base64,/, ""), "base64");
-    if (bytes.length < 16 || bytes.subarray(4, 8).toString("ascii") !== "ftyp") {
+    const ftypSize = bytes.length >= 4 ? bytes.readUInt32BE(0) : 0;
+    if (bytes.length < 16 || bytes.subarray(4, 8).toString("ascii") !== "ftyp" ||
+      ftypSize < 16 || ftypSize > bytes.length || ftypSize % 4 !== 0) {
       const error: any = new Error("视频输出不是受支持的 MP4 字节");
       error.code = "VIDEO_OUTPUT_PROVENANCE_MISMATCH";
       throw error;
     }
-    const brands: string[] = [bytes.subarray(8, 12).toString("ascii")];
-    for (let offset = 16; offset + 4 <= Math.min(bytes.length, 64); offset += 4)
-      brands.push(bytes.subarray(offset, offset + 4).toString("ascii"));
-    if (brands.every(brand => brand === "qt  " || !brand.trim())) {
+    const majorBrand = bytes.subarray(8, 12).toString("ascii");
+    const compatibleBrands: string[] = [];
+    for (let offset = 16; offset + 4 <= ftypSize; offset += 4)
+      compatibleBrands.push(bytes.subarray(offset, offset + 4).toString("ascii"));
+    if (majorBrand === "qt  " && compatibleBrands.every(brand => brand === "qt  ")) {
       const error: any = new Error("QuickTime-only 输出不属于 001E MP4 合同");
       error.code = "VIDEO_OUTPUT_PROVENANCE_MISMATCH";
       throw error;
