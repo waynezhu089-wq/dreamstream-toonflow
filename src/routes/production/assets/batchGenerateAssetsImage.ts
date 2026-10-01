@@ -19,6 +19,7 @@ export default router.post(
     const { assetIds, projectId, scriptId, concurrentCount = 5 } = req.body;
 
     const projectSettingData = await u.db("o_project").where("id", projectId).select("imageModel", "imageQuality", "artStyle").first();
+    if (req.body.model && projectSettingData) projectSettingData.imageModel = req.body.model;
 
     const assetsDataArr = await u.db("o_assets").whereIn("id", assetIds).select("id", "describe", "name", "type", "assetsId");
     const parentIds = assetsDataArr.map((item) => item.assetsId).filter((id) => id !== null);

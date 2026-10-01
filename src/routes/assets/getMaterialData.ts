@@ -3,6 +3,8 @@ import u from "@/utils";
 import { z } from "zod";
 import { success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
+import { readAcceptedCurrentMaterial } from "@/services/orchestrator/videoProduction";
+import { videoProfileClassForProject } from "@/services/orchestrator/videoProductionProfile";
 const router = express.Router();
 
 // 获取生成图片
@@ -34,30 +36,38 @@ export default router.post(
       filePath: ending,
       type: "clip",
     });
-    // 查询视频轨道
-    const trackRows = await u
-      .db("o_videoTrack")
-      .where("o_videoTrack.scriptId", scriptId)
-      .andWhere("o_videoTrack.projectId", projectId)
-      .select("o_videoTrack.id as trackId","o_videoTrack.videoId");
-    // 按轨道分组处理视频
-    const video = await Promise.all(
-      trackRows.map(async (track) => {
+    const profileClass = await videoProfileClassForProject(projectId);
+    if (profileClass === "MANAGED_V2_UNSUPPORTED")
+      return res.status(409).send({ code: "VIDEO_PROFILE_COMPAT_UNSUPPORTED", message: "当前受控 Profile 未声明受支持的视频生产合同" });
+    if (profileClass === "E001_ENABLED" && scriptId == null)
+      return res.status(400).send({ code: "VIDEO_EDITOR_MATERIAL_STALE", message: "001E 剪辑素材读取必须指定制作单元" });
+    const accepted = scriptId == null ? null : await readAcceptedCurrentMaterial(projectId, scriptId);
+    let video: any[];
+    if (accepted) {
+      video = await Promise.all(accepted.map(async item => ({
+        id: item.trackId,
+        videoId: item.videoId,
+        video: [{
+          id: item.videoId,
+          filePath: item.filePath ? await u.oss.getFileUrl(item.filePath) : "",
+          videoTrackId: item.trackId,
+          productionVideo: {
+            projectId, scriptId, trackId: item.trackId, videoId: item.videoId,
+            acceptedSourceHash: item.sourceHash, acceptedOutputSha256: item.outputSha256,
+          },
+        }],
+      })));
+    } else {
+      const trackRows = await u.db("o_videoTrack").where("o_videoTrack.scriptId", scriptId)
+        .andWhere("o_videoTrack.projectId", projectId).select("o_videoTrack.id as trackId","o_videoTrack.videoId");
+      video = await Promise.all(trackRows.map(async track => {
         const videoItems = await u.db("o_video").where("o_video.videoTrackId", track.trackId).andWhere("o_video.state", "生成成功").select("*");
-        const videoList = await Promise.all(
-          videoItems.map(async (v) => ({
-            id: v.id,
-            filePath: v.filePath ? await u.oss.getFileUrl(v.filePath) : "",
-            videoTrackId: v.videoTrackId,
-          })),
-        );
-        return {
-          id: track.trackId,
-          videoId: track.videoId,
-          video: videoList,
-        };
-      }),
-    ).then((tracks) => tracks.filter((track) => track.video.length > 0));
+        const videoList = await Promise.all(videoItems.map(async v => ({
+          id: v.id, filePath: v.filePath ? await u.oss.getFileUrl(v.filePath) : "", videoTrackId: v.videoTrackId,
+        })));
+        return { id: track.trackId, videoId: track.videoId, video: videoList };
+      })).then(tracks => tracks.filter(track => track.video.length > 0));
+    }
 
     res.status(200).send(success({ data, video }));
   },

@@ -1,14 +1,17 @@
+import { productionFields, productionSpec, isAdvertisement, writeAdvertisementStoryboards } from "@/services/storyboardProduction";
 import express from "express";
 import u from "@/utils";
 import { z } from "zod";
 import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
+import { rejectControlledSemanticWrite } from "@/services/orchestrator/revisionWriteSafety";
 const router = express.Router();
 export default router.post(
   "/",
   validateFields({
     data: z.array(
       z.object({
+  ...productionFields,
         prompt: z.string(),
         duration: z.number(),
         track: z.string(),
@@ -23,7 +26,15 @@ export default router.post(
     projectId: z.number(),
   }),
   async (req, res) => {
+    if (await isAdvertisement(req.body.projectId)) {
+      try {
+        const result = await writeAdvertisementStoryboards(req.body.projectId, req.body.scriptId, req.body.data, "add");
+        return res.status(200).send(success(result));
+      } catch (e: any) { return res.status(e.status ?? 400).send({ code: e.code ?? "STORYBOARD_PRODUCTION_INVALID", message: e.message }); }
+    }
     const { data, scriptId, projectId } = req.body;
+    try { await rejectControlledSemanticWrite(projectId, scriptId); }
+    catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code, message: e.message }); }
     if (!data.length) return res.status(400).send({ success: false, message: "数据不能为空" });
     for (const item of data) {
       const [id] = await u.db("o_storyboard").insert({

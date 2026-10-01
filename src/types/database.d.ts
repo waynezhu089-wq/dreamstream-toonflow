@@ -169,6 +169,12 @@ export interface o_skillList {
   'updateTime': number;
 }
 export interface o_storyboard {
+  retiredAt?: number | null;
+  retiredByRevisionId?: string | null;
+  currentImageAttemptId?: string | null;
+  activeImageAttemptId?: string | null;
+  productionSpec?: string | null;
+  imagePrompt?: string | null;
   'createTime'?: number | null;
   'duration'?: string | null;
   'filePath'?: string | null;
@@ -208,6 +214,16 @@ export interface o_vendorConfig {
   'models'?: string | null;
 }
 export interface o_video {
+  revisionWorkGuardId?: string | null;
+  sourceAdapter?: string | null;
+  sourceSnapshot?: string | null;
+  sourceHash?: string | null;
+  outputMime?: string | null;
+  outputSha256?: string | null;
+  outputByteLength?: number | null;
+  retiredAt?: number | null;
+  retiredByUserId?: number | null;
+  retiredReason?: string | null;
   'errorReason'?: string | null;
   'filePath'?: string | null;
   'id'?: number;
@@ -217,7 +233,22 @@ export interface o_video {
   'time'?: number | null;
   'videoTrackId'?: number | null;
 }
+export interface o_videoAcceptance {
+  acceptanceId: string;
+  projectId: number;
+  scriptId: number;
+  trackId: number;
+  videoId: number;
+  candidateSourceHash: string;
+  candidateOutputSha256: string;
+  actorUserId: number;
+  actorDisplayName?: string | null;
+  acceptedAt: number;
+  reason?: string | null;
+}
 export interface o_videoTrack {
+  storyboardManaged?: number | null;
+  promptRevisionEpoch?: number | null;
   'duration'?: number | null;
   'id'?: number;
   'projectId'?: number | null;
@@ -255,5 +286,6 @@ export interface DB {
   "o_user": o_user;
   "o_vendorConfig": o_vendorConfig;
   "o_video": o_video;
+  "o_videoAcceptance": o_videoAcceptance;
   "o_videoTrack": o_videoTrack;
 }

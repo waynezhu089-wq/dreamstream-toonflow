@@ -6,6 +6,7 @@ import { validateFields } from "@/middleware/middleware";
 import { useSkill } from "@/utils/agent/skillsTools";
 import { tool, jsonSchema } from "ai";
 import { o_script } from "@/types/database";
+import { rejectControlledSemanticWrite } from "@/services/orchestrator/revisionWriteSafety";
 
 const router = express.Router();
 
@@ -65,6 +66,13 @@ export default router.post(
 
     if (!scriptIds.length) return res.status(400).send(error("请先选择剧本"));
     const scripts = await u.db("o_script").whereIn("id", scriptIds);
+    if (scripts.length !== new Set(scriptIds).size || scripts.some((script: o_script) => script.projectId !== projectId))
+      return res.status(404).send(error("制作单元不属于当前项目"));
+    try {
+      // This legacy asynchronous path cannot hold revision ownership while its
+      // provider work runs. Refuse controlled units before its first write.
+      for (const script of scripts) await rejectControlledSemanticWrite(projectId, script.id!);
+    } catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code, message: e.message }); }
 
     // 构建 scriptId -> script 内容的映射
     const scriptMap = new Map(scripts.map((s: o_script) => [s.id, s]));

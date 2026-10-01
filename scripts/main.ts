@@ -7,6 +7,13 @@ import Module from "module";
 app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
 
+const dreamStreamDevUserData = process.env.TOONFLOW_DEV_USER_DATA?.trim();
+if (dreamStreamDevUserData && !app.isPackaged) {
+  const resolvedDevUserData = path.resolve(dreamStreamDevUserData);
+  app.setPath("userData", resolvedDevUserData);
+  console.log("[Dream Stream dev userData]:", resolvedDevUserData);
+}
+
 const TARGET_ENTRIES = new Set(["assets", "models", "serve", "skills", "web", "vendor"]);
 
 function copyDir(src: string, dest: string): void {

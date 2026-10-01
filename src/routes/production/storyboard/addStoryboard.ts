@@ -1,8 +1,10 @@
+import { productionFields, productionSpec, isAdvertisement, writeAdvertisementStoryboards } from "@/services/storyboardProduction";
 import express from "express";
 import u from "@/utils";
 import { z } from "zod";
 import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
+import { rejectControlledSemanticWrite } from "@/services/orchestrator/revisionWriteSafety";
 const router = express.Router();
 interface Storyboard {
   id: number;
@@ -15,6 +17,7 @@ interface Storyboard {
 export default router.post(
   "/",
   validateFields({
+  ...productionFields,
     prompt: z.string(),
     duration: z.number(),
     state: z.string(),
@@ -25,7 +28,15 @@ export default router.post(
     projectId: z.number(),
   }),
   async (req, res) => {
+    if (await isAdvertisement(req.body.projectId)) {
+      try {
+        const result = await writeAdvertisementStoryboards(req.body.projectId, req.body.scriptId, [req.body], "add");
+        return res.status(200).send(success(result[0]));
+      } catch (e: any) { return res.status(e.status ?? 400).send({ code: e.code ?? "STORYBOARD_PRODUCTION_INVALID", message: e.message }); }
+    }
     const { prompt, duration, state, src, scriptId, projectId, videoDesc, shouldGenerateImage } = req.body;
+    try { await rejectControlledSemanticWrite(projectId, scriptId); }
+    catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code, message: e.message }); }
     const trackId = Date.now()
     await u.db("o_videoTrack").insert({
       id: trackId,

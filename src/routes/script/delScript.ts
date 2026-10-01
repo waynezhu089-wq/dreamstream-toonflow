@@ -3,6 +3,7 @@ import u from "@/utils";
 import { z } from "zod";
 import { success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
+import { rejectProtectedUnitDeletion } from "@/services/orchestrator/revisionWriteSafety";
 const router = express.Router();
 
 // 删除剧本
@@ -14,6 +15,9 @@ export default router.post(
   async (req, res) => {
     const { ids } = req.body;
     const scriptData = await u.db("o_script").whereIn("id", ids);
+    try {
+      for (const script of scriptData) await rejectProtectedUnitDeletion(script.projectId!, script.id!);
+    } catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code, message: e.message }); }
     if (scriptData && scriptData.length) {
       const scriptProjectId = new Set(scriptData.map((item) => item.projectId));
       await u.db("o_agentWorkData").whereIn("projectId", Array.from(scriptProjectId)).whereIn("episodesId", ids).delete();

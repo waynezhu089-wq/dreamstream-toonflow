@@ -15,10 +15,11 @@ export default router.post(
     projectId: z.number(),
     remark: z.string().optional().nullable(),
     prompt: z.string().optional().nullable(),
+    scriptId: z.number().optional().nullable(),
   }),
   async (req, res) => {
-    const { name, describe, type, projectId, remark, prompt } = req.body;
-    await u.db("o_assets").insert({
+    const { name, describe, type, projectId, remark, prompt, scriptId } = req.body;
+    const [assetId] = await u.db("o_assets").insert({
       name,
       describe,
       type,
@@ -27,6 +28,10 @@ export default router.post(
       prompt,
       startTime: Date.now(),
     });
-    res.status(200).send(success({ message: "新增资产成功" }));
+    if (scriptId) {
+      const exists = await u.db("o_scriptAssets").where({ scriptId, assetId }).first();
+      if (!exists) await u.db("o_scriptAssets").insert({ scriptId, assetId });
+    }
+    res.status(200).send(success({ message: "新增资产成功", id: assetId }));
   },
 );

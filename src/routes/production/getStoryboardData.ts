@@ -1,4 +1,6 @@
 import express from "express";
+import { productionSpec } from "@/services/storyboardProduction";
+import { readImageProvenance } from "@/services/productionAttempt";
 import u from "@/utils";
 import { z } from "zod";
 import { success } from "@/lib/responseFormat";
@@ -10,10 +12,16 @@ export default router.post(
   validateFields({
     scriptId: z.number(),
     projectId: z.number(),
+    historyOnly: z.boolean().optional(),
+    historyOffset: z.number().int().nonnegative().optional(),
   }),
   async (req, res) => {
-    const { scriptId, projectId } = req.body;
-    const storyboardData = await u.db("o_storyboard").where({ scriptId, projectId }).orderBy("index", "asc");
+    const { scriptId, projectId, historyOnly = false, historyOffset = 0 } = req.body;
+    const query = u.db("o_storyboard").where({ scriptId, projectId });
+    if (historyOnly) query.whereNotNull("retiredAt").orderBy("retiredAt", "desc").orderBy("id", "desc").limit(100).offset(historyOffset);
+    else query.whereNull("retiredAt").orderBy("index", "asc");
+    const storyboardData = await query;
+    const imageProvenance = historyOnly ? new Map() : await readImageProvenance(projectId, scriptId, storyboardData);
     const data = await Promise.all(
       storyboardData.map(async (i) => {
         return {
@@ -67,10 +75,13 @@ export default router.post(
         );
         return {
           id: String(item.id),
+          ...productionSpec(item),
+          imageProvenance: imageProvenance.get(item.id as number),
           createTime: item.createTime ?? undefined,
           duration: item.duration ? Number(item.duration) : undefined,
           filePath: item.filePath || undefined,
           prompt: item.prompt ?? undefined,
+          imagePrompt: item.imagePrompt ?? null,
           scriptId: item.scriptId ?? undefined,
           characters: charactersWithUrl,
           index: item.index,

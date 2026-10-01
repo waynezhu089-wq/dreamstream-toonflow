@@ -11,10 +11,36 @@ import buildRoute from "@/core";
 import path from "path";
 import fs from "fs";
 import u from "@/utils";
+import { dbReady } from "@/utils/db";
 import jwt from "jsonwebtoken";
 import socketInit from "@/socket/index";
 import { isEletron } from "@/utils/getPath";
 import { ensureThumbnail, ThumbnailSize } from "@/utils/image";
+import { registerProductionGate } from "@/middleware/productionGate";
+import { initializeAssetPlanSchema } from "@/lib/advertisementAssetPlanSchema";
+import assetPlan from "@/routes/project/advertisement/assetPlan";
+
+import { initializeModelPresetSchema } from "@/lib/modelPresetSchema";
+import modelPresets from "@/routes/modelSelect/presets";
+import { modelUseGate } from "@/middleware/modelUseGate";
+
+import { initializeStoryboardProductionSchema } from "@/lib/storyboardProductionSchema";
+import { initializeCompositeAttemptSchema } from "@/lib/compositeAttemptSchema";
+import composite from "@/routes/production/storyboard/composite";
+import { initializeCapabilitySchema } from "@/lib/capabilitySchema";
+import capabilities from "@/routes/capabilities";
+import { initializeSkillSchema } from "@/lib/skillSchema";
+import skills from "@/routes/skills";
+import { initializeProductionProfileSchema } from "@/lib/productionProfileSchema";
+import productionProfiles from "@/routes/productionProfiles";
+import { initializeRecipeSchema } from "@/lib/recipeSchema";
+import recipes from "@/routes/recipes";
+import stageOrchestrator from "@/routes/stageOrchestrator";
+import { initializeSupervisorSchema } from "@/lib/supervisorSchema";
+import { initializeRevisionSchema } from "@/lib/revisionSchema";
+import { initializeVideoProductionSchema } from "@/lib/videoProductionSchema";
+import supervisor from "@/routes/supervisor";
+import validateAcceptedVideoMaterialRoute from "@/routes/production/workbench/validateAcceptedVideoMaterial";
 
 const app = express();
 const server = http.createServer(app);
@@ -45,6 +71,18 @@ async function checkPermissions() {
 
 export default async function startServe(randomPort: Boolean = false) {
   await checkPermissions();
+  await dbReady;
+  await initializeAssetPlanSchema(u.db);
+  await initializeModelPresetSchema(u.db);
+  await initializeStoryboardProductionSchema(u.db);
+  await initializeCompositeAttemptSchema(u.db);
+  await initializeCapabilitySchema(u.db);
+  await initializeSkillSchema(u.db);
+  await initializeProductionProfileSchema(u.db);
+  await initializeRecipeSchema(u.db);
+  await initializeSupervisorSchema(u.db);
+  await initializeRevisionSchema(u.db);
+  await initializeVideoProductionSchema(u.db);
 
   await u.writeVersion();
   const io = new Server(server, { cors: { origin: "*" } });
@@ -65,6 +103,7 @@ export default async function startServe(randomPort: Boolean = false) {
     fs.mkdirSync(ossDir, { recursive: true });
   }
   console.log("文件目录:", ossDir);
+  const serveOriginalOssFile = express.static(ossDir, { acceptRanges: false });
   app.use(
     "/oss",
     (req, res, next) => {
@@ -94,7 +133,7 @@ export default async function startServe(randomPort: Boolean = false) {
           sizeOpts = { type: "percentage", value: pct };
         } else {
           // 无效的 size 参数，降级返回原图
-          express.static(ossDir, { acceptRanges: false })(req, res, next);
+          serveOriginalOssFile(req, res, next);
           return;
         }
 
@@ -103,19 +142,34 @@ export default async function startServe(randomPort: Boolean = false) {
         const dir = path.dirname(req.path);
         const smallImagePath = path.join(smallImageBaseDir, dir, `${base}_${sizeSubDir}${ext}`);
 
-        ensureThumbnail(originalPath, smallImagePath, sizeOpts).then((thumbnailPath) => {
-          if (thumbnailPath) {
-            res.sendFile(thumbnailPath);
-          } else {
-            // 缩略图生成失败，降级返回原图
-            express.static(ossDir, { acceptRanges: false })(req, res, next);
+        ensureThumbnail(originalPath, smallImagePath, sizeOpts).then(async (thumbnailPath) => {
+          if (!thumbnailPath) return serveOriginalOssFile(req, res, next);
+          try {
+            const stat = await fs.promises.stat(thumbnailPath);
+            if (!stat.isFile()) return serveOriginalOssFile(req, res, next);
+            const image = fs.createReadStream(thumbnailPath);
+            image.once("error", (error) => {
+              console.warn("[oss] 缩略图读取失败:", error);
+              if (res.headersSent) res.destroy(error);
+              else serveOriginalOssFile(req, res, next);
+            });
+            // Express 5 treats strings containing '/' as literal MIME values; pass only the extension.
+            res.type(path.extname(thumbnailPath));
+            image.pipe(res);
+          } catch (error) {
+            console.warn("[oss] 缩略图回传失败，降级返回原图:", error);
+            serveOriginalOssFile(req, res, next);
           }
+        }).catch((error) => {
+          console.warn("[oss] 缩略图处理失败，降级返回原图:", error);
+          if (res.headersSent) res.destroy(error);
+          else serveOriginalOssFile(req, res, next);
         });
         return;
       }
       next();
     },
-    express.static(ossDir, { acceptRanges: false }),
+    serveOriginalOssFile,
   );
   // skills 静态资源
   const skillsDir = u.getPath("skills");
@@ -169,6 +223,19 @@ export default async function startServe(randomPort: Boolean = false) {
     }
   });
 
+  registerProductionGate(app);
+  app.use("/api/production/workbench/validateAcceptedVideoMaterial", validateAcceptedVideoMaterialRoute);
+  app.use("/api/production/storyboard/composite", composite);
+  app.use("/api/storyboardCapability", (await import("@/routes/storyboardCapability")).default);
+  app.use("/api/capabilities", capabilities);
+  app.use("/api/skills", skills);
+  app.use("/api/productionProfiles", productionProfiles);
+  app.use("/api/recipes", recipes);
+  app.use("/api/stageOrchestrator", stageOrchestrator);
+  app.use("/api/supervisor", supervisor);
+  app.use("/api/modelSelect/presets", modelPresets);
+  app.use(modelUseGate);
+  app.use("/api/project/advertisement/assetPlan", assetPlan);
   const router = await import("@/router");
   await router.default(app);
 

@@ -1,8 +1,12 @@
-import { generateText, streamText, wrapLanguageModel, stepCountIs, extractReasoningMiddleware } from "ai";
+import { generateText, generateObject, streamText, wrapLanguageModel, stepCountIs, extractReasoningMiddleware } from "ai";
+import { createHash } from "node:crypto";
+import type { ZodType } from "zod";
 import { devToolsMiddleware } from "@ai-sdk/devtools";
 import axios from "axios";
 import { transform } from "sucrase";
 import u from "@/utils";
+
+import { requireModel } from "@/services/modelPreset";
 
 type AiType =
   | "scriptAgent"
@@ -157,7 +161,9 @@ async function withTaskRecord<T>(
     return result;
   } catch (e) {
     taskRecord(-1, u.error(e).message);
-    throw new Error(u.error(e).message);
+    const wrapped = e instanceof Error ? e : new Error(u.error(e).message);
+    if (wrapped.message !== u.error(e).message) wrapped.message = u.error(e).message;
+    throw wrapped;
   }
 }
 
@@ -193,6 +199,27 @@ class AiText {
       ...(middleware ? (Array.isArray(middleware) ? middleware : [middleware]) : []),
     ];
     return mws.length > 0 ? wrapLanguageModel({ model: baseModel, middleware: mws.length === 1 ? mws[0] : mws }) : baseModel;
+  }
+  // Pin the actual provider/model and deployment parameters for an entire
+  // structured review, including its optional repair attempt.
+  async trackedSession() {
+    const modelReference = await resolveModelName(this.AiType);
+    const config = await getModelConfig(this.AiType);
+    const sdkFn = await getVendorTemplateFn("textRequest", modelReference);
+    const model = await sdkFn(this.think, this.thinkLevel);
+    return {
+      modelReference,
+      invoke: (input: Omit<Parameters<typeof generateText>[0], "model">) => generateText({
+        ...input, model,
+        ...(config?.temperature && { temperature: config.temperature }),
+        ...(config?.maxOutputTokens && { maxOutputTokens: config.maxOutputTokens }),
+      } as Parameters<typeof generateText>[0]),
+      invokeObject: (input: Omit<Parameters<typeof generateObject>[0], "model"> & { schema: ZodType }) => generateObject({
+        ...input, model,
+        ...(config?.temperature && { temperature: config.temperature }),
+        ...(config?.maxOutputTokens && { maxOutputTokens: config.maxOutputTokens }),
+      } as Parameters<typeof generateObject>[0]),
+    };
   }
   async invoke(input: Omit<Parameters<typeof generateText>[0], "model">) {
     const config = await getModelConfig(this.AiType);
@@ -250,7 +277,8 @@ class AiImage {
     this.key = key;
   }
   async run(input: ImageConfig, taskRecord?: TaskRecord) {
-    const modelName = await resolveModelName(this.key);
+    const selected = taskRecord ? await requireModel(taskRecord.projectId, "image", this.key) : this.key;
+    const modelName = await resolveModelName(selected as typeof this.key);
     const exec = async (mn: `${string}:${string}`) => {
       const fn = await getVendorTemplateFn("imageRequest", mn);
       await referenceList2imageBase642(mn.split(/:(.+)/)[0], input);
@@ -259,7 +287,7 @@ class AiImage {
       return this;
     };
     if (taskRecord) {
-      await withTaskRecord(this.key, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
+      await withTaskRecord(modelName, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
       return this;
     }
     await exec(modelName);
@@ -282,11 +310,11 @@ type VideoMode =
 interface VideoConfig {
   duration: number;
   resolution: string;
-  aspectRatio: "16:9" | "9:16";
+  aspectRatio: `${number}:${number}`;
   prompt: string;
   referenceList?: ReferenceList[];
   audio?: boolean;
-  mode: VideoMode[];
+  mode: VideoMode;
 }
 
 class AiVideo {
@@ -296,18 +324,29 @@ class AiVideo {
     this.key = key;
   }
   async run(input: VideoConfig, taskRecord?: TaskRecord) {
-    const modelName = await resolveModelName(this.key);
+    const selected = taskRecord ? await requireModel(taskRecord.projectId, "video", this.key) : this.key;
+    const modelName = await resolveModelName(selected as typeof this.key);
     try {
       const exec = async (mn: `${string}:${string}`) => {
         const fn = await getVendorTemplateFn("videoRequest", mn);
         await referenceList2imageBase642(mn.split(/:(.+)/)[0], input);
-
-        this.result = await fn(input);
-
-        if (this.result.startsWith("http")) this.result = await urlToBase64(this.result);
+        let entered = false;
+        try {
+          entered = true;
+          this.result = await fn(input);
+          if (this.result.startsWith("http")) this.result = await urlToBase64(this.result);
+        } catch (error: any) {
+          if (entered) {
+            const wrapped: any = error instanceof Error ? error : new Error(String(error));
+            wrapped.code = wrapped.code || "PROVIDER_SUBMISSION_UNCERTAIN";
+            wrapped.providerSubmissionUncertain = true;
+            throw wrapped;
+          }
+          throw error;
+        }
       };
       if (taskRecord) {
-        await withTaskRecord(this.key, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
+        await withTaskRecord(modelName, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
         return this;
       }
       await exec(modelName);
@@ -320,6 +359,28 @@ class AiVideo {
     await u.oss.writeFile(path, this.result);
     return this;
   }
+  async saveWithProof(path: string) {
+    const bytes = Buffer.from(this.result.replace(/^data:[^;]+;base64,/, ""), "base64");
+    const ftypSize = bytes.length >= 4 ? bytes.readUInt32BE(0) : 0;
+    if (bytes.length < 16 || bytes.subarray(4, 8).toString("ascii") !== "ftyp" ||
+      ftypSize < 16 || ftypSize > bytes.length || ftypSize % 4 !== 0) {
+      const error: any = new Error("视频输出不是受支持的 MP4 字节");
+      error.code = "VIDEO_OUTPUT_PROVENANCE_MISMATCH";
+      throw error;
+    }
+    const majorBrand = bytes.subarray(8, 12).toString("ascii");
+    const compatibleBrands: string[] = [];
+    for (let offset = 16; offset + 4 <= ftypSize; offset += 4)
+      compatibleBrands.push(bytes.subarray(offset, offset + 4).toString("ascii"));
+    if (majorBrand === "qt  " && compatibleBrands.every(brand => brand === "qt  ")) {
+      const error: any = new Error("QuickTime-only 输出不属于 001E MP4 合同");
+      error.code = "VIDEO_OUTPUT_PROVENANCE_MISMATCH";
+      throw error;
+    }
+    await u.oss.writeFile(path, bytes);
+    return { filePath: path, mime: "video/mp4" as const,
+      sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.length };
+  }
 }
 class AiAudio {
   private key: `${string}:${string}`;
@@ -328,7 +389,8 @@ class AiAudio {
     this.key = key;
   }
   async run(input: VideoConfig, taskRecord?: TaskRecord) {
-    const modelName = await resolveModelName(this.key);
+    const selected = taskRecord ? await requireModel(taskRecord.projectId, "tts", this.key) : this.key;
+    const modelName = await resolveModelName(selected as typeof this.key);
     const exec = async (mn: `${string}:${string}`) => {
       try {
         const fn = await getVendorTemplateFn("ttsRequest", mn);
@@ -340,7 +402,7 @@ class AiAudio {
       } catch (e) {}
     };
     if (taskRecord) {
-      return withTaskRecord(this.key, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
+      return withTaskRecord(modelName, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
     }
     return await exec(modelName);
   }

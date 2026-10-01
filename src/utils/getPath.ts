@@ -3,7 +3,10 @@ import isPathInside from "is-path-inside";
 
 export default (fileName?: string[] | string) => {
   let basePath: string;
-  if (typeof process.versions?.electron !== "undefined") {
+  const dataDirOverride = process.env.TOONFLOW_DATA_DIR?.trim();
+  if (dataDirOverride) {
+    basePath = path.resolve(dataDirOverride);
+  } else if (typeof process.versions?.electron !== "undefined") {
     const { app } = require("electron");
     const userDataDir: string = app.getPath("userData");
     basePath = path.join(userDataDir, "data");

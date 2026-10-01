@@ -3,6 +3,7 @@ import u from "@/utils";
 import { z } from "zod";
 import { success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
+import { rejectProtectedUnitDeletion } from "@/services/orchestrator/revisionWriteSafety";
 const router = express.Router();
 
 // 删除项目
@@ -13,6 +14,10 @@ export default router.post(
   }),
   async (req, res) => {
     const { id } = req.body;
+    try {
+      const scripts = await u.db("o_script").where({ projectId: id }).select("id");
+      for (const script of scripts) await rejectProtectedUnitDeletion(id, script.id!);
+    } catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code, message: e.message }); }
     //删除项目
     await u.db("o_project").where("id", id).delete();
     await u.db("o_agentWorkData").where("projectId", id).delete();
