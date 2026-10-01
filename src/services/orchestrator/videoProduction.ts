@@ -19,7 +19,8 @@ type GenerateItem = { trackId: number; references: RefInput[]; prompt: string; d
 type GenerateOptions = { model?: string; mode: string; resolution: string; audio?: boolean };
 type ReservedReference = { sourceKind: "storyboard" | "assets"; sourceId: number; filePath: string; identity: any; mediaTypeHint: string | null };
 type NormalizedMode = string | string[];
-type MaterializedReference = ReservedReference & { role: string; mediaType: "image" | "video" | "audio"; proof: { sha256: string; byteLength: number }; base64: string };
+type MaterializedReference = ReservedReference & { role: string; mediaType: "image" | "video" | "audio"; mime: string;
+  proof: { sha256: string; byteLength: number; mime: string }; base64: string };
 
 const fail = (code: string, message: string, status = 409): never => { throw new ProfileError(code, message, status); };
 const hashBytes = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
@@ -120,15 +121,30 @@ function normalizedHint(value: string | null): "image" | "video" | "audio" | nul
   if (v === "audio" || v.startsWith("audio/")) return "audio";
   return null;
 }
-function mediaType(bytes: Buffer, hint: string | null): "image" | "video" | "audio" {
+function mediaDescriptor(bytes: Buffer, hint: string | null) {
+  let type: "image" | "video" | "audio";
   const hinted = normalizedHint(hint);
-  if (hinted === "image" && looksImage(bytes)) return "image";
-  if (hinted === "video" && looksVideo(bytes)) return "video";
-  if (hinted === "audio" && looksAudio(bytes)) return "audio";
-  if (looksImage(bytes)) return "image";
-  if (looksVideo(bytes)) return "video";
-  if (looksAudio(bytes)) return "audio";
-  fail("VIDEO_REFERENCE_UNSUPPORTED", "参考媒体字节类型无法验证");
+  if (hinted === "image" && looksImage(bytes)) type = "image";
+  else if (hinted === "video" && looksVideo(bytes)) type = "video";
+  else if (hinted === "audio" && looksAudio(bytes)) type = "audio";
+  else if (looksImage(bytes)) type = "image";
+  else if (looksVideo(bytes)) type = "video";
+  else if (looksAudio(bytes)) type = "audio";
+  else fail("VIDEO_REFERENCE_UNSUPPORTED", "参考媒体字节类型无法验证");
+  let mime = type === "image" ? "image/jpeg" : type === "video" ? "video/mp4" : "audio/mpeg";
+  if (type === "image") {
+    if (bytes.subarray(0, 8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]))) mime = "image/png";
+    else if (bytes.subarray(0, 3).toString("ascii") === "GIF") mime = "image/gif";
+    else if (bytes.subarray(0, 4).toString("ascii") === "RIFF") mime = "image/webp";
+  } else if (type === "video") {
+    if (bytes.subarray(0, 4).equals(Buffer.from([0x1a,0x45,0xdf,0xa3]))) mime = "video/webm";
+    else if (bytes.subarray(8, 12).toString("ascii") === "qt  ") mime = "video/quicktime";
+  } else {
+    if (bytes.subarray(0, 4).toString("ascii") === "OggS") mime = "audio/ogg";
+    else if (bytes.subarray(0, 4).toString("ascii") === "fLaC") mime = "audio/flac";
+    else if (bytes.subarray(0, 4).toString("ascii") === "RIFF") mime = "audio/wav";
+  }
+  return { type, mime };
 }
 function roles(mode: NormalizedMode, types: Array<"image" | "video" | "audio">) {
   if (typeof mode === "string") {
@@ -258,8 +274,10 @@ async function materialize(reserved: any) {
     let bytes: Buffer;
     try { bytes = await u.oss.getFile(ref.filePath); }
     catch { fail("VIDEO_REFERENCE_UNSUPPORTED", "参考媒体文件不可读取"); }
-    const type = mediaType(bytes, ref.mediaTypeHint);
-    temp.push({ ...ref, mediaType: type, proof: { sha256: hashBytes(bytes), byteLength: bytes.length }, base64: bytes.toString("base64") });
+    const { type, mime } = mediaDescriptor(bytes, ref.mediaTypeHint);
+    temp.push({ ...ref, mediaType: type, mime,
+      proof: { sha256: hashBytes(bytes), byteLength: bytes.length, mime },
+      base64: `data:${mime};base64,${bytes.toString("base64")}` });
   }
   const assigned = roles(reserved.execution.mode, temp.map(ref => ref.mediaType));
   return temp.map((ref, index) => ({ ...ref, role: assigned[index] })) as MaterializedReference[];
