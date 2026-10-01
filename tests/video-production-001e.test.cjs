@@ -23,6 +23,8 @@ const sha = b => createHash('sha256').update(b).digest('hex');
 async function setupE001(t, descriptor = null) {
   const f = await fixture(t);
   await f.load('lib/videoProductionSchema').initializeVideoProductionSchema(f.db);
+  // productionOperationGuard reads the accepted D-C Recipe binding table even when no Recipe is bound.
+  await f.load('lib/recipeSchema').initializeRecipeSchema(f.db);
   if (!await f.raw.schema.hasTable('o_user')) await f.raw.schema.createTable('o_user', tb => {
     tb.integer('id').primary(); tb.text('name'); tb.text('password');
   });
