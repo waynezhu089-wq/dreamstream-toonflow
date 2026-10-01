@@ -4,6 +4,7 @@ import { z } from "zod";
 import { success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 import { readAcceptedCurrentMaterial } from "@/services/orchestrator/videoProduction";
+import { videoProfileClassForProject } from "@/services/orchestrator/videoProductionProfile";
 const router = express.Router();
 
 // 获取生成图片
@@ -35,6 +36,11 @@ export default router.post(
       filePath: ending,
       type: "clip",
     });
+    const profileClass = await videoProfileClassForProject(projectId);
+    if (profileClass === "MANAGED_V2_UNSUPPORTED")
+      return res.status(409).send({ code: "VIDEO_PROFILE_COMPAT_UNSUPPORTED", message: "当前受控 Profile 未声明受支持的视频生产合同" });
+    if (profileClass === "E001_ENABLED" && scriptId == null)
+      return res.status(400).send({ code: "VIDEO_EDITOR_MATERIAL_STALE", message: "001E 剪辑素材读取必须指定制作单元" });
     const accepted = scriptId == null ? null : await readAcceptedCurrentMaterial(projectId, scriptId);
     let video: any[];
     if (accepted) {
