@@ -36,6 +36,7 @@ async function fixture(t) {
   const ai = type => model => ({ save: async () => {}, run: async () => { calls.push({ type, model }); return { save: async () => {} }; } });
   utils = { db, vendor: { getModelList: async () => models }, Ai: { Image: ai('image'), Video: ai('video') }, uuid: () => 'result', oss: { getSmallImageUrl: async p => p }, error: e => e };
   await load('lib/modelPresetSchema').initializeModelPresetSchema(db); await load('lib/modelPresetSchema').initializeModelPresetSchema(db);
+  await load('lib/productionProfileSchema').initializeProductionProfileSchema(db);
   const service = load('services/modelPreset'); const app = express(); app.use(express.json());
   app.use('/api/modelSelect/presets', load('routes/modelSelect/presets').default);
   app.use(load('middleware/modelUseGate').modelUseGate);
