@@ -6,6 +6,7 @@ import { validateFields } from "@/middleware/middleware";
 import { controlledTrackContext, assertTrackNotBusy, assertActiveManagedTrack } from "@/services/orchestrator/revisionWriteSafety";
 import { assertCurrentPermission } from "@/services/orchestrator/revisionWorkGuard";
 import { ProfileError } from "@/services/orchestrator/profileDefinition";
+import { assertVideoOperationAllowedInTransaction } from "@/services/orchestrator/videoProductionProfile";
 const router = express.Router();
 export default router.post(
   "/",
@@ -20,6 +21,7 @@ export default router.post(
       await u.db.transaction(async trx => {
         const context = await controlledTrackContext(trx, id);
         if (context.controlled) {
+          await assertVideoOperationAllowedInTransaction(trx, "video.source.update", context);
           if (typeof prompt !== "string") throw new ProfileError("REVISION_WORK_SCOPE_INVALID", "当前提示词不能为空", 409);
           await assertTrackNotBusy(trx, context, id);
           await assertActiveManagedTrack(trx, context, context.track);
