@@ -6,8 +6,9 @@ import { success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 import { ReferenceList } from "@/utils/ai";
 import { admitRevisionWork } from "@/services/orchestrator/revisionWorkGuard";
-import { runControlledVideo } from "@/services/orchestrator/controlledVideoWorker";
-import { usesControlledRevision } from "@/services/orchestrator/revisionWriteSafety";
+import { runControlledVideo, runE001ControlledVideo } from "@/services/orchestrator/controlledVideoWorker";
+import { reserveE001VideoGeneration } from "@/services/orchestrator/videoProduction";
+import { videoProfileClassForProject } from "@/services/orchestrator/videoProductionProfile";
 import { requireModel, ModelConfigError } from "@/services/modelPreset";
 import { settleRevisionWork } from "@/services/orchestrator/revisionWorkGuard";
 const router = express.Router();
@@ -50,12 +51,29 @@ export default router.post(
     const { scriptId, projectId, trackData, model, resolution, audio, mode } = req.body;
     const controlledItems = (trackData as { trackId: number; uploadData: { id: number; sources: string }[]; prompt: string; duration: number }[])
       .map(item => ({ ...item, videoPath: `/${projectId}/video/${uuidv4()}.mp4` }));
-    let guarded;
-    let controlled;
-    try { controlled = await usesControlledRevision(projectId); guarded = controlled ?
-      await admitRevisionWork({ projectId, scriptId }, "VIDEO_GENERATE",
-        controlledItems.map(item => ({ trackId: item.trackId, references: item.uploadData, videoPath: item.videoPath }))) : null; }
-    catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code ?? "REVISION_RUNTIME_UNSAFE", message: e.message }); }
+    let profileClass;
+    try { profileClass = await videoProfileClassForProject(projectId); }
+    catch (e: any) { return res.status(e.status ?? 409).send({ code: e.code ?? "VIDEO_PROFILE_COMPAT_UNSUPPORTED", message: e.message }); }
+    if (profileClass === "MANAGED_V2_UNSUPPORTED")
+      return res.status(409).send({ code: "VIDEO_PROFILE_COMPAT_UNSUPPORTED", message: "当前受控 Profile 未声明受支持的视频生产合同" });
+    if (profileClass === "E001_ENABLED") {
+      try {
+        const reserved = await reserveE001VideoGeneration({ projectId, scriptId },
+          controlledItems.map(item => ({ trackId: item.trackId, references: item.uploadData, videoPath: item.videoPath,
+            prompt: item.prompt, duration: item.duration })), { model, mode, resolution, audio });
+        res.status(200).send(success(reserved.guards.map(guard => ({ videoId: guard.videoId, trackId: guard.trackId }))));
+        for (const guard of reserved.guards) void runE001ControlledVideo({ projectId, scriptId }, guard);
+        return;
+      } catch (e: any) {
+        return res.status(e.status ?? 409).send({ code: e.code ?? "REVISION_RUNTIME_UNSAFE", message: e.message });
+      }
+    }
+    const controlled = profileClass === "PRE_001E_CONTROLLED_COMPAT";
+    const guarded = controlled ? await admitRevisionWork({ projectId, scriptId }, "VIDEO_GENERATE",
+      controlledItems.map(item => ({ trackId: item.trackId, references: item.uploadData, videoPath: item.videoPath }))).catch((e: any) => {
+        res.status(e.status ?? 409).send({ code: e.code ?? "REVISION_RUNTIME_UNSAFE", message: e.message }); return undefined;
+      }) : null;
+    if (controlled && guarded === undefined) return;
     if (controlled && !guarded) return res.status(409).send({ code: "REVISION_RUNTIME_UNSAFE", message: "受控 Profile 已变化，请重试" });
     if (guarded) {
       let resolvedModel: string;
