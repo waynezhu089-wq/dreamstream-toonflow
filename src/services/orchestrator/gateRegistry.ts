@@ -30,3 +30,5 @@ registerGate("advertisement.asset-ready", async (context, q) => {
 });
 registerGate("supervisor.storyboard-approved", (context, q) => supervisorStageGate("supervisor.storyboard-approved", context, q));
 registerGate("supervisor.storyboard-approved.v2", (context, q) => supervisorStageGate("supervisor.storyboard-approved.v2", context, q));
+registerGate("video.accepted-current-ready", async (context, q) =>
+  (await import("./videoProduction")).videoAcceptedCurrentGate(context, q));
