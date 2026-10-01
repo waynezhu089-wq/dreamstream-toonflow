@@ -29,26 +29,33 @@ const positive = (value: unknown) => Number.isSafeInteger(Number(value)) && Numb
 
 export function normalizeVideoMode(value: unknown): NormalizedMode {
   if (Array.isArray(value)) {
-    if (!value.every(item => typeof item === "string")) fail("VIDEO_MODEL_MODE_UNSUPPORTED", "视频模式字段不合法");
+    if (!value.every(item => typeof item === "string"))
+      return fail("VIDEO_MODEL_MODE_UNSUPPORTED", "视频模式字段不合法");
     return value.map(String);
   }
-  if (typeof value !== "string" || !value) fail("VIDEO_MODEL_MODE_UNSUPPORTED", "视频模式字段不合法");
-  if (value.startsWith("[") && value.endsWith("]")) {
+  if (typeof value !== "string" || !value)
+    return fail("VIDEO_MODEL_MODE_UNSUPPORTED", "视频模式字段不合法");
+  const text = value;
+  if (text.startsWith("[") && text.endsWith("]")) {
     try {
-      const parsed = JSON.parse(value);
+      const parsed: unknown = JSON.parse(text);
       if (!Array.isArray(parsed) || !parsed.every(item => typeof item === "string")) throw new Error();
       return parsed.map(String);
-    } catch { fail("VIDEO_MODEL_MODE_UNSUPPORTED", "视频多参考模式字段不合法"); }
+    } catch {
+      return fail("VIDEO_MODEL_MODE_UNSUPPORTED", "视频多参考模式字段不合法");
+    }
   }
-  return value;
+  return text;
 }
 const normalizedModeKey = (value: unknown) => JSON.stringify(normalizeVideoMode(value));
-const normalizedReason = (value: unknown) => {
+const normalizedReason = (value: unknown): string | null => {
   if (value == null) return null;
-  if (typeof value !== "string") fail("VIDEO_ACCEPTANCE_ID_CONFLICT", "Accept reason 字段不合法", 400);
+  if (typeof value !== "string")
+    return fail("VIDEO_ACCEPTANCE_ID_CONFLICT", "Accept reason 字段不合法", 400);
   const reason = value.trim();
   if (!reason) return null;
-  if (reason.length > 1000) fail("VIDEO_ACCEPTANCE_ID_CONFLICT", "Accept reason 超过长度限制", 400);
+  if (reason.length > 1000)
+    return fail("VIDEO_ACCEPTANCE_ID_CONFLICT", "Accept reason 超过长度限制", 400);
   return reason;
 };
 const effectiveRatio = (project: any) => String(project?.videoRatio || "16:9");
@@ -83,7 +90,7 @@ async function referenceReservation(q: Knex.Transaction, scope: Scope, trackId: 
       identity: { assetId: Number(asset.id), imageId: Number(image.id), filePath: image.filePath, storedType: image.type ?? null },
       mediaTypeHint: image.type ?? null };
   }
-  fail("VIDEO_REFERENCE_UNSUPPORTED", "参考素材来源类型不支持");
+  return fail("VIDEO_REFERENCE_UNSUPPORTED", "参考素材来源类型不支持");
 }
 
 async function reserveReferences(q: Knex.Transaction, scope: Scope, trackId: number, refs: RefInput[]) {
@@ -122,15 +129,15 @@ function normalizedHint(value: string | null): "image" | "video" | "audio" | nul
   return null;
 }
 function mediaDescriptor(bytes: Buffer, hint: string | null) {
-  let type: "image" | "video" | "audio";
   const hinted = normalizedHint(hint);
-  if (hinted === "image" && looksImage(bytes)) type = "image";
-  else if (hinted === "video" && looksVideo(bytes)) type = "video";
-  else if (hinted === "audio" && looksAudio(bytes)) type = "audio";
-  else if (looksImage(bytes)) type = "image";
-  else if (looksVideo(bytes)) type = "video";
-  else if (looksAudio(bytes)) type = "audio";
-  else fail("VIDEO_REFERENCE_UNSUPPORTED", "参考媒体字节类型无法验证");
+  const type: "image" | "video" | "audio" =
+    hinted === "image" && looksImage(bytes) ? "image" :
+    hinted === "video" && looksVideo(bytes) ? "video" :
+    hinted === "audio" && looksAudio(bytes) ? "audio" :
+    looksImage(bytes) ? "image" :
+    looksVideo(bytes) ? "video" :
+    looksAudio(bytes) ? "audio" :
+    fail("VIDEO_REFERENCE_UNSUPPORTED", "参考媒体字节类型无法验证");
   let mime = type === "image" ? "image/jpeg" : type === "video" ? "video/mp4" : "audio/mpeg";
   if (type === "image") {
     if (bytes.subarray(0, 8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]))) mime = "image/png";
@@ -174,9 +181,11 @@ function roles(mode: NormalizedMode, types: Array<"image" | "video" | "audio">) 
   const limits: Record<string, number> = {};
   for (const value of mode) {
     const match = /^(imageReference|videoReference|audioReference|textReference):(\d+)$/.exec(value);
-    if (!match) fail("VIDEO_MODEL_MODE_UNSUPPORTED", "多参考模式声明不合法");
-    if (match[1] === "textReference") fail("VIDEO_REFERENCE_UNSUPPORTED", "001E 首版不支持 textReference");
-    limits[match[1]] = Number(match[2]);
+    if (!match) return fail("VIDEO_MODEL_MODE_UNSUPPORTED", "多参考模式声明不合法");
+    const [, referenceType, rawLimit] = match;
+    if (referenceType === "textReference")
+      return fail("VIDEO_REFERENCE_UNSUPPORTED", "001E 首版不支持 textReference");
+    limits[referenceType] = Number(rawLimit);
   }
   const counts: Record<string, number> = {};
   return types.map(type => {
@@ -195,7 +204,7 @@ async function modelDescriptor(model: string, mode: NormalizedMode, refs: Materi
   if (!vendor) fail("VIDEO_MODEL_UNAVAILABLE", "视频模型供应商不可用");
   let models: any[];
   try { models = await u.vendor.getModelList(vendorId); }
-  catch { fail("VIDEO_MODEL_UNAVAILABLE", "视频模型列表不可用"); }
+  catch { return fail("VIDEO_MODEL_UNAVAILABLE", "视频模型列表不可用"); }
   const descriptor = models.find((item: any) => item.modelName === modelName && item.type === "video");
   if (!descriptor) fail("VIDEO_MODEL_UNAVAILABLE", "当前视频模型不可用");
   const modes = Array.isArray(descriptor.mode) ? descriptor.mode : [];
@@ -273,7 +282,7 @@ async function materialize(reserved: any) {
   for (const ref of refs) {
     let bytes: Buffer;
     try { bytes = await u.oss.getFile(ref.filePath); }
-    catch { fail("VIDEO_REFERENCE_UNSUPPORTED", "参考媒体文件不可读取"); }
+    catch { return fail("VIDEO_REFERENCE_UNSUPPORTED", "参考媒体文件不可读取"); }
     const { type, mime } = mediaDescriptor(bytes, ref.mediaTypeHint);
     temp.push({ ...ref, mediaType: type, mime,
       proof: { sha256: hashBytes(bytes), byteLength: bytes.length, mime },
