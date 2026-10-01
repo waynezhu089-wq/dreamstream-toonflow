@@ -412,7 +412,9 @@ export async function acceptedCurrentForTrack(q: Knex.Transaction, scope: Scope,
 
 export async function readVideoProductionProjection(projectId: number, scriptId: number, videos: any[], tracks: any[]) {
   return db().transaction(async q => {
-    if (await classifyVideoProfile(q, projectId) !== "E001_ENABLED") return null;
+    const profileClass = await classifyVideoProfile(q, projectId);
+    if (profileClass === "MANAGED_V2_UNSUPPORTED") fail("VIDEO_PROFILE_COMPAT_UNSUPPORTED", "当前受控 Profile 未声明受支持的视频生产合同");
+    if (profileClass !== "E001_ENABLED") return null;
     const scope = { projectId, scriptId }, candidates: Record<number, CandidateProjection> = {}, accepted: Record<number, number> = {};
     for (const video of videos) candidates[Number(video.id)] = await assessE001Candidate(q, scope, video);
     for (const track of tracks) {
@@ -425,7 +427,9 @@ export async function readVideoProductionProjection(projectId: number, scriptId:
 
 export async function readAcceptedCurrentMaterial(projectId: number, scriptId: number) {
   return db().transaction(async q => {
-    if (await classifyVideoProfile(q, projectId) !== "E001_ENABLED") return null;
+    const profileClass = await classifyVideoProfile(q, projectId);
+    if (profileClass === "MANAGED_V2_UNSUPPORTED") fail("VIDEO_PROFILE_COMPAT_UNSUPPORTED", "当前受控 Profile 未声明受支持的视频生产合同");
+    if (profileClass !== "E001_ENABLED") return null;
     const scope = { projectId, scriptId }, tracks = await q("o_videoTrack").where(scope), result: any[] = [];
     for (const track of tracks) {
       const current = await acceptedCurrentForTrack(q, scope, track);
