@@ -54,6 +54,13 @@ async function fixture(t) {
   return { db, service: loadSource(path.join(root,'src/v04/service.ts'),db) };
 }
 const asset = (name='Dreamer', category='CHAR', sourcePolicy='AI_ALLOWED') => ({ name, category, description:'calm', identityAnchors:['left eyebrow scar'], mustPreserve:['scar'], forbiddenChanges:['redraw brand text'], ownerKey:null, variantOf:null, sourcePolicy, prompt:'' });
+test('Project Agent keeps a project-level memory identity and reads selected shot context without a production write route', () => {
+  const source=fs.readFileSync(path.join(root,'src/v04/router.ts'),'utf8');
+  assert.match(source,/project:\$\{projectId\}:projectAgent/);
+  assert.match(source,/selectedShotAndNeighbors = selectedShotIndex < 0/);
+  assert.match(source,/reply: result\.text, applied: false/);
+  assert.doesNotMatch(source,/trx\("o_storyboard"\)\.insert|trx\("o_storyboard"\)\.update/);
+});
 test('creative and asset preview have zero writes; stale preview cannot apply', async t => {
   const { db, service:s } = await fixture(t);
   const scope = await s.createPilotProject({name:'V04 Test',brief:'A dream becomes a film',targetDuration:30,aspectRatio:'16:9'}, 7);
