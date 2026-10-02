@@ -1,10 +1,10 @@
 import u from "@/utils";
 import { requireModel, ModelConfigError } from "@/services/modelPreset";
 import { routeAgentIntent } from "./agentIntent";
-import { analyzeImages } from "./visionAnalyzer";
+import { analyzeImages, VisionFailure } from "./visionAnalyzer";
 import { PilotError } from "./service";
 
-export type AgentAnswer = { status: "ANSWERED" | "VISION_MODEL_REQUIRED" | "VISION_ANALYSIS_FAILED" | "CAPABILITY_NOT_CONNECTED"; reply: string; intent: string; visionCacheHits: number };
+export type AgentAnswer = { status: "ANSWERED" | "VISION_MODEL_REQUIRED" | "VISION_ANALYSIS_FAILED" | "CAPABILITY_NOT_CONNECTED"; reply: string; intent: string; visionCacheHits: number; errorCode?: string; errorId?: string };
 
 export async function answerProjectAgent(input: { projectId: number; message: string; system: string; attachments: any[]; priorImages: any[]; forceVision?: boolean }): Promise<AgentAnswer> {
   const intent = input.forceVision ? "VISION_ANALYZE" : routeAgentIntent(input.message, input.attachments.length, input.priorImages.length);
@@ -19,8 +19,8 @@ export async function answerProjectAgent(input: { projectId: number; message: st
     catch (error) {
       if (error instanceof ModelConfigError || error instanceof PilotError && error.code === "PILOT_VISION_MODEL_INVALID")
         return { status: "VISION_MODEL_REQUIRED", intent, reply: "当前项目尚未配置可用的视觉模型，因此图片已保存，但我还不能分析它。请配置视觉模型后重新分析这条消息。", visionCacheHits: 0 };
-      if (error instanceof PilotError && error.code === "PILOT_VISION_ANALYSIS_FAILED")
-        return { status: "VISION_ANALYSIS_FAILED", intent, reply: error.message, visionCacheHits: 0 };
+      if (error instanceof VisionFailure)
+        return { status: "VISION_ANALYSIS_FAILED", intent, reply: error.message, errorCode: error.code, errorId: error.errorId, visionCacheHits: 0 };
       throw error;
     }
   }

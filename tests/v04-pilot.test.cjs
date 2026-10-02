@@ -16,9 +16,15 @@ function loadSource(file, db, cache = new Map(), oss = null) {
   }, fileName: file }).outputText;
   new Function('require', 'module', 'exports', code)(name => {
     if (name === '@/utils/db') return { db };
-    if (name === '@/utils') return { oss, vendor: { getModelList: async () => ['vision','vision-v2'].map(modelName => ({ modelName, type: 'text', supports: { image_input: true } })), getCode: () => 'vision-adapter-v1' }, Ai: { Text: model => ({ invoke: async input => {
+    if (name === '@/utils') return { oss, vendor: { getModelList: async () => ['vision','vision-v2'].map(modelName => ({ modelName, type: 'text', supports: { image_input: true } })), getCode: () => 'vision-adapter-v1' }, Ai: { Text: model => ({ trackedSession: async () => ({ modelReference: model, invokeObject: async input => {
+      oss.modelCalls.push({ model, ...input, method: 'invokeObject' });
+      oss.visionCalls++;
+      if (oss.visionFailure) throw oss.visionFailure;
+      if (oss.modelError) throw Error('provider call failed');
+      return { object: oss.visionResult ?? { summary: 'A dark blue image with a bright logo', dominantColors: ['deep blue'], visibleText: ['DreamStream'], uncertainty: [] } };
+    } }), invoke: async input => {
       oss.modelCalls.push({ model, ...input });
-      if (model.startsWith('fake:vision')) { oss.visionCalls++; if (oss.modelError) throw Error('provider cannot read image'); return { text: JSON.stringify({ summary: 'A dark blue image with a bright logo', dominantColors: ['deep blue'], visibleText: ['DreamStream'], uncertainty: [] }) }; }
+      if (model.startsWith('fake:vision')) throw Error('Vision must use structured output');
       if (oss.textError) throw Error('text provider failed');
       return { text: 'I can discuss the observed image in this project.', output: oss.proposalOutput };
     } }) } };
@@ -142,8 +148,11 @@ test('authenticated HTTP chat sends real image bytes to the Agent and restores t
   assert.equal(chat.body.data.applied,false);
   assert.equal(oss.modelCalls.length,2);
   assert.equal(oss.modelCalls[0].model,'fake:vision');
+  assert.equal(oss.modelCalls[0].method,'invokeObject');
+  assert.ok(oss.modelCalls[0].schema,'Vision uses the native structured schema');
   assert.equal(oss.modelCalls[0].messages[0].content[1].type,'image');
-  assert.equal(oss.modelCalls[0].messages[0].content[1].image,`data:image/png;base64,${png.toString('base64')}`);
+  assert.equal(oss.modelCalls[0].messages[0].content[1].mediaType,'image/png');
+  assert.deepEqual(oss.modelCalls[0].messages[0].content[1].image,png);
   assert.equal(oss.modelCalls[1].model,'fake:local');
   assert.match(oss.modelCalls[1].system,/dark blue image/);
   const assets={...creative,currentStage:'assets',currentRoute:'pilot/assets',selectedObject:{type:'PROJECT',key:'all'}};
@@ -175,6 +184,7 @@ test('authenticated HTTP chat sends real image bytes to the Agent and restores t
   const failedChat=await post('/agent/chat',{context:assets,message:'Inspect this too',attachmentIds:[failedUpload.body.data.id]});
   assert.equal(failedChat.status,200);
   assert.equal(failedChat.body.data.status,'VISION_ANALYSIS_FAILED');
+  assert.equal(failedChat.body.data.errorCode,'PILOT_VISION_PROVIDER_FAILED');
   const recovered=await post('/agent/history',scope);
   assert.equal(recovered.body.data.messages.length,7);
   assert.equal(recovered.body.data.messages[6].attachments[0].id,failedUpload.body.data.id);
@@ -226,6 +236,61 @@ test('missing vision preserves image and message; reanalysis and follow-up use v
   assert.equal(history.data.data.visionConfigured,true);
   assert.equal((await db('o_v04AgentReference')).length,0);
   assert.equal((await db('o_image')).length,0);
+});
+
+test('Vision structured failures keep distinct safe diagnostics and never invent an answer or production asset', async t => {
+  const { db, oss, cache, service:s } = await fixture(t);
+  const scope=await s.createPilotProject({name:'Vision diagnostics',brief:'',targetDuration:30,aspectRatio:'16:9'},7);
+  const ctx={...scope,currentStage:'creative',currentRoute:'pilot/creative',selectedObject:null};
+  const express=require('express'); const app=express();
+  app.use(express.json({limit:'12mb'})); app.use((req,_res,next)=>{req.user={id:7};next();});
+  app.use('/api/v04',loadSource(path.join(root,'src/v04/router.ts'),db,cache,oss).default);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const post=async (route,body)=>{const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v04${route}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});return (await response.json()).data;};
+  const png=await require('sharp')({create:{width:8,height:8,channels:4,background:'#123456'}}).png().toBuffer();
+  const uploaded=await post('/agent/image/upload',{context:ctx,name:'logo.png',dataUrl:`data:image/png;base64,${png.toString('base64')}`});
+  oss.visionModel=null;
+  const original=await post('/agent/chat',{context:ctx,message:'分析这张图片',attachmentIds:[uploaded.id]});
+  assert.equal(original.status,'VISION_MODEL_REQUIRED');
+  oss.visionModel='fake:vision';
+  const logs=[]; t.mock.method(console,'error',(...args)=>logs.push(args));
+  const replay=()=>post('/agent/reanalyze',{context:ctx,userMessageId:original.userMessageId});
+
+  oss.visionFailure=Object.assign(new Error('apiKey=supersecret Authorization: Bearer secret-token Cookie=session data:image/png;base64,AAAA'),{name:'APICallError',statusCode:401});
+  const provider=await replay();
+  assert.equal(provider.errorCode,'PILOT_VISION_PROVIDER_FAILED'); assert.equal(provider.status,'VISION_ANALYSIS_FAILED');
+  assert.match(provider.errorId,/^[0-9a-f-]{36}$/);
+  assert.match(provider.reply,/供应商配置/);
+  assert.equal(logs.at(-1)[1].status,401);
+  assert.equal(logs.at(-1)[1].attachmentId,uploaded.id);
+  assert.doesNotMatch(JSON.stringify(logs),/supersecret|secret-token|Cookie=session|base64,AAAA/);
+
+  oss.visionFailure=Object.assign(new Error('Retry exhausted'),{name:'RetryError',errors:[Object.assign(new Error('provider HTTP 503'),{name:'APICallError',statusCode:503})]});
+  const retried=await replay();
+  assert.equal(retried.errorCode,'PILOT_VISION_PROVIDER_FAILED');
+  assert.equal(logs.at(-1)[1].status,503,'wrapped provider status remains available in safe diagnostics');
+
+  oss.visionFailure=Object.assign(new Error('This model does not support image input'),{name:'APICallError',statusCode:400});
+  const unsupported=await replay();
+  assert.equal(unsupported.errorCode,'PILOT_VISION_INPUT_UNSUPPORTED');
+  assert.match(unsupported.reply,/拒绝图片输入/);
+
+  oss.visionFailure=null;
+  oss.visionResult={summary:'',dominantColors:'blue'};
+  const malformed=await replay();
+  assert.equal(malformed.errorCode,'PILOT_VISION_SCHEMA_FAILED');
+  assert.match(malformed.reply,/结构化分析失败/);
+  assert.equal((await db('o_v04VisionAnalysis')).length,0);
+  assert.equal((await db('memories').where({isolationKey:`project:${scope.projectId}:projectAgent`})).length,1,'failures do not create a fabricated Agent answer');
+  assert.equal((await db('o_image')).length,0);
+  assert.equal((await db('o_v04AgentReference')).length,0);
+
+  oss.visionResult={summary:'A blue logo',dominantColors:['blue'],uncertainty:[]};
+  const valid=await replay();
+  assert.equal(valid.status,'ANSWERED');
+  assert.equal((await db('o_v04VisionAnalysis')).length,1);
+  assert.equal((await db('o_v04AgentAttachment').where({id:uploaded.id}).first()).purpose,'CONVERSATIONAL_REFERENCE');
 });
 
 test('Creative Agent proposal uses project conversation and remains zero-write until preview/apply', async t => {
