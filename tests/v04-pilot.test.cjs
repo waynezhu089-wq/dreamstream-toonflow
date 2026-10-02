@@ -90,6 +90,68 @@ test('Project Agent keeps a project-level memory identity and reads selected sho
   assert.doesNotMatch(source,/trx\("o_storyboard"\)\.insert|trx\("o_storyboard"\)\.update/);
 });
 
+test('confirmed Asset Bible truth follows Project Agent from Assets to Creative without leaking into another project', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Brand pilot',brief:'Brand ending',targetDuration:30,aspectRatio:'16:9'},7);
+  const other=await s.createPilotProject({name:'Other project',brief:'',targetDuration:30,aspectRatio:'16:9'},7);
+  const express=require('express'); const app=express();
+  app.use(express.json({limit:'12mb'})); app.use((req,_res,next)=>{req.user={id:7};next();});
+  app.use('/api/v04',loadSource(path.join(root,'src/v04/router.ts'),db,cache,oss).default);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const post=async (route,body)=>{const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v04${route}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});assert.equal(response.status,200,route);return (await response.json()).data;};
+  const changes=[
+    {operation:'ADD',clientRef:'brand-logo',asset:asset('Dream Stream Logo','BRAND','REAL_REQUIRED')},
+    {operation:'ADD',clientRef:'character',asset:asset('小男孩','CHAR','AI_ALLOWED')},
+  ];
+  const preview=await post('/assets/preview',{...scope,changes});
+  const applied=await post('/assets/apply',{...scope,changes,previewHash:preview.previewHash});
+  assert.equal(applied.applied[0].canonicalKey,'BRAND-001');
+  assert.equal(applied.applied[1].canonicalKey,'CHAR-001');
+  const assets={...scope,currentStage:'assets',currentRoute:'pilot/assets',selectedObject:{type:'ASSET',key:'BRAND-001'}};
+  const png=await require('sharp')({create:{width:8,height:8,channels:4,background:'#203070'}}).png().toBuffer();
+  const uploaded=await post('/agent/image/upload',{context:assets,name:'dreamstream桌面.png',dataUrl:`data:image/png;base64,${png.toString('base64')}`});
+  await post('/agent/chat',{context:assets,message:'这是 Logo 的对话图片。',attachmentIds:[uploaded.id]});
+  const reference={context:assets,attachmentId:uploaded.id,targetType:'ASSET_BIBLE',targetKey:'BRAND-001'};
+  const referencePreview=await post('/agent/reference/preview',reference);
+  await post('/agent/reference/apply',{...reference,previewHash:referencePreview.previewHash});
+  assert.equal((await db('o_v04AgentAttachment').where({id:uploaded.id}).first()).purpose,'CONVERSATIONAL_REFERENCE','upload purpose is not silently promoted');
+  assert.equal((await db('o_v04AgentReference').where({projectId:scope.projectId,targetKey:'BRAND-001',targetType:'ASSET_BIBLE'}).count({n:'id'}).first()).n,1);
+
+  const creative={...scope,currentStage:'creative',currentRoute:'pilot/creative',selectedObject:null};
+  const reply=await post('/agent/chat',{context:creative,message:'请讨论品牌结尾。',attachmentIds:[]});
+  const system=oss.modelCalls.filter(call=>call.model==='fake:local').at(-1).system;
+  const line=system.split('\n').find(line=>line.startsWith('项目 ACTIVE Asset Bible 索引'));
+  const index=JSON.parse(line.slice(line.indexOf(': ')+2));
+  assert.equal(index.length,2,'all active canonical identities remain visible without a selected asset');
+  assert.deepEqual(index[0].confirmedAssetBibleReferences,['dreamstream桌面.png']);
+  assert.equal(index[0].confirmedAssetBibleReferenceCount,1);
+  assert.equal(index[0].canonicalKey,'BRAND-001');
+  assert.equal(index[0].sourcePolicy,'REAL_REQUIRED');
+  assert.equal(index[0].currentUnitProductionBinding.assetId,null,'confirmed Bible reference is not a production binding');
+  assert.match(system,/CONFIRMED_ASSET_BIBLE_REFERENCE/);
+  assert.match(system,/不要把已确认 reference 说成仍只是对话参考/);
+  const relevantLine=system.split('\n').find(line=>line.startsWith('当前话题相关资产'));
+  const relevant=JSON.parse(relevantLine.slice(relevantLine.indexOf(': ')+2));
+  assert.deepEqual(relevant.map(item=>item.canonicalKey),['BRAND-001']);
+  assert.equal(relevant[0].confirmedAssetBibleReferences[0].provenance,'CONFIRMED_ASSET_BIBLE_REFERENCE');
+  assert.match(system,/已选资产详情（仅当前关注对象）: null/);
+  assert.doesNotMatch(reply.reply,/仍然只是对话参考|尚未确认/);
+  assert.equal((await db('o_image').count({n:'id'}).first()).n,0,'context lookup does not create production media');
+
+  const [shotId]=await db('o_storyboard').insert({projectId:scope.projectId,scriptId:scope.scriptId,index:0,prompt:'CHAR-001 小男孩在画面中',duration:3,state:'未生成'});
+  await post('/agent/chat',{context:{...scope,currentStage:'storyboard',currentRoute:'pilot/storyboard',selectedObject:{type:'SHOT',key:String(shotId)}},message:'继续这个镜头的讨论。',attachmentIds:[]});
+  const shotSystem=oss.modelCalls.filter(call=>call.model==='fake:local').at(-1).system;
+  const shotRelevantLine=shotSystem.split('\n').find(line=>line.startsWith('当前话题相关资产'));
+  assert.deepEqual(JSON.parse(shotRelevantLine.slice(shotRelevantLine.indexOf(': ')+2)).map(item=>item.canonicalKey),['CHAR-001']);
+
+  await post('/agent/chat',{context:{...other,currentStage:'creative',currentRoute:'pilot/creative',selectedObject:null},message:'讨论品牌结尾。',attachmentIds:[]});
+  const otherSystem=oss.modelCalls.filter(call=>call.model==='fake:local').at(-1).system;
+  const otherLine=otherSystem.split('\n').find(line=>line.startsWith('项目 ACTIVE Asset Bible 索引'));
+  assert.deepEqual(JSON.parse(otherLine.slice(otherLine.indexOf(': ')+2)),[]);
+  assert.doesNotMatch(otherSystem,/dreamstream桌面\.png|BRAND-001|Dream Stream Logo/);
+});
+
 test('pilot launcher reads exactly one owner from its disposable SQLite without guessing', async t => {
   const {db,oss}=await fixture(t);
   await db.schema.createTable('o_user',x=>{x.integer('id').primary();});
