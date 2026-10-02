@@ -1,10 +1,9 @@
 import { Output } from "ai";
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import u from "@/utils";
-import { db } from "@/utils/db";
 import { requireModel } from "@/services/modelPreset";
-import { PilotError, readPilot } from "./service";
-import { imageParts } from "./agentAttachments";
+import { PilotError } from "./service";
+import { buildProjectAgentContext, renderProjectAgentSystem } from "./agentContext";
 
 const id = z.number().int().positive();
 const request = z.object({ projectId: id, scriptId: id, method: z.enum(["ASSET_EXTRACTION", "ASSET_PROMPTS", "STORYBOARD_BATCH"]) }).strict();
@@ -22,46 +21,67 @@ const instructions = {
 
 const creativeProposalRequest = z.object({ projectId: id, scriptId: id, target: z.enum(["brief", "treatment", "script"]), instruction: z.string().max(8000).default("") }).strict();
 const creativeProposalOutput = z.object({ proposedText: z.string().min(1).max(30000), reason: z.string().max(1500) }).strict();
+function structuredFailure(error: unknown): boolean {
+  const queue: unknown[] = [error];
+  const seen = new Set<object>();
+  while (queue.length && seen.size < 6) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    if (current instanceof ZodError || /^(NoObjectGeneratedError|AI_NoObjectGeneratedError|TypeValidationError|JSONParseError|AI_TypeValidationError|AI_JSONParseError)$/.test(String((current as Error).name))) return true;
+    const nested = current as { cause?: unknown; errors?: unknown[] };
+    if (nested.cause) queue.push(nested.cause);
+    if (Array.isArray(nested.errors)) queue.push(...nested.errors.slice(-2));
+  }
+  return false;
+}
 
 export async function previewCreativeProposal(input: unknown) {
   const data = creativeProposalRequest.parse(input);
-  const state = await readPilot({ projectId: data.projectId, scriptId: data.scriptId });
-  const model = await requireModel(data.projectId, "text");
-  const key = `project:${data.projectId}:projectAgent`;
-  const recent = await db("memories").where({ isolationKey: key, type: "message" }).orderBy("createTime", "desc").limit(30);
-  const recentIds = recent.map(row => row.id);
-  const pictures = recentIds.length ? await db("o_v04AgentAttachment").where({ projectId: data.projectId }).whereIn("messageId", recentIds).orderBy("createdAt", "desc").limit(2) : [];
-  const source = { current: state.creative, acceptedOrRejectedDecisions: state.decisions.filter(d => ["ACCEPTED", "REJECTED"].includes(d.status)), conversation: recent.reverse().map(row => ({ role: row.role, content: row.content })), target: data.target, instruction: data.instruction };
-  const system = `你是项目级 Project Agent。只提出 ${data.target} 的完整候选正文；保持其他 Creative 字段不变。参考当前权威 Creative、项目历史对话和已决定事项。聊天图片只是参考，不自动成为真实 UI/Logo/品牌素材。Return one valid JSON object only: {"proposedText":"","reason":""}. No markdown. Never claim the proposal has been applied.`;
+  let context: Awaited<ReturnType<typeof buildProjectAgentContext>>;
   try {
-    const content = [{ type: "text" as const, text: JSON.stringify(source) }, ...await imageParts(pictures)];
-    const result = await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).invoke({ system, messages: [{ role: "user", content }], output: Output.object({ schema: creativeProposalOutput }) });
-    return { target: data.target, sourceVersion: state.creative.version, candidate: creativeProposalOutput.parse(result.output), applied: false };
-  } catch {
-    throw new PilotError("PILOT_CREATIVE_PROPOSAL_FAILED", "创意提案生成失败；请检查文本模型是否支持所选图片", 502);
+    context = await buildProjectAgentContext({ projectId: data.projectId, scriptId: data.scriptId, currentStage: "creative", currentRoute: "pilot/creative", selectedObject: null }, data.instruction);
+  } catch (error) {
+    if (error instanceof PilotError) throw error;
+    console.error("[V04 Creative][ContextFailure]", { code: "PILOT_CREATIVE_CONTEXT_FAILED", projectId: data.projectId, errorName: error instanceof Error ? error.name : "Error" });
+    throw new PilotError("PILOT_CREATIVE_CONTEXT_FAILED", "项目上下文读取失败，请稍后重试", 503);
+  }
+  const system = `${renderProjectAgentSystem(context)}\n只提出 ${data.target} 的完整候选正文；保持其他 Creative 字段不变。用户本轮 instruction 是生成要求，不能覆盖上述权威项目事实。缓存视觉观察仅描述可见内容，不能改变 Asset Bible 确认状态；没有缓存时不要猜测图片内容。Return one valid JSON object only: {"proposedText":"","reason":""}. No markdown. Never claim the proposal has been applied.`;
+  let model: Awaited<ReturnType<typeof requireModel>>;
+  try { model = await requireModel(data.projectId, "text"); }
+  catch { throw new PilotError("PILOT_CREATIVE_MODEL_FAILED", "文本模型不可用，请检查模型配置", 502); }
+  try {
+    // The text model receives only text and confirmed reference metadata.
+    // Recent chat images are never forwarded as raw multimodal input.
+    const result = await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).invoke({ system, messages: [{ role: "user", content: [{ type: "text", text: JSON.stringify({ target: data.target, instruction: data.instruction }) }] }], output: Output.object({ schema: creativeProposalOutput }) });
+    return { target: data.target, sourceVersion: context.creative.version, candidate: creativeProposalOutput.parse(result.output), applied: false };
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    const schemaFailure = structuredFailure(error);
+    const code = schemaFailure ? "PILOT_CREATIVE_SCHEMA_FAILED" : "PILOT_CREATIVE_MODEL_FAILED";
+    console.error("[V04 Creative][ProposalFailure]", { code, projectId: data.projectId, target: data.target, errorName: name });
+    throw new PilotError(code, schemaFailure ? "文本模型已返回内容，但创意提案结构不符合要求，请重试" : "文本模型调用失败，请检查供应商配置后重试", 502);
   }
 }
 export async function previewSkill(input: unknown) {
   const data = request.parse(input);
-  const state = await readPilot({ projectId: data.projectId, scriptId: data.scriptId });
+  const context = await buildProjectAgentContext({ projectId: data.projectId, scriptId: data.scriptId, currentStage: data.method === "STORYBOARD_BATCH" ? "storyboard" : "creative", currentRoute: "pilot/skills", selectedObject: null }, instructions[data.method]);
   const model = await requireModel(data.projectId, "text");
-  const messages = await db("memories").where({ isolationKey: `project:${data.projectId}:projectAgent`, type: "message" }).orderBy("createTime", "desc").limit(30);
-  const source = { creative: state.creative, acceptedOrRejectedDecisions: state.decisions.filter(d => ["ACCEPTED", "REJECTED"].includes(d.status)), conversation: messages.reverse().map(m => ({ role: m.role, content: m.content })), assets: state.assets.filter(a => a.status === "ACTIVE") };
   const schema = outputSchemas[data.method];
   const skeleton = data.method === "ASSET_EXTRACTION" ? { candidates: [{ name: "", category: "CHAR", description: "", identityAnchors: [], mustPreserve: [], forbiddenChanges: [], ownerKey: null, variantOf: null, sourcePolicy: "AI_ALLOWED", prompt: "" }], mergeSuggestions: [] } :
     data.method === "ASSET_PROMPTS" ? { prompts: [{ canonicalKey: "", prompt: "", reason: "" }] } : { shots: [{ duration: 3, prompt: "", videoDesc: "", productionMode: "AI_TEXT_TO_IMAGE", primaryKey: null, canonicalKeys: [] }] };
-  const system = `${instructions[data.method]}\nReturn one valid JSON object only. Use this JSON structure: ${JSON.stringify(skeleton)}. No markdown or extra fields. Do not claim changes were applied.`;
+  const system = `${renderProjectAgentSystem(context)}\n${instructions[data.method]}\nReturn one valid JSON object only. Use this JSON structure: ${JSON.stringify(skeleton)}. No markdown or extra fields. Do not claim changes were applied.`;
   try {
     // The three method schemas are a discriminated runtime union; AI SDK's
     // generic helper needs one concrete type, while the selected Zod schema
     // is still validated below before any proposal leaves this boundary.
-    const result = await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).invoke({ system, messages: [{ role: "user", content: JSON.stringify(source) }], output: Output.object({ schema: schema as any }) });
+    const result = await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).invoke({ system, messages: [{ role: "user", content: JSON.stringify({ method: data.method }) }], output: Output.object({ schema: schema as any }) });
     const output = schema.parse(result.output) as any;
-    const keys = new Set(source.assets.map(a => a.canonicalKey));
+    const keys = new Set(context.assetBibleIndex.map(a => a.canonicalKey));
     if (data.method === "ASSET_PROMPTS" && output.prompts.some((p: any) => !keys.has(p.canonicalKey))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "AI 提案引用了不存在的素材身份", 422);
     if (data.method === "STORYBOARD_BATCH" && output.shots.some((s: any) => [...s.canonicalKeys, ...(s.primaryKey ? [s.primaryKey] : [])].some(k => !keys.has(k)))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "AI 分镜引用了不存在的素材身份", 422);
     if (data.method === "ASSET_EXTRACTION" && output.mergeSuggestions.some((s: any) => s.candidateIndex >= output.candidates.length || !keys.has(s.existingCanonicalKey))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "AI 合并建议引用无效", 422);
-    return { method: data.method, skillId: `v04.${data.method.toLowerCase().replaceAll('_','-')}.v1`, output, applied: false, sourceVersion: state.creative.version };
+    return { method: data.method, skillId: `v04.${data.method.toLowerCase().replaceAll('_','-')}.v1`, output, applied: false, sourceVersion: context.creative.version };
   } catch (error) {
     if (error instanceof PilotError) throw error;
     throw new PilotError("PILOT_SKILL_FAILED", "批量提案生成失败，请检查文本模型并重试", 502);

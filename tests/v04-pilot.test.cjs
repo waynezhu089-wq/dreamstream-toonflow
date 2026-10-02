@@ -29,10 +29,9 @@ function loadSource(file, db, cache = new Map(), oss = null) {
       return { text: 'I can discuss the observed image in this project.', output: oss.proposalOutput };
     } }) } };
     if (name === '@/utils/getPath') return () => path.join(oss.testDir,'v04-conversation');
-    if (name === '@/services/modelPreset') { oss.ModelConfigError ??= class ModelConfigError extends Error {}; return { ModelConfigError: oss.ModelConfigError, requireModel: async (_projectId, slot) => { if (slot === 'vision' && !oss.visionModel) throw new oss.ModelConfigError('vision unavailable'); return slot === 'vision' ? oss.visionModel : 'fake:local'; }, resolveModels: async () => ({ models: { vision: oss.visionModel } }) }; }
-    if (name === '@/utils/agent/memory') return class { async get() { return {rag:[], summaries:[]}; } };
+    if (name === '@/services/modelPreset') { oss.ModelConfigError ??= class ModelConfigError extends Error {}; return { ModelConfigError: oss.ModelConfigError, requireModel: async (_projectId, slot) => { if (slot === 'vision' && !oss.visionModel || slot === 'text' && oss.textModelUnavailable) throw new oss.ModelConfigError('model unavailable'); return slot === 'vision' ? oss.visionModel : 'fake:local'; }, resolveModels: async () => ({ models: { vision: oss.visionModel } }) }; }
+    if (name === '@/utils/agent/memory') return class { async get() { if (oss.contextFailure) throw oss.contextFailure; return {rag:[], summaries:[]}; } };
     if (name === '@/utils/agent/embedding') return { getEmbedding: async () => [] };
-    if (name === './skills') return { previewSkill: async () => ({}), previewCreativeProposal: async () => ({}) };
     if (name === '@/services/assetUploadSource') return { recordAssetUpload: async (trx, source) => {
       const asset = await trx('o_assets').where({ id: source.assetId, projectId: source.projectId, imageId: source.imageId }).first();
       const image = await trx('o_image').where({ id: source.imageId, assetsId: source.assetId, filePath: source.filePath }).first();
@@ -84,8 +83,10 @@ async function fixture(t) {
 const asset = (name='Dreamer', category='CHAR', sourcePolicy='AI_ALLOWED') => ({ name, category, description:'calm', identityAnchors:['left eyebrow scar'], mustPreserve:['scar'], forbiddenChanges:['redraw brand text'], ownerKey:null, variantOf:null, sourcePolicy, prompt:'' });
 test('Project Agent keeps a project-level memory identity and reads selected shot context without a production write route', () => {
   const source=fs.readFileSync(path.join(root,'src/v04/router.ts'),'utf8');
-  assert.match(source,/project:\$\{projectId\}:projectAgent/);
-  assert.match(source,/selectedShotAndNeighbors = selectedShotIndex < 0/);
+  const shared=fs.readFileSync(path.join(root,'src/v04/agentContext.ts'),'utf8');
+  assert.match(shared,/project:\$\{projectId\}:projectAgent/);
+  assert.match(shared,/storyboardContext: selectedShotIndex < 0/);
+  assert.match(source,/buildProjectAgentContext\(/);
   assert.match(source,/answerProjectAgent\(\{ projectId: ctx\.projectId/);
   assert.doesNotMatch(source,/trx\("o_storyboard"\)\.insert|trx\("o_storyboard"\)\.update/);
 });
@@ -365,11 +366,110 @@ test('Creative Agent proposal uses project conversation and remains zero-write u
   const result=await skills.previewCreativeProposal({...scope,target:'brief',instruction:'Make the opening clearer.'});
   assert.equal(result.applied,false);
   assert.equal(result.candidate.proposedText,oss.proposalOutput.proposedText);
-  assert.match(oss.modelCalls[0].messages[0].content[0].text,/Keep the product interface exact/);
+  assert.match(oss.modelCalls[0].system,/Keep the product interface exact/);
+  assert.match(oss.modelCalls[0].messages[0].content[0].text,/Make the opening clearer/);
   assert.deepEqual(await db('o_v04Creative').where(scope).first(),before);
   const preview=await s.previewCreative({...scope,brief:result.candidate.proposedText,treatment:'',script:'',expectedVersion:before.version});
   assert.equal(preview.proposed.brief,result.candidate.proposedText);
   assert.deepEqual(await db('o_v04Creative').where(scope).first(),before);
+});
+
+test('OPT-018 Proposal uses shared project truth and cached Vision text, never a recent raw image in the text model', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Creative truth',brief:'品牌片尾',targetDuration:30,aspectRatio:'16:9'},7);
+  const other=await s.createPilotProject({name:'Separate project',brief:'',targetDuration:30,aspectRatio:'16:9'},7);
+  const changes=[{operation:'ADD',clientRef:'logo',asset:asset('Dream Stream Logo','BRAND','REAL_REQUIRED')}];
+  const plan=await s.previewAssets({...scope,changes});
+  await s.applyAssets({...scope,changes,previewHash:plan.previewHash});
+  const ctx={...scope,currentStage:'assets',currentRoute:'pilot/assets',selectedObject:{type:'ASSET',key:'BRAND-001'}};
+  const express=require('express'); const app=express();
+  app.use(express.json({limit:'12mb'})); app.use((req,_res,next)=>{req.user={id:7};next();});
+  app.use('/api/v04',loadSource(path.join(root,'src/v04/router.ts'),db,cache,oss).default);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const post=async (route,body)=>{const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v04${route}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});return {status:response.status,body:await response.json()};};
+  const png=await require('sharp')({create:{width:8,height:8,channels:4,background:'#203070'}}).png().toBuffer();
+  const upload=await post('/agent/image/upload',{context:ctx,name:'dreamstream桌面.png',dataUrl:`data:image/png;base64,${png.toString('base64')}`});
+  assert.equal(upload.status,200);
+  const attachmentId=upload.body.data.id;
+  assert.equal((await post('/agent/chat',{context:ctx,message:'分析 Logo 构图。',attachmentIds:[attachmentId]})).status,200);
+  const ref={context:ctx,attachmentId,targetType:'ASSET_BIBLE',targetKey:'BRAND-001'};
+  const refPreview=await post('/agent/reference/preview',ref);
+  assert.equal((await post('/agent/reference/apply',{...ref,previewHash:refPreview.body.data.previewHash})).status,200);
+  await db('memories').insert({id:'old-wrong-agent',isolationKey:`project:${scope.projectId}:projectAgent`,type:'message',role:'assistant',content:'BRAND-001 不存在；Logo 只是对话参考。',embedding:null,summarized:0,createTime:Date.now()+1});
+  const before=await db('o_v04Creative').where(scope).first();
+  const visionCalls=oss.visionCalls;
+  oss.proposalOutput={proposedText:'保留真实 Dream Stream Logo 的品牌片尾。',reason:'使用当前确认的品牌参考。'};
+  const proposal=await post('/agent/creative-proposal',{...scope,target:'treatment',instruction:'就按刚才这一版，核心内容不要再改。'});
+  assert.equal(proposal.status,200);
+  assert.equal(proposal.body.data.applied,false);
+  const call=oss.modelCalls.at(-1);
+  assert.equal(call.model,'fake:local');
+  assert.ok(call.output,'Proposal still uses schema-native Output.object');
+  assert.ok(call.messages[0].content.every(part=>part.type==='text'),'text-only model receives no image parts');
+  assert.doesNotMatch(JSON.stringify(call.messages),/data:image|base64/i);
+  assert.match(call.system,/BRAND-001/);
+  assert.match(call.system,/Dream Stream Logo/);
+  assert.match(call.system,/dreamstream桌面\.png/);
+  assert.match(call.system,/CONFIRMED_ASSET_BIBLE_REFERENCE/);
+  assert.match(call.system,/"currentUnitProductionBinding":\{"assetId":null/);
+  assert.match(call.system,/A dark blue image with a bright logo/,'confirmed reference reuses cached VisionObservation');
+  assert.match(call.system,/BRAND-001 不存在/,'old false conversation remains history, not truth');
+  assert.match(call.system,/若旧对话、视觉观察或摘要与当前项目权威状态冲突/);
+  assert.match(call.messages[0].content[0].text,/就按刚才这一版/);
+  assert.equal(oss.visionCalls,visionCalls,'Proposal does not recall Vision provider when cache exists');
+  assert.deepEqual(await db('o_v04Creative').where(scope).first(),before,'Proposal remains a candidate');
+  assert.equal((await db('o_image').count({n:'id'}).first()).n,0,'confirmed Bible reference is not production media');
+
+  await db('o_v04VisionAnalysis').where({attachmentId}).del();
+  assert.equal((await post('/agent/creative-proposal',{...scope,target:'treatment',instruction:'仍保留品牌结尾。'})).status,200);
+  assert.equal(oss.visionCalls,visionCalls,'missing cache does not silently trigger a Vision provider call');
+  assert.doesNotMatch(oss.modelCalls.at(-1).system,/A dark blue image with a bright logo/,'without cache, Proposal does not invent visual details');
+  for (const target of ['brief','script']) {
+    assert.equal((await post('/agent/creative-proposal',{...scope,target,instruction:'保留权威 Logo 事实。'})).status,200);
+    assert.match(oss.modelCalls.at(-1).system,/CONFIRMED_ASSET_BIBLE_REFERENCE/);
+    assert.ok(oss.modelCalls.at(-1).messages[0].content.every(part=>part.type==='text'));
+  }
+
+  oss.proposalOutput={candidates:[],mergeSuggestions:[]};
+  const skill=await post('/skills/preview',{...scope,method:'ASSET_EXTRACTION'});
+  assert.equal(skill.status,200);
+  assert.match(oss.modelCalls.at(-1).system,/CONFIRMED_ASSET_BIBLE_REFERENCE/,'V0.4 Skills use the same authoritative context');
+
+  oss.proposalOutput={proposedText:'Other project treatment.',reason:'Separate truth.'};
+  assert.equal((await post('/agent/creative-proposal',{...other,target:'treatment',instruction:'继续。'})).status,200);
+  assert.doesNotMatch(oss.modelCalls.at(-1).system,/BRAND-001|dreamstream桌面\.png|Dream Stream Logo/,'another project cannot read the first project truth');
+});
+
+test('OPT-018 Creative Proposal returns distinct safe context, model and schema errors over HTTP', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Error boundary',brief:'',targetDuration:30,aspectRatio:'16:9'},7);
+  const express=require('express'); const app=express();
+  app.use(express.json({limit:'12mb'})); app.use((req,_res,next)=>{req.user={id:7};next();});
+  app.use('/api/v04',loadSource(path.join(root,'src/v04/router.ts'),db,cache,oss).default);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const post=async()=>{const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v04/agent/creative-proposal`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...scope,target:'treatment',instruction:'保持真实 Logo'})});return {status:response.status,body:await response.json()};};
+  oss.contextFailure=Error('Authorization: Bearer hidden-token');
+  const context=await post();
+  assert.equal(context.status,503); assert.equal(context.body.code,'PILOT_CREATIVE_CONTEXT_FAILED');
+  assert.match(context.body.message,/项目上下文读取失败/);
+  assert.doesNotMatch(JSON.stringify(context.body),/hidden-token/);
+  oss.contextFailure=null;
+  oss.textModelUnavailable=true;
+  const missing=await post();
+  assert.equal(missing.status,502); assert.equal(missing.body.code,'PILOT_CREATIVE_MODEL_FAILED');
+  assert.match(missing.body.message,/文本模型不可用/);
+  oss.textModelUnavailable=false;
+  oss.textError=true;
+  const provider=await post();
+  assert.equal(provider.status,502); assert.equal(provider.body.code,'PILOT_CREATIVE_MODEL_FAILED');
+  assert.match(provider.body.message,/供应商配置/);
+  oss.textError=false;
+  oss.proposalOutput={proposedText:'',reason:'bad'};
+  const malformed=await post();
+  assert.equal(malformed.status,502); assert.equal(malformed.body.code,'PILOT_CREATIVE_SCHEMA_FAILED');
+  assert.match(malformed.body.message,/结构不符合要求/);
 });
 
 test('explicit image promotion uses current-unit Asset Plan and server upload provenance', async t => {
