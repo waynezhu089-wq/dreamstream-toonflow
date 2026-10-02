@@ -11,9 +11,16 @@ if (-not (Test-Path -LiteralPath $backendRoot -PathType Container) -or -not (Tes
 }
 New-Item -ItemType Directory -Path $dataDir,$logDir -Force | Out-Null
 $dbPath = Join-Path $dataDir 'db2.sqlite'
-if ((Get-NetTCPConnection -LocalPort 10589,50189 -State Listen -ErrorAction SilentlyContinue)) {
-  throw 'Pilot ports 10589 or 50189 are occupied. Keep or stop the existing pilot services before starting another copy.'
+function Test-LocalPort([int]$port) {
+  $client = [System.Net.Sockets.TcpClient]::new()
+  try {
+    $attempt = $client.ConnectAsync('127.0.0.1', $port)
+    return $attempt.Wait(400) -and $client.Connected
+  } catch { return $false }
+  finally { $client.Dispose() }
 }
+$backendRunning = Test-LocalPort 10589
+$frontendRunning = Test-LocalPort 50189
 if (Test-Path -LiteralPath $dbPath -PathType Leaf) {
   $env:V04_OWNER_DB_PATH = $dbPath
   Push-Location $backendRoot
@@ -30,9 +37,9 @@ $env:TOONFLOW_DATA_DIR = $dataDir
 $env:DS_PORT = '10589'
 $env:DS_STUDIO_OWNER_USER_ID = if ($OwnerUserId -gt 0) { [string]$OwnerUserId } else { '' }
 $env:DS_REVISION_CONFIRM_ENABLED = if ($OwnerUserId -gt 0) { 'true' } else { 'false' }
-$backend = Start-Process -FilePath 'cmd.exe' -ArgumentList '/d','/c','node_modules\.bin\tsx.cmd src\app.ts' -WorkingDirectory $backendRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir 'backend.out.log') -RedirectStandardError (Join-Path $logDir 'backend.err.log') -PassThru
-$frontend = Start-Process -FilePath 'cmd.exe' -ArgumentList '/d','/c','node_modules\.bin\vite.cmd --host 127.0.0.1 --port 50189 --strictPort' -WorkingDirectory $frontendRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir 'frontend.out.log') -RedirectStandardError (Join-Path $logDir 'frontend.err.log') -PassThru
-Write-Output "Backend PID: $($backend.Id); Frontend PID: $($frontend.Id)"
+$backend = if (-not $backendRunning) { Start-Process -FilePath 'cmd.exe' -ArgumentList '/d','/c','node_modules\.bin\tsx.cmd src\app.ts' -WorkingDirectory $backendRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir 'backend.out.log') -RedirectStandardError (Join-Path $logDir 'backend.err.log') -PassThru } else { $null }
+$frontend = if (-not $frontendRunning) { Start-Process -FilePath 'cmd.exe' -ArgumentList '/d','/c','node_modules\.bin\vite.cmd --host 127.0.0.1 --port 50189 --strictPort' -WorkingDirectory $frontendRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir 'frontend.out.log') -RedirectStandardError (Join-Path $logDir 'frontend.err.log') -PassThru } else { $null }
+Write-Output "Backend: $(if($backend){'started PID '+$backend.Id}else{'already running'}); Frontend: $(if($frontend){'started PID '+$frontend.Id}else{'already running'})"
 Write-Output "Pilot: http://127.0.0.1:50189/#/pilot"
 Write-Output "Data: $dataDir"
 if ($OwnerUserId -eq 0) { Write-Warning 'No unique existing owner account was found. Revision Confirm stays disabled until an owner account exists and this launcher is restarted.' }
