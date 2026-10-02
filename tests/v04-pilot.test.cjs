@@ -16,13 +16,18 @@ function loadSource(file, db, cache = new Map(), oss = null) {
   }, fileName: file }).outputText;
   new Function('require', 'module', 'exports', code)(name => {
     if (name === '@/utils/db') return { db };
-    if (name === '@/utils') return { oss, vendor: { getModelList: async () => ['vision','vision-v2'].map(modelName => ({ modelName, type: 'text', supports: { image_input: true } })), getCode: () => 'vision-adapter-v1' }, Ai: { Text: model => ({ trackedSession: async () => ({ modelReference: model, invokeObject: async input => {
+    if (name === '@/utils') return { oss, vendor: { getModelList: async () => ['vision','vision-v2'].map(modelName => ({ modelName, type: 'text', supports: { image_input: true } })), getCode: () => 'vision-adapter-v1' }, Ai: { Text: model => ({ trackedSession: async () => { if (oss.sessionError) throw oss.sessionError; oss.sessionCount=(oss.sessionCount||0)+1; return { modelReference: model, invokeObject: async input => {
       oss.modelCalls.push({ model, ...input, method: 'invokeObject' });
+      if (model === 'fake:local') {
+        const next=oss.skillResponses?.shift();
+        if (next instanceof Error) throw next;
+        return {object: next ?? oss.proposalOutput};
+      }
       oss.visionCalls++;
       if (oss.visionFailure) throw oss.visionFailure;
       if (oss.modelError) throw Error('provider call failed');
       return { object: oss.visionResult ?? { summary: 'A dark blue image with a bright logo', dominantColors: ['deep blue'], visibleText: ['DreamStream'], uncertainty: [] } };
-    } }), invoke: async input => {
+    } }; }, invoke: async input => {
       oss.modelCalls.push({ model, ...input });
       if (model.startsWith('fake:vision')) throw Error('Vision must use structured output');
       if (oss.textError) throw Error('text provider failed');
@@ -429,6 +434,116 @@ test('OPT-019 Agent and Storyboard Skill receive confirmed duration; proposal du
   await skills.previewSkill({...scope,method:'STORYBOARD_BATCH'});
   assert.match(oss.modelCalls.at(-1).system,/"targetDuration":40/,'Storyboard Skill reads confirmed duration');
   assert.doesNotMatch(oss.modelCalls.at(-1).system,/"targetDuration":30/);
+});
+
+test('OPT-021 Skill provider failures are distinct, safely logged and zero-write for every method', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Skill errors',brief:'Current truth',targetDuration:40,aspectRatio:'16:9'},7);
+  const skills=loadSource(path.join(root,'src/v04/skills.ts'),db,cache,oss);
+  const before=await db('o_v04Creative').where(scope).first();
+  const logs=[];t.mock.method(console,'error',(...args)=>logs.push(args));
+  for (const method of ['ASSET_EXTRACTION','ASSET_PROMPTS','STORYBOARD_BATCH']) {
+    oss.skillResponses=[Object.assign(new Error('Authorization: Bearer private-token apiKey=secret'),{name:'APICallError',statusCode:503})];
+    await assert.rejects(skills.previewSkill({...scope,method}),e=>e.code==='PILOT_SKILL_MODEL_FAILED');
+    assert.equal(logs.at(-1)[1].method,method);
+    assert.equal(logs.at(-1)[1].projectId,scope.projectId);
+    assert.equal(logs.at(-1)[1].scriptId,scope.scriptId);
+    assert.equal(logs.at(-1)[1].errorCode,'PILOT_SKILL_MODEL_FAILED');
+    assert.equal(logs.at(-1)[1].status,503);
+    assert.match(logs.at(-1)[1].correlationId,/^[0-9a-f-]{36}$/);
+  }
+  assert.doesNotMatch(JSON.stringify(logs),/private-token|apiKey=secret|Bearer/);
+  assert.deepEqual(await db('o_v04Creative').where(scope).first(),before);
+  assert.equal((await db('o_v04Asset').count({n:'canonicalKey'}).first()).n,0);
+});
+
+test('OPT-021 shared structured classifier inspects wrapped causes without mistaking provider rejection for schema failure', async t => {
+  const {db,cache,oss}=await fixture(t);
+  const helper=loadSource(path.join(root,'src/v04/structuredOutputError.ts'),db,cache,oss);
+  const z=require('zod');
+  let malformed;try{z.object({required:z.string()}).parse({});}catch(error){malformed=error;}
+  assert.equal(helper.structuredFailure(Object.assign(Error('wrapped'),{errors:[malformed]})),true);
+  assert.equal(helper.structuredFailure(Object.assign(Error('wrapped'),{cause:Object.assign(Error('provider 503'),{name:'APICallError',statusCode:503})})),false);
+  assert.equal(helper.safeStructuredStatus(Object.assign(Error('wrapped'),{cause:Object.assign(Error('provider 503'),{statusCode:503})})),503);
+});
+
+test('OPT-021 Skill HTTP returns separate safe provider and schema errors', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Skill HTTP',brief:'',targetDuration:40,aspectRatio:'16:9'},7);
+  const express=require('express');const app=express();
+  app.use(express.json());app.use((req,_res,next)=>{req.user={id:7};next();});
+  app.use('/api/v04',loadSource(path.join(root,'src/v04/router.ts'),db,cache,oss).default);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const post=async()=>{const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v04/skills/preview`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...scope,method:'ASSET_EXTRACTION'})});return {status:response.status,body:await response.json()};};
+  oss.skillResponses=[Error('Authorization: Bearer private-token')];
+  const provider=await post();
+  assert.equal(provider.status,502);assert.equal(provider.body.code,'PILOT_SKILL_MODEL_FAILED');
+  assert.match(provider.body.message,/供应商配置/);
+  assert.doesNotMatch(JSON.stringify(provider.body),/private-token/);
+  oss.skillResponses=[{candidates:[{}],mergeSuggestions:[]},{candidates:[{}],mergeSuggestions:[]}];
+  const schema=await post();
+  assert.equal(schema.status,502);assert.equal(schema.body.code,'PILOT_SKILL_SCHEMA_FAILED');
+  assert.match(schema.body.message,/结构/);
+  assert.equal((await db('o_v04Asset').count({n:'canonicalKey'}).first()).n,0);
+});
+
+test('OPT-021 structured Skill repair uses one pinned session and never persists a candidate', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Repair',brief:'Blue light',targetDuration:40,aspectRatio:'16:9'},7);
+  const skills=loadSource(path.join(root,'src/v04/skills.ts'),db,cache,oss);
+  const valid={candidates:[asset('Blue luminous matter','FX')],mergeSuggestions:[]};
+  oss.skillResponses=[{candidates:[{name:'Missing contract fields'}],mergeSuggestions:[]},valid];
+  const result=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
+  assert.equal(result.applied,false);
+  assert.deepEqual(result.output,valid);
+  assert.equal(result.sourceVersion,1);
+  assert.equal(oss.sessionCount,1,'repair pins one model session');
+  assert.equal(oss.modelCalls.length,2,'at most one repair');
+  assert.equal(oss.modelCalls[0].model,oss.modelCalls[1].model);
+  assert.match(oss.modelCalls[1].messages[1].content,/Missing contract fields/);
+  assert.match(oss.modelCalls[1].messages[1].content,/Repair format and field types only/);
+  assert.equal((await db('o_v04Asset').count({n:'canonicalKey'}).first()).n,0);
+  oss.skillResponses=[{candidates:[{name:'Still missing'}],mergeSuggestions:[]},{candidates:[{name:'Still missing'}],mergeSuggestions:[]}];
+  await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_SCHEMA_FAILED' && /结构/.test(e.message));
+  assert.equal(oss.modelCalls.length,4,'failed repair does not start a third attempt');
+  assert.equal((await db('o_v04Asset').count({n:'canonicalKey'}).first()).n,0);
+});
+
+test('OPT-021 Skill context and references fail closed; existing identity stays a merge suggestion', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Brand',brief:'Logo ending',targetDuration:40,aspectRatio:'16:9'},7);
+  const changes=[{operation:'ADD',clientRef:'logo',asset:asset('Dream Stream Logo','BRAND','REAL_REQUIRED')}];
+  const plan=await s.previewAssets({...scope,changes});await s.applyAssets({...scope,changes,previewHash:plan.previewHash});
+  const skills=loadSource(path.join(root,'src/v04/skills.ts'),db,cache,oss);
+  const beforeCreative=await db('o_v04Creative').where(scope).first();
+  const beforeAssets=await db('o_v04Asset').where({projectId:scope.projectId});
+  oss.contextFailure=Error('project context unavailable');
+  await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_CONTEXT_FAILED');
+  oss.contextFailure=null;
+  oss.textModelUnavailable=true;
+  await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_MODEL_FAILED');
+  oss.textModelUnavailable=false;
+  const duplicate=asset('Dream Stream Logo','BRAND','REAL_REQUIRED');
+  oss.proposalOutput={candidates:[duplicate],mergeSuggestions:[{candidateIndex:0,existingCanonicalKey:'BRAND-999',reason:'duplicate'}]};
+  await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_REFERENCE_INVALID');
+  oss.proposalOutput={candidates:[{...asset('Blue matter','FX'),ownerKey:'FX-999'}],mergeSuggestions:[]};
+  await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_REFERENCE_INVALID');
+  oss.proposalOutput={candidates:[duplicate],mergeSuggestions:[]};
+  await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_REFERENCE_INVALID','exact existing identity needs a merge suggestion');
+  oss.proposalOutput={candidates:[duplicate,asset('Blue luminous matter','FX')],mergeSuggestions:[{candidateIndex:0,existingCanonicalKey:'BRAND-001',reason:'已有品牌 Logo'}]};
+  const proposal=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
+  assert.equal(proposal.applied,false);
+  assert.equal(proposal.output.mergeSuggestions[0].existingCanonicalKey,'BRAND-001');
+  assert.match(oss.modelCalls.at(-1).system,/已有 canonical identity 不得重复创建/);
+  assert.match(oss.modelCalls.at(-1).system,/蓝色荧光梦物质/);
+  assert.deepEqual(await db('o_v04Creative').where(scope).first(),beforeCreative);
+  assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),beforeAssets);
+  const creativeChange={...scope,brief:'New confirmed brief',treatment:'',script:'',targetDuration:40,expectedVersion:1};
+  const creativePreview=await s.previewCreative(creativeChange);
+  await s.applyCreative({...creativeChange,previewHash:creativePreview.previewHash});
+  const staleChanges=[{operation:'ADD',clientRef:'blue',asset:proposal.output.candidates[1]}];
+  await assert.rejects(s.previewAssets({...scope,changes:staleChanges,sourceCreativeVersion:proposal.sourceVersion}),e=>e.code==='PILOT_SOURCE_STALE');
 });
 
 test('OPT-018 Proposal uses shared project truth and cached Vision text, never a recent raw image in the text model', async t => {

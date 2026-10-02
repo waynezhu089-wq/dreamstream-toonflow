@@ -1,9 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { Output } from "ai";
-import { z, ZodError } from "zod";
+import { z } from "zod";
 import u from "@/utils";
 import { requireModel } from "@/services/modelPreset";
 import { PilotError } from "./service";
 import { buildProjectAgentContext, renderProjectAgentSystem } from "./agentContext";
+import { safeStructuredStatus, structuredFailure, structuredRepairContext } from "./structuredOutputError";
 
 const id = z.number().int().positive();
 const request = z.object({ projectId: id, scriptId: id, method: z.enum(["ASSET_EXTRACTION", "ASSET_PROMPTS", "STORYBOARD_BATCH"]) }).strict();
@@ -14,7 +16,7 @@ const outputSchemas = {
   STORYBOARD_BATCH: z.object({ shots: z.array(z.object({ duration: z.number().positive().max(600), prompt: z.string().min(1).max(20000), videoDesc: z.string().max(20000), productionMode: z.enum(["REAL_ASSET_DIRECT", "AI_TEXT_TO_IMAGE", "REAL_AI_COMPOSITE"]), primaryKey: z.string().nullable(), canonicalKeys: z.array(z.string()).max(50) }).strict()).min(1).max(100) }).strict(),
 };
 const instructions = {
-  ASSET_EXTRACTION: "方法 v04.asset-extraction.v1：从 Creative/Script、项目对话与已接受/否决决定识别持续存在的视觉实体。身份特征、独立可携带物、状态变体分层。真实 UI/Logo/产品文字必须 REAL_REQUIRED。名称相同或同义只能建议合并，绝不自行合并。",
+  ASSET_EXTRACTION: "方法 v04.asset-extraction.v1：从 Creative/Script、项目对话与已接受/否决决定识别持续存在的视觉实体。已有 canonical identity 不得重复创建；若发现已有 Logo 等身份，只在 mergeSuggestions 用当前真实 canonicalKey 提出合并建议，绝不自动合并。蓝色荧光梦物质若出现在当前创意中可作为 FX 候选；海盗船、潜水艇、飞马是否独立为资产，按其是否为持续视觉实体判断。真实 UI/Logo/产品文字必须 REAL_REQUIRED。ownerKey/variantOf 只能引用当前已存在的 canonicalKey，不能引用尚未分配 ID 的新候选。prompt 可为空，详细 Prompt 留给 ASSET_PROMPTS。",
   ASSET_PROMPTS: "方法 v04.asset-prompt.v1：为每个已有 Canonical Asset 生成独立且一致的素材 Prompt 草案。维持 identityAnchors 和 mustPreserve，遵守 forbiddenChanges。真实 UI、Logo、文字不能由 AI 重画。只返回现有 canonicalKey。",
   STORYBOARD_BATCH: "方法 v04.storyboard-batch.v1：根据已确认 Creative 和 Asset Bible 提出约目标时长的分镜方案。引用只用给定 canonicalKey。真实 UI/Logo 必须 REAL_ASSET_DIRECT 或 REAL_AI_COMPOSITE，不要用 AI_TEXT_TO_IMAGE 伪造真实界面。此结果只是提案，不是生产数据库。",
 } as const;
@@ -25,19 +27,15 @@ function requestsDurationChange(instruction: string) {
   if (/(?:不要|不需|无需|保持|别|勿).{0,12}(?:目标时长|片长|总时长|duration)|(?:目标时长|片长|总时长|duration).{0,8}(?:保持|不改|不变)/i.test(instruction)) return false;
   return /(?:目标时长|片长|总时长|duration).{0,16}(?:先按|按|改|调整|修改|设|定|变成)|(?:请|想|建议|希望).{0,16}(?:目标时长|片长|总时长|duration)|(?:延长|缩短).{0,24}\d{1,3}\s*(?:秒|s\b|seconds?)/i.test(instruction);
 }
-function structuredFailure(error: unknown): boolean {
-  const queue: unknown[] = [error];
-  const seen = new Set<object>();
-  while (queue.length && seen.size < 6) {
-    const current = queue.shift();
-    if (!current || typeof current !== "object" || seen.has(current)) continue;
-    seen.add(current);
-    if (current instanceof ZodError || /^(NoObjectGeneratedError|AI_NoObjectGeneratedError|TypeValidationError|JSONParseError|AI_TypeValidationError|AI_JSONParseError)$/.test(String((current as Error).name))) return true;
-    const nested = current as { cause?: unknown; errors?: unknown[] };
-    if (nested.cause) queue.push(nested.cause);
-    if (Array.isArray(nested.errors)) queue.push(...nested.errors.slice(-2));
-  }
-  return false;
+function logSkillFailure(data: z.infer<typeof request>, correlationId: string, errorCode: string, error: unknown, modelReference?: string) {
+  const reference = modelReference && /^[A-Za-z0-9._:/-]{1,128}$/.test(modelReference) && !/(?:secret|token|key|authorization|sk-)/i.test(modelReference) ? modelReference : null;
+  console.error("[V04 Skill][Failure]", {
+    method: data.method, projectId: data.projectId, scriptId: data.scriptId,
+    errorCode, errorName: error instanceof Error ? error.name : "Error",
+    correlationId, modelReference: reference,
+    providerId: reference?.includes(":") ? reference.split(":", 1)[0] : null,
+    status: safeStructuredStatus(error),
+  });
 }
 
 export async function previewCreativeProposal(input: unknown) {
@@ -72,25 +70,63 @@ export async function previewCreativeProposal(input: unknown) {
 }
 export async function previewSkill(input: unknown) {
   const data = request.parse(input);
-  const context = await buildProjectAgentContext({ projectId: data.projectId, scriptId: data.scriptId, currentStage: data.method === "STORYBOARD_BATCH" ? "storyboard" : "creative", currentRoute: "pilot/skills", selectedObject: null }, instructions[data.method]);
-  const model = await requireModel(data.projectId, "text");
+  const correlationId = randomUUID();
+  let context: Awaited<ReturnType<typeof buildProjectAgentContext>>;
+  try {
+    context = await buildProjectAgentContext({ projectId: data.projectId, scriptId: data.scriptId, currentStage: data.method === "STORYBOARD_BATCH" ? "storyboard" : "creative", currentRoute: "pilot/skills", selectedObject: null }, instructions[data.method]);
+  } catch (error) {
+    if (error instanceof PilotError) throw error;
+    logSkillFailure(data, correlationId, "PILOT_SKILL_CONTEXT_FAILED", error);
+    throw new PilotError("PILOT_SKILL_CONTEXT_FAILED", "项目上下文读取失败，请稍后重试", 503);
+  }
+  let session: Awaited<ReturnType<ReturnType<typeof u.Ai.Text>["trackedSession"]>>;
+  try {
+    const model = await requireModel(data.projectId, "text");
+    session = await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).trackedSession();
+  } catch (error) {
+    logSkillFailure(data, correlationId, "PILOT_SKILL_MODEL_FAILED", error);
+    throw new PilotError("PILOT_SKILL_MODEL_FAILED", "文本模型调用失败，请检查供应商配置", 502);
+  }
   const schema = outputSchemas[data.method];
   const skeleton = data.method === "ASSET_EXTRACTION" ? { candidates: [{ name: "", category: "CHAR", description: "", identityAnchors: [], mustPreserve: [], forbiddenChanges: [], ownerKey: null, variantOf: null, sourcePolicy: "AI_ALLOWED", prompt: "" }], mergeSuggestions: [] } :
     data.method === "ASSET_PROMPTS" ? { prompts: [{ canonicalKey: "", prompt: "", reason: "" }] } : { shots: [{ duration: 3, prompt: "", videoDesc: "", productionMode: "AI_TEXT_TO_IMAGE", primaryKey: null, canonicalKeys: [] }] };
   const system = `${renderProjectAgentSystem(context)}\n${instructions[data.method]}\nReturn one valid JSON object only. Use this JSON structure: ${JSON.stringify(skeleton)}. No markdown or extra fields. Do not claim changes were applied.`;
+  const user = JSON.stringify({ method: data.method });
+  let output: any;
+  let repairContext = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let candidate: unknown;
+    try {
+      // One pinned provider/model configuration for both structured attempts.
+      const messages = [{ role: "user" as const, content: user }];
+      if (attempt) messages.push({ role: "user", content: `The previous structured result failed validation. Repair format and field types only; do not reconsider creative decisions or add new assets. Return one complete JSON object matching ${JSON.stringify(skeleton)}. Previous result or SDK repair context: ${repairContext}` });
+      const result = await session.invokeObject({ system, messages, schema: schema as any });
+      candidate = result.object;
+      output = schema.parse(candidate);
+      break;
+    } catch (error) {
+      if (!structuredFailure(error)) {
+        logSkillFailure(data, correlationId, "PILOT_SKILL_MODEL_FAILED", error, session.modelReference);
+        throw new PilotError("PILOT_SKILL_MODEL_FAILED", "文本模型调用失败，请检查供应商配置", 502);
+      }
+      logSkillFailure(data, correlationId, "PILOT_SKILL_SCHEMA_FAILED", error, session.modelReference);
+      if (attempt) throw new PilotError("PILOT_SKILL_SCHEMA_FAILED", "模型已返回内容，但提案结构不符合要求或输出不完整，请重试", 502);
+      repairContext = structuredRepairContext(error, candidate);
+    }
+  }
   try {
-    // The three method schemas are a discriminated runtime union; AI SDK's
-    // generic helper needs one concrete type, while the selected Zod schema
-    // is still validated below before any proposal leaves this boundary.
-    const result = await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).invoke({ system, messages: [{ role: "user", content: JSON.stringify({ method: data.method }) }], output: Output.object({ schema: schema as any }) });
-    const output = schema.parse(result.output) as any;
     const keys = new Set(context.assetBibleIndex.map(a => a.canonicalKey));
     if (data.method === "ASSET_PROMPTS" && output.prompts.some((p: any) => !keys.has(p.canonicalKey))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "AI 提案引用了不存在的素材身份", 422);
     if (data.method === "STORYBOARD_BATCH" && output.shots.some((s: any) => [...s.canonicalKeys, ...(s.primaryKey ? [s.primaryKey] : [])].some(k => !keys.has(k)))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "AI 分镜引用了不存在的素材身份", 422);
-    if (data.method === "ASSET_EXTRACTION" && output.mergeSuggestions.some((s: any) => s.candidateIndex >= output.candidates.length || !keys.has(s.existingCanonicalKey))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "AI 合并建议引用无效", 422);
+    if (data.method === "ASSET_EXTRACTION") {
+      if (output.mergeSuggestions.some((s: any) => s.candidateIndex >= output.candidates.length || !keys.has(s.existingCanonicalKey))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "AI 合并建议引用无效", 422);
+      if (output.candidates.some((asset: any) => [asset.ownerKey, asset.variantOf].some(key => key && !keys.has(key)))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "新候选的归属或变体只能引用现有身份", 422);
+      if (output.candidates.some((asset: any, index: number) => context.assetBibleIndex.some(existing => existing.category === asset.category && existing.name.trim().toLocaleLowerCase() === asset.name.trim().toLocaleLowerCase() && !output.mergeSuggestions.some((s: any) => s.candidateIndex === index && s.existingCanonicalKey === existing.canonicalKey)))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "已有素材身份只能提出合并建议，不能作为新候选创建", 422);
+    }
     return { method: data.method, skillId: `v04.${data.method.toLowerCase().replaceAll('_','-')}.v1`, output, applied: false, sourceVersion: context.creative.version };
   } catch (error) {
-    if (error instanceof PilotError) throw error;
-    throw new PilotError("PILOT_SKILL_FAILED", "批量提案生成失败，请检查文本模型并重试", 502);
+    if (error instanceof PilotError) { logSkillFailure(data, correlationId, error.code, error, session.modelReference); throw error; }
+    logSkillFailure(data, correlationId, "PILOT_SKILL_INTERNAL_FAILED", error, session.modelReference);
+    throw new PilotError("PILOT_SKILL_INTERNAL_FAILED", "提案校验失败，请稍后重试", 500);
   }
 }
