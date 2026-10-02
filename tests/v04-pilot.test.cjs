@@ -79,6 +79,17 @@ test('Project Agent keeps a project-level memory identity and reads selected sho
   assert.doesNotMatch(source,/trx\("o_storyboard"\)\.insert|trx\("o_storyboard"\)\.update/);
 });
 
+test('pilot launcher reads exactly one owner from its disposable SQLite without guessing', async t => {
+  const {db,oss}=await fixture(t);
+  await db.schema.createTable('o_user',x=>{x.integer('id').primary();});
+  const read=()=>require('node:child_process').execFileSync(process.execPath,[path.join(root,'pilot/read-owner.cjs')],{cwd:root,env:{...process.env,V04_OWNER_DB_PATH:path.join(oss.testDir,'test.sqlite')},encoding:'utf8'});
+  assert.equal(read(),'');
+  await db('o_user').insert({id:42});
+  assert.equal(read(),'42');
+  await db('o_user').insert({id:43});
+  assert.equal(read(),'');
+});
+
 test('chat image stays a scoped conversational reference until separately previewed and confirmed', async t => {
   const { db, oss, service:s, agent } = await fixture(t);
   const scope = await s.createPilotProject({name:'Image dialogue',brief:'Real UI stays real',targetDuration:30,aspectRatio:'16:9'}, 7);

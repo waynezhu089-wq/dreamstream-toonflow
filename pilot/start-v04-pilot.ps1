@@ -25,7 +25,8 @@ if (Test-Path -LiteralPath $dbPath -PathType Leaf) {
   $env:V04_OWNER_DB_PATH = $dbPath
   Push-Location $backendRoot
   try {
-    $existingOwner = & node -e 'const Database=require("better-sqlite3");const db=new Database(process.env.V04_OWNER_DB_PATH,{readonly:true,fileMustExist:true});try{const ids=db.prepare("SELECT id FROM o_user ORDER BY id LIMIT 2").all().map(x=>x.id);if(ids.length===1)process.stdout.write(String(ids[0]));}finally{db.close()}'
+    $existingOwner = & node (Join-Path $PSScriptRoot 'read-owner.cjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read the disposable pilot owner account.' }
   } finally { Pop-Location }
   if ($OwnerUserId -gt 0 -and "$OwnerUserId" -ne "$existingOwner") { throw 'The supplied Studio owner does not match the sole account in this disposable pilot database.' }
   if ($OwnerUserId -eq 0 -and $existingOwner) { $OwnerUserId = [int]$existingOwner }
