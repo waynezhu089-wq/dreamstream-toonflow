@@ -2,13 +2,14 @@ import u from "@/utils";
 import { z } from "zod";
 import { randomUUID } from "crypto";
 import type { Knex } from "knex";
-export const slotNames = ["text", "image", "video", "tts"] as const;
+export const slotNames = ["text", "vision", "image", "video", "tts"] as const;
 export type Slot = typeof slotNames[number];
 export type Slots = Record<Slot, string | null>;
 const model = z.string().trim().regex(/^[^:]+:.+$/).nullable();
-export const slotsSchema = z.object({ text: model, image: model, video: model, tts: model }).strict();
+// vision defaults to null so presets saved before V0.4 remain readable/editable.
+export const slotsSchema = z.object({ text: model, vision: model.default(null), image: model, video: model, tts: model }).strict();
 export const patchSchema = slotsSchema.partial();
-export const emptySlots = (): Slots => ({ text: null, image: null, video: null, tts: null });
+export const emptySlots = (): Slots => ({ text: null, vision: null, image: null, video: null, tts: null });
 const db = () => u.db as Knex;
 export const isAdvertisement = (p: any) => p?.projectType === "general_video" && p?.type === "advertisement";
 export class ModelConfigError extends Error { constructor(message: string, public status = 400) { super(message); } }
@@ -23,7 +24,7 @@ export async function resolveModelsInTransaction(projectId: number, q: Knex.Tran
   const project = projectRow ?? await q("o_project").where({ id: projectId }).first();
   if (!project) throw new ModelConfigError("项目不存在", 404);
   const legacy = { ...emptySlots(), image: project.imageModel || null, video: project.videoModel || null };
-  if (!isAdvertisement(project)) return { models: legacy, sources: { text: "legacy", image: "legacy", video: "legacy", tts: "legacy" }, overrides: legacy };
+  if (!isAdvertisement(project)) return { models: legacy, sources: { text: "legacy", vision: "legacy", image: "legacy", video: "legacy", tts: "legacy" }, overrides: legacy };
   const read = async (trx: Knex.Transaction) => {
     const row = await trx("o_modelScope").where({ scope: `project:${projectId}` }).first();
     // Legacy project fields remain readable until a slot is explicitly migrated.
@@ -45,7 +46,12 @@ export async function resolveModels(projectId: number) {
 export async function listConfiguration() {
   const options: { value: string; label: string; type: Slot }[] = [];
   for (const vendor of await db()("o_vendorConfig").where({ enable: 1 })) {
-    try { for (const m of await u.vendor.getModelList(String(vendor.id))) if (slotNames.includes(m.type)) options.push({ value: String(vendor.id) + ":" + m.modelName, label: m.name || m.modelName, type: m.type }); } catch { /* Unreadable vendors cannot supply selectable models. */ }
+    try { for (const m of await u.vendor.getModelList(String(vendor.id))) {
+      if (slotNames.includes(m.type)) options.push({ value: String(vendor.id) + ":" + m.modelName, label: m.name || m.modelName, type: m.type });
+      // Existing vendor adapters expose multimodal chat models as text models.
+      // Selection is explicit; actual image support is verified at use, never inferred from the provider name.
+      if (m.type === "text" && m.supports?.image_input !== false) options.push({ value: String(vendor.id) + ":" + m.modelName, label: m.name || m.modelName, type: "vision" });
+    } } catch { /* Unreadable vendors cannot supply selectable models. */ }
   }
   return { options, presets: (await db()("o_modelPreset").select("*")).map(p => ({ id: p.id, name: p.name, slots: parse(p) })), scopes: await db()("o_modelScope").whereIn("scope", ["system", "profile:advertisement"]).select("scope", "presetId") };
 }
@@ -86,7 +92,7 @@ export async function requireModel(projectId: number, slot: Slot, legacyValue = 
   if (!project) throw new ModelConfigError("项目不存在", 404);
   if (!isAdvertisement(project)) return legacyValue;
   const value = (await resolveModels(projectId)).models[slot];
-  const label = { text: "文本", image: "图片生成", video: "视频生成", tts: "音频/TTS" }[slot];
+  const label = { text: "文本", vision: "视觉分析", image: "图片生成", video: "视频生成", tts: "音频/TTS" }[slot];
   const missing = () => new ModelConfigError(`请先配置${label}模型（项目模型配置或设置中的模型预设）`, 409);
   if (!value) throw missing();
   const [id, name] = value.split(/:(.+)/);
@@ -94,7 +100,7 @@ export async function requireModel(projectId: number, slot: Slot, legacyValue = 
   if (!vendor) throw missing();
   let models;
   try { models = await u.vendor.getModelList(id); } catch { throw missing(); }
-  if (!models.some((m: any) => m.modelName === name && m.type === slot)) throw missing();
+  if (!models.some((m: any) => m.modelName === name && (slot === "vision" ? m.type === "vision" || m.type === "text" && m.supports?.image_input !== false : m.type === slot))) throw missing();
   return value;
 }
 

@@ -13,5 +13,5 @@ router.post("/save", run(savePreset));
 router.post("/default", run(setDefault));
 router.post("/project", run(patchProject));
 router.post("/resolve", run(body => resolveModels(z.number().int().positive().parse(body.projectId))));
-router.post("/check", run(async body => ({ model: await requireModel(z.number().int().positive().parse(body.projectId), z.enum(["text", "image", "video", "tts"]).parse(body.slot)) })));
+router.post("/check", run(async body => ({ model: await requireModel(z.number().int().positive().parse(body.projectId), z.enum(["text", "vision", "image", "video", "tts"]).parse(body.slot)) })));
 export default router;

@@ -16,9 +16,14 @@ function loadSource(file, db, cache = new Map(), oss = null) {
   }, fileName: file }).outputText;
   new Function('require', 'module', 'exports', code)(name => {
     if (name === '@/utils/db') return { db };
-    if (name === '@/utils') return { oss, Ai: { Text: () => ({ invoke: async input => { oss.modelCalls.push(input); if (oss.modelError) throw Error('provider cannot read image'); return { text: 'I can inspect the attached image.', output: oss.proposalOutput }; } }) } };
+    if (name === '@/utils') return { oss, vendor: { getModelList: async () => ['vision','vision-v2'].map(modelName => ({ modelName, type: 'text', supports: { image_input: true } })), getCode: () => 'vision-adapter-v1' }, Ai: { Text: model => ({ invoke: async input => {
+      oss.modelCalls.push({ model, ...input });
+      if (model.startsWith('fake:vision')) { oss.visionCalls++; if (oss.modelError) throw Error('provider cannot read image'); return { text: JSON.stringify({ summary: 'A dark blue image with a bright logo', dominantColors: ['deep blue'], visibleText: ['DreamStream'], uncertainty: [] }) }; }
+      if (oss.textError) throw Error('text provider failed');
+      return { text: 'I can discuss the observed image in this project.', output: oss.proposalOutput };
+    } }) } };
     if (name === '@/utils/getPath') return () => path.join(oss.testDir,'v04-conversation');
-    if (name === '@/services/modelPreset') return { requireModel: async () => 'fake:local' };
+    if (name === '@/services/modelPreset') { oss.ModelConfigError ??= class ModelConfigError extends Error {}; return { ModelConfigError: oss.ModelConfigError, requireModel: async (_projectId, slot) => { if (slot === 'vision' && !oss.visionModel) throw new oss.ModelConfigError('vision unavailable'); return slot === 'vision' ? oss.visionModel : 'fake:local'; }, resolveModels: async () => ({ models: { vision: oss.visionModel } }) }; }
     if (name === '@/utils/agent/memory') return class { async get() { return {rag:[], summaries:[]}; } };
     if (name === '@/utils/agent/embedding') return { getEmbedding: async () => [] };
     if (name === './skills') return { previewSkill: async () => ({}), previewCreativeProposal: async () => ({}) };
@@ -50,7 +55,7 @@ async function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v04-pilot-'));
   const db = knex({ client: 'better-sqlite3', connection: { filename: path.join(dir, 'test.sqlite') }, useNullAsDefault: true });
   const oss = { writeFile: async (p, bytes) => { const target=path.join(dir,'oss',p.replace(/^\//,'')); fs.mkdirSync(path.dirname(target),{recursive:true}); fs.writeFileSync(target,bytes); }, getFile: async p => fs.readFileSync(path.join(dir,'oss',p.replace(/^\//,''))), deleteFile: async p => fs.rmSync(path.join(dir,'oss',p.replace(/^\//,'')),{force:true}) };
-  oss.modelCalls=[];
+  oss.modelCalls=[]; oss.visionCalls=0; oss.visionModel='fake:vision';
   oss.testDir=dir;
   t.after(async () => { await db.destroy(); fs.rmSync(dir, { recursive: true, force: true }); });
   await db.schema.createTable('o_project', x => { x.bigInteger('id').primary(); x.string('projectType'); x.string('type'); x.string('name'); x.text('intro'); x.string('artStyle'); x.string('directorManual'); x.string('videoRatio'); x.string('imageModel'); x.string('videoModel'); x.string('imageQuality'); x.string('mode'); x.integer('userId'); x.bigInteger('createTime'); });
@@ -75,7 +80,7 @@ test('Project Agent keeps a project-level memory identity and reads selected sho
   const source=fs.readFileSync(path.join(root,'src/v04/router.ts'),'utf8');
   assert.match(source,/project:\$\{projectId\}:projectAgent/);
   assert.match(source,/selectedShotAndNeighbors = selectedShotIndex < 0/);
-  assert.match(source,/reply: result\.text, applied: false/);
+  assert.match(source,/answerProjectAgent\(\{ projectId: ctx\.projectId/);
   assert.doesNotMatch(source,/trx\("o_storyboard"\)\.insert|trx\("o_storyboard"\)\.update/);
 });
 
@@ -135,13 +140,17 @@ test('authenticated HTTP chat sends real image bytes to the Agent and restores t
   const chat=await post('/agent/chat',{context:creative,message:'Compare this composition.',attachmentIds:[attachmentId]});
   assert.equal(chat.status,200);
   assert.equal(chat.body.data.applied,false);
-  assert.equal(oss.modelCalls.length,1);
+  assert.equal(oss.modelCalls.length,2);
+  assert.equal(oss.modelCalls[0].model,'fake:vision');
   assert.equal(oss.modelCalls[0].messages[0].content[1].type,'image');
   assert.equal(oss.modelCalls[0].messages[0].content[1].image,`data:image/png;base64,${png.toString('base64')}`);
+  assert.equal(oss.modelCalls[1].model,'fake:local');
+  assert.match(oss.modelCalls[1].system,/dark blue image/);
   const assets={...creative,currentStage:'assets',currentRoute:'pilot/assets',selectedObject:{type:'PROJECT',key:'all'}};
   const later=await post('/agent/chat',{context:assets,message:'Do you remember our composition discussion?',attachmentIds:[]});
   assert.equal(later.status,200);
-  assert.match(oss.modelCalls[1].system,/Compare this composition/);
+  assert.match(oss.modelCalls[2].system,/Compare this composition/);
+  assert.equal(oss.visionCalls,1,'a follow-up visual request reuses the observation cache');
   const history=await post('/agent/history',scope);
   assert.equal(history.status,200);
   assert.equal(history.body.data.isolationKey,`project:${scope.projectId}:projectAgent`);
@@ -152,7 +161,7 @@ test('authenticated HTTP chat sends real image bytes to the Agent and restores t
   const nextUnit={...assets,scriptId:secondUnit,currentStage:'storyboard',currentRoute:'production/storyboard',selectedObject:{type:'SHOT',key:'9'}};
   const acrossUnit=await post('/agent/chat',{context:nextUnit,message:'Same project, new production unit.',attachmentIds:[]});
   assert.equal(acrossUnit.status,200);
-  assert.match(oss.modelCalls[2].system,new RegExp(`当前制作单元: ${secondUnit}`));
+  assert.match(oss.modelCalls[3].system,new RegExp(`当前制作单元: ${secondUnit}`));
   const secondHistory=await post('/agent/history',{projectId:scope.projectId,scriptId:secondUnit});
   assert.equal(secondHistory.body.data.isolationKey,history.body.data.isolationKey);
   assert.equal(secondHistory.body.data.messages.length,6);
@@ -164,11 +173,59 @@ test('authenticated HTTP chat sends real image bytes to the Agent and restores t
   const failedUpload=await post('/agent/image/upload',{context:assets,name:'second.png',dataUrl:`data:image/png;base64,${png.toString('base64')}`});
   oss.modelError=true;
   const failedChat=await post('/agent/chat',{context:assets,message:'Inspect this too',attachmentIds:[failedUpload.body.data.id]});
-  assert.equal(failedChat.status,409);
-  assert.equal(failedChat.body.code,'PILOT_IMAGE_MODEL_UNSUPPORTED');
+  assert.equal(failedChat.status,200);
+  assert.equal(failedChat.body.data.status,'VISION_ANALYSIS_FAILED');
   const recovered=await post('/agent/history',scope);
   assert.equal(recovered.body.data.messages.length,7);
   assert.equal(recovered.body.data.messages[6].attachments[0].id,failedUpload.body.data.id);
+});
+
+test('missing vision preserves image and message; reanalysis and follow-up use versioned cache without promotion', async t => {
+  const { db, oss, cache, service:s } = await fixture(t);
+  const scope = await s.createPilotProject({name:'Vision pilot',brief:'Moon ending',targetDuration:30,aspectRatio:'16:9'},7);
+  const ctx = {...scope,currentStage:'creative',currentRoute:'pilot/creative',selectedObject:null};
+  const express = require('express'); const app = express();
+  app.use(express.json({limit:'12mb'})); app.use((req,_res,next)=>{req.user={id:7};next();});
+  app.use('/api/v04',loadSource(path.join(root,'src/v04/router.ts'),db,cache,oss).default);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const post=async (route,body)=>{const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v04${route}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});return {status:response.status,data:await response.json()};};
+  const png=await require('sharp')({create:{width:8,height:8,channels:4,background:'#123456'}}).png().toBuffer();
+  const upload=await post('/agent/image/upload',{context:ctx,name:'logo.png',dataUrl:`data:image/png;base64,${png.toString('base64')}`});
+  oss.visionModel=null;
+  const missing=await post('/agent/chat',{context:ctx,message:'你能看到这个 Logo 吗？',attachmentIds:[upload.data.data.id]});
+  assert.equal(missing.status,200); assert.equal(missing.data.data.status,'VISION_MODEL_REQUIRED');
+  assert.match(missing.data.data.reply,/图片已保存.*还不能分析/);
+  assert.equal(oss.modelCalls.length,0,'no model was called to invent a visual answer');
+  let history=await post('/agent/history',scope);
+  assert.equal(history.data.data.messages.length,1);
+  assert.equal(history.data.data.messages[0].attachments[0].id,upload.data.data.id);
+  assert.equal(history.data.data.visionConfigured,false);
+  assert.equal((await db('o_v04AgentReference')).length,0);
+  assert.equal((await db('o_image')).length,0);
+  const plain=await post('/agent/chat',{context:ctx,message:'继续广告创意讨论。',attachmentIds:[]});
+  assert.equal(plain.data.data.status,'ANSWERED'); assert.equal(oss.visionCalls,0);
+  oss.visionModel='fake:vision';
+  const reanalyzed=await post('/agent/reanalyze',{context:ctx,userMessageId:missing.data.data.userMessageId});
+  assert.equal(reanalyzed.data.data.status,'ANSWERED'); assert.equal(oss.visionCalls,1);
+  assert.match(oss.modelCalls.at(-1).system,/dark blue image/);
+  const followup=await post('/agent/chat',{context:ctx,message:'再分析这个 Logo 的颜色和构图',attachmentIds:[]});
+  assert.equal(followup.data.data.status,'ANSWERED'); assert.equal(followup.data.data.visionCacheHits,1);
+  assert.equal(oss.visionCalls,1,'same attachment and model use cached observation');
+  await post('/agent/reanalyze',{context:ctx,userMessageId:missing.data.data.userMessageId});
+  assert.equal(oss.visionCalls,2,'explicit reanalysis bypasses cache');
+  oss.visionModel='fake:vision-v2';
+  await post('/agent/chat',{context:ctx,message:'比较刚才 Logo 的颜色',attachmentIds:[]});
+  assert.equal(oss.visionCalls,3,'different exact model produces a new observation');
+  assert.equal((await db('o_v04VisionAnalysis')).length,2);
+  const before=oss.modelCalls.length;
+  const unsupported=await post('/agent/chat',{context:ctx,message:'帮我生成一张图',attachmentIds:[]});
+  assert.equal(unsupported.data.data.status,'CAPABILITY_NOT_CONNECTED');
+  assert.equal(oss.modelCalls.length,before,'unsupported generation never dispatches a producer');
+  history=await post('/agent/history',scope);
+  assert.equal(history.data.data.visionConfigured,true);
+  assert.equal((await db('o_v04AgentReference')).length,0);
+  assert.equal((await db('o_image')).length,0);
 });
 
 test('Creative Agent proposal uses project conversation and remains zero-write until preview/apply', async t => {

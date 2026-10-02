@@ -88,6 +88,14 @@ export async function initializeV04Schema(db: Knex) {
     t.integer("assetId").nullable();
     t.integer("createdAt").notNullable();
   });
+  if (!await db.schema.hasTable("o_v04VisionAnalysis")) await db.schema.createTable("o_v04VisionAnalysis", t => {
+    t.text("attachmentId").notNullable();
+    t.text("modelFingerprint").notNullable();
+    t.integer("analysisVersion").notNullable();
+    t.text("observationJson").notNullable();
+    t.integer("createdAt").notNullable();
+    t.primary(["attachmentId", "modelFingerprint", "analysisVersion"]);
+  });
 }
 
 export async function initializeV04Profile(db: Knex) {

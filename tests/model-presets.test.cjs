@@ -52,7 +52,7 @@ async function fixture(t) {
   async function post(route, body, status=200) { const r=await fetch(`http://127.0.0.1:${server.address().port}/api/${route}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const json=await r.json();assert.equal(r.status,status,JSON.stringify(json));return json.data ?? json; }
   return { db, service, post, calls, models, load };
 }
-const empty = () => ({ text:null,image:null,video:null,tts:null });
+const empty = () => ({ text:null,vision:null,image:null,video:null,tts:null });
 const project = () => ({ projectType:'general_video',type:'advertisement',name:'Temporary',intro:'Brief',artStyle:'style',directorManual:'director',videoRatio:'16:9',imageQuality:'',mode:'' });
 const preset = (slots={}) => ({ name:'General preset',slots:{...empty(),...slots} });
 test('real wrapper schema, empty advertisement creation and reopening inherit defaults without writing models',async t=>{
@@ -60,17 +60,21 @@ test('real wrapper schema, empty advertisement creation and reopening inherit de
  const saved=await f.post('modelSelect/presets/save',preset({image:'vendor:image'}));await f.post('modelSelect/presets/default',{scope:'profile:advertisement',presetId:saved.id});
  assert.equal((await f.post('project/getProject',{})).find(x=>x.id===p.id).imageModel,'vendor:image');assert.equal((await f.db('o_project').where({id:p.id}).first()).imageModel,'');
 });
-test('save entire preset with all four types and nulls, update without duplicates, apply entire preset',async t=>{
- const f=await fixture(t);const p=await f.post('modelSelect/presets/save',preset({text:'vendor:text',image:'vendor:image',video:'vendor:video',tts:'vendor:tts'}));
+test('save entire preset with text, vision and generation slots, update without duplicates, apply entire preset',async t=>{
+ const f=await fixture(t);const p=await f.post('modelSelect/presets/save',preset({text:'vendor:text',vision:'vendor:text2',image:'vendor:image',video:'vendor:video',tts:'vendor:tts'}));
  const applied=await f.post('modelSelect/presets/project',{projectId:1,presetId:p.id});assert.deepEqual(applied.models,p.slots);
+ assert.equal(await f.service.requireModel(1,'vision'),'vendor:text2');
+ f.models.push({type:'vision',name:'Dedicated vision',modelName:'vision-native'});
+ await f.post('modelSelect/presets/project',{projectId:1,slots:{vision:'vendor:vision-native'}});
+ assert.equal(await f.service.requireModel(1,'vision'),'vendor:vision-native');
  await f.post('modelSelect/presets/save',{...p,slots:empty()});assert.equal((await f.post('modelSelect/presets/list',{})).presets.length,1);
  assert.deepEqual((await f.post('modelSelect/presets/project',{projectId:1,presetId:p.id})).models,empty());
 });
 test('project > profile > system, per-slot patch preserves others and null resumes inheritance',async t=>{
- const f=await fixture(t);const sys=await f.post('modelSelect/presets/save',preset({image:'vendor:image',video:'vendor:video',text:'vendor:text'}));const ad=await f.post('modelSelect/presets/save',preset({image:'vendor:image2'}));
+ const f=await fixture(t);const sys=await f.post('modelSelect/presets/save',preset({image:'vendor:image',video:'vendor:video',text:'vendor:text',vision:'vendor:text2'}));const ad=await f.post('modelSelect/presets/save',preset({image:'vendor:image2'}));
  await f.post('modelSelect/presets/default',{scope:'system',presetId:sys.id});await f.post('modelSelect/presets/default',{scope:'profile:advertisement',presetId:ad.id});
  let r=await f.post('modelSelect/presets/resolve',{projectId:1});assert.equal(r.models.image,'vendor:image2');assert.equal(r.sources.video,'system');
- r=await f.post('modelSelect/presets/project',{projectId:1,slots:{image:'vendor:image'}});assert.equal(r.sources.image,'project');assert.equal(r.models.video,'vendor:video');
+ r=await f.post('modelSelect/presets/project',{projectId:1,slots:{image:'vendor:image'}});assert.equal(r.sources.image,'project');assert.equal(r.models.video,'vendor:video');assert.equal(r.models.vision,'vendor:text2');
  assert.equal((await f.post('modelSelect/presets/project',{projectId:1,slots:{image:null}})).sources.image,'profile');
  await f.post('modelSelect/presets/default',{scope:'profile:advertisement',presetId:null});assert.equal((await f.post('modelSelect/presets/resolve',{projectId:1})).sources.image,'system');
 });
