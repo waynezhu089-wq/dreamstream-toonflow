@@ -4,6 +4,7 @@ import u from "@/utils";
 import { db } from "@/utils/db";
 import { requireModel } from "@/services/modelPreset";
 import { PilotError, readPilot } from "./service";
+import { imageParts } from "./agentAttachments";
 
 const id = z.number().int().positive();
 const request = z.object({ projectId: id, scriptId: id, method: z.enum(["ASSET_EXTRACTION", "ASSET_PROMPTS", "STORYBOARD_BATCH"]) }).strict();
@@ -18,9 +19,31 @@ const instructions = {
   ASSET_PROMPTS: "方法 v04.asset-prompt.v1：为每个已有 Canonical Asset 生成独立且一致的素材 Prompt 草案。维持 identityAnchors 和 mustPreserve，遵守 forbiddenChanges。真实 UI、Logo、文字不能由 AI 重画。只返回现有 canonicalKey。",
   STORYBOARD_BATCH: "方法 v04.storyboard-batch.v1：根据已确认 Creative 和 Asset Bible 提出约目标时长的分镜方案。引用只用给定 canonicalKey。真实 UI/Logo 必须 REAL_ASSET_DIRECT 或 REAL_AI_COMPOSITE，不要用 AI_TEXT_TO_IMAGE 伪造真实界面。此结果只是提案，不是生产数据库。",
 } as const;
+
+const creativeProposalRequest = z.object({ projectId: id, scriptId: id, target: z.enum(["brief", "treatment", "script"]), instruction: z.string().max(8000).default("") }).strict();
+const creativeProposalOutput = z.object({ proposedText: z.string().min(1).max(30000), reason: z.string().max(1500) }).strict();
+
+export async function previewCreativeProposal(input: unknown) {
+  const data = creativeProposalRequest.parse(input);
+  const state = await readPilot({ projectId: data.projectId, scriptId: data.scriptId });
+  const model = await requireModel(data.projectId, "text");
+  const key = `project:${data.projectId}:projectAgent`;
+  const recent = await db("memories").where({ isolationKey: key, type: "message" }).orderBy("createTime", "desc").limit(30);
+  const recentIds = recent.map(row => row.id);
+  const pictures = recentIds.length ? await db("o_v04AgentAttachment").where({ projectId: data.projectId }).whereIn("messageId", recentIds).orderBy("createdAt", "desc").limit(2) : [];
+  const source = { current: state.creative, acceptedOrRejectedDecisions: state.decisions.filter(d => ["ACCEPTED", "REJECTED"].includes(d.status)), conversation: recent.reverse().map(row => ({ role: row.role, content: row.content })), target: data.target, instruction: data.instruction };
+  const system = `你是项目级 Project Agent。只提出 ${data.target} 的完整候选正文；保持其他 Creative 字段不变。参考当前权威 Creative、项目历史对话和已决定事项。聊天图片只是参考，不自动成为真实 UI/Logo/品牌素材。Return one valid JSON object only: {"proposedText":"","reason":""}. No markdown. Never claim the proposal has been applied.`;
+  try {
+    const content = [{ type: "text" as const, text: JSON.stringify(source) }, ...await imageParts(pictures)];
+    const result = await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).invoke({ system, messages: [{ role: "user", content }], output: Output.object({ schema: creativeProposalOutput }) });
+    return { target: data.target, sourceVersion: state.creative.version, candidate: creativeProposalOutput.parse(result.output), applied: false };
+  } catch {
+    throw new PilotError("PILOT_CREATIVE_PROPOSAL_FAILED", "创意提案生成失败；请检查文本模型是否支持所选图片", 502);
+  }
+}
 export async function previewSkill(input: unknown) {
   const data = request.parse(input);
-  const state = await readPilot(data);
+  const state = await readPilot({ projectId: data.projectId, scriptId: data.scriptId });
   const model = await requireModel(data.projectId, "text");
   const messages = await db("memories").where({ isolationKey: `project:${data.projectId}:projectAgent`, type: "message" }).orderBy("createTime", "desc").limit(30);
   const source = { creative: state.creative, acceptedOrRejectedDecisions: state.decisions.filter(d => ["ACCEPTED", "REJECTED"].includes(d.status)), conversation: messages.reverse().map(m => ({ role: m.role, content: m.content })), assets: state.assets.filter(a => a.status === "ACTIVE") };

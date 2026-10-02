@@ -7,12 +7,13 @@ import { requireModel } from "@/services/modelPreset";
 import Memory from "@/utils/agent/memory";
 import { getEmbedding } from "@/utils/agent/embedding";
 import { PilotError, applyAssets, applyCreative, createPilotProject, decide, listPilotProjects, previewAssets, previewCreative, proposeDecision, readPilot, resolveAssets } from "./service";
-import { previewSkill } from "./skills";
+import { previewSkill, previewCreativeProposal } from "./skills";
+import { applyAttachmentPromotion, attachmentsForMessage, getAgentAttachmentBytes, imageParts, previewAttachmentPromotion, uploadAgentImage } from "./agentAttachments";
 
 const router = express.Router();
 const id = z.number().int().positive();
 const context = z.object({ projectId: id, scriptId: id.nullable(), currentStage: z.string().max(80), currentRoute: z.string().max(200), selectedObject: z.object({ type: z.enum(["ASSET", "SHOT", "PROJECT"]), key: z.string().max(128) }).nullable() }).strict();
-const agentInput = z.object({ context, message: z.string().trim().min(1).max(8000) }).strict();
+const agentInput = z.object({ context, message: z.string().trim().max(8000), attachmentIds: z.array(z.string().uuid()).max(4).default([]) }).strict().refine(value => value.message.length > 0 || value.attachmentIds.length > 0, "消息或图片不能为空");
 const memoryKey = (projectId: number) => `project:${projectId}:projectAgent`;
 const missingLocalEmbedding = (error: unknown) => error instanceof Error && error.message.includes("Embedding 模型文件不存在");
 
@@ -42,40 +43,60 @@ function endpoint(route: string, run: (body: any, req: express.Request) => Promi
 }
 endpoint("/projects", async (_body, req) => listPilotProjects(Number((req as any).user.id)));
 endpoint("/project/create", (body, req) => createPilotProject(body, Number((req as any).user.id)));
-endpoint("/project/read", readPilot);
+endpoint("/project/read", input => readPilot(input));
 endpoint("/creative/preview", previewCreative);
 endpoint("/creative/apply", applyCreative);
 endpoint("/assets/preview", previewAssets);
 endpoint("/assets/apply", applyAssets);
 endpoint("/assets/resolve", resolveAssets);
 endpoint("/skills/preview", previewSkill);
+endpoint("/agent/creative-proposal", previewCreativeProposal);
+endpoint("/agent/image/upload", uploadAgentImage);
+endpoint("/agent/reference/preview", previewAttachmentPromotion);
+endpoint("/agent/reference/apply", applyAttachmentPromotion);
 endpoint("/decision/propose", proposeDecision);
 endpoint("/decision/decide", decide);
 endpoint("/agent/history", async input => {
   const { projectId } = z.object({ projectId: id }).parse(input);
-  await readPilot({ projectId, scriptId: Number(input.scriptId) });
+  await readPilot({ projectId, scriptId: Number(input.scriptId) }, true);
   const rows = await db("memories").where({ isolationKey: memoryKey(projectId), type: "message" }).orderBy("createTime", "asc").limit(300);
-  return { isolationKey: memoryKey(projectId), messages: rows.map(r => ({ id: r.id, role: r.role, content: r.content, createTime: r.createTime })) };
+  const attachments = rows.length ? await db("o_v04AgentAttachment").where({ projectId }).whereIn("messageId", rows.map(r => r.id)) : [];
+  const references = await db("o_v04AgentReference").where({ projectId }).orderBy("createdAt", "asc").limit(300);
+  return { isolationKey: memoryKey(projectId), messages: rows.map(r => ({ id: r.id, role: r.role, content: r.content, createTime: r.createTime, attachments: attachments.filter(a => a.messageId === r.id).map(a => ({ id: a.id, name: a.originalName, mimeType: a.mimeType, bytes: a.bytes, purpose: a.purpose, context: JSON.parse(a.contextJson), references: references.filter(ref => ref.attachmentId === a.id).map(ref => ({ id: ref.id, targetType: ref.targetType, targetKey: ref.targetKey, scriptId: ref.scriptId, assetId: ref.assetId })) })) })) };
+});
+router.get("/agent/image/:projectId/:attachmentId", async (req, res) => {
+  try {
+    const projectId = id.parse(Number(req.params.projectId));
+    const owner = await db("o_project").where({ id: projectId, userId: Number((req as any).user?.id) }).first();
+    if (!owner) return res.status(403).json({ code: "PILOT_FORBIDDEN" });
+    const { row, bytes } = await getAgentAttachmentBytes(projectId, req.params.attachmentId);
+    res.setHeader("Content-Type", row.mimeType);
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.send(bytes);
+  } catch (error: any) { res.status(error?.status ?? 400).json({ code: error?.code ?? "PILOT_ATTACHMENT_INVALID" }); }
 });
 endpoint("/agent/chat", async input => {
-  const { context: ctx, message } = agentInput.parse(input);
+  const { context: ctx, message, attachmentIds } = agentInput.parse(input);
   if (ctx.scriptId == null) throw new PilotError("PILOT_UNIT_REQUIRED", "请选择制作单元");
-  const state = await readPilot({ projectId: ctx.projectId, scriptId: ctx.scriptId });
+  const state = await readPilot({ projectId: ctx.projectId, scriptId: ctx.scriptId }, true);
   // Point-of-use. A missing model is reported before writing a misleading
   // assistant reply or calling a provider. No paid provider is invoked by setup.
   const model = await requireModel(ctx.projectId, "text");
   const key = memoryKey(ctx.projectId);
+  const attachments = await attachmentsForMessage(ctx.projectId, attachmentIds);
   const recent = await db("memories").where({ isolationKey: key, type: "message" }).orderBy("createTime", "desc").limit(20);
   let relevantHistory: unknown[] = [];
   let rollingSummaries: unknown[] = [];
-  try {
-    const remembered = await new Memory("projectAgent", key).get(message);
-    relevantHistory = remembered.rag;
-    rollingSummaries = remembered.summaries;
-  } catch (error) {
-    // A fresh disposable pilot may not have the local ONNX model. Its raw
-    // conversation and structured decisions remain usable; never invent RAG.
-    if (!missingLocalEmbedding(error)) throw error;
+  if (message) {
+    try {
+      const remembered = await new Memory("projectAgent", key).get(message);
+      relevantHistory = remembered.rag;
+      rollingSummaries = remembered.summaries;
+    } catch (error) {
+      // A fresh disposable pilot may not have the local ONNX model. Its raw
+      // conversation and structured decisions remain usable; never invent RAG.
+      if (!missingLocalEmbedding(error)) throw error;
+    }
   }
   const decisionRows = state.decisions.filter(d => d.status === "ACCEPTED" || d.status === "REJECTED");
   const selectedAsset = ctx.selectedObject?.type === "ASSET" ? state.assets.find(a => a.canonicalKey === ctx.selectedObject?.key) : null;
@@ -83,6 +104,7 @@ endpoint("/agent/chat", async input => {
   const selectedShotAndNeighbors = selectedShotIndex < 0 ? [] : state.storyboards.slice(Math.max(0, selectedShotIndex - 1), selectedShotIndex + 2);
   const system = [
     "你是同一个项目持续存在的 Project Agent。你可以建议，但不能声称已修改创意、资产、分镜或生产事实。修改须由用户预览并确认。",
+    "聊天图片仅是 CONVERSATIONAL_REFERENCE。分析、比较、提取候选及 Prompt 建议可以使用图片，但不可把它当作已确认品牌/UI真实素材或自动写入 Asset Bible、素材清单、镜头。图片提升必须走单独的预览与人工确认。",
     "尊重已接受及否决决定；否决方向不要再次推荐。事实以提供的权威状态为准，摘要不是生产真相。",
     `项目: ${state.project.name}; 项目ID: ${ctx.projectId}; 当前制作单元: ${ctx.scriptId}`,
     `当前页面: ${ctx.currentRoute}; 工序: ${ctx.currentStage}; 当前选择: ${JSON.stringify(ctx.selectedObject)}`,
@@ -94,16 +116,31 @@ endpoint("/agent/chat", async input => {
     `相关历史: ${JSON.stringify(relevantHistory)}`,
     `历史摘要（非生产真相）: ${JSON.stringify(rollingSummaries)}`,
   ].join("\n");
-  const result = await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).invoke({ system, messages: [{ role: "user", content: message }] });
+  const userMessageId = randomUUID();
   const now = Date.now();
-  let embeddings: [number[] | null, number[] | null] = [null, null];
-  try { embeddings = [await getEmbedding(message), await getEmbedding(result.text)]; }
-  catch (error) { if (!missingLocalEmbedding(error)) throw error; }
+  let userEmbedding: number[] | null = null;
+  if (message) {
+    try { userEmbedding = await getEmbedding(message); }
+    catch (error) { if (!missingLocalEmbedding(error)) throw error; }
+  }
   await db.transaction(async trx => {
-    await trx("memories").insert({ id: randomUUID(), isolationKey: key, type: "message", role: "user", content: message, embedding: embeddings[0] ? JSON.stringify(embeddings[0]) : null, summarized: 0, createTime: now });
-    await trx("memories").insert({ id: randomUUID(), isolationKey: key, type: "message", role: "assistant", content: result.text, embedding: embeddings[1] ? JSON.stringify(embeddings[1]) : null, summarized: 0, createTime: now + 1 });
+    const changed = attachmentIds.length ? await trx("o_v04AgentAttachment").where({ projectId: ctx.projectId, messageId: null }).whereIn("id", attachmentIds).update({ messageId: userMessageId, contextJson: JSON.stringify(ctx) }) : 0;
+    if (changed !== attachmentIds.length) throw new PilotError("PILOT_ATTACHMENT_INVALID", "图片已在其他消息中使用", 409);
+    await trx("memories").insert({ id: userMessageId, isolationKey: key, type: "message", role: "user", content: message || "[图片参考]", embedding: userEmbedding ? JSON.stringify(userEmbedding) : null, summarized: 0, createTime: now });
   });
-  return { isolationKey: key, reply: result.text, applied: false };
+  let result: { text: string };
+  try {
+    const parts = attachmentIds.length ? [{ type: "text" as const, text: message || "请分析这些图片。" }, ...await imageParts(attachments)] : message;
+    result = await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).invoke({ system, messages: [{ role: "user", content: parts }] });
+  } catch (error) {
+    if (attachmentIds.length) throw new PilotError("PILOT_IMAGE_MODEL_UNSUPPORTED", "图片已保存到对话，但当前文本模型未能处理图片；请配置支持图片输入的模型", 409);
+    throw new PilotError("PILOT_AGENT_MODEL_FAILED", "消息已保存到对话，但模型未能回复；请检查文本模型配置", 502);
+  }
+  let embedding: number[] | null = null;
+  try { embedding = await getEmbedding(result.text); }
+  catch (error) { if (!missingLocalEmbedding(error)) throw error; }
+  await db("memories").insert({ id: randomUUID(), isolationKey: key, type: "message", role: "assistant", content: result.text, embedding: embedding ? JSON.stringify(embedding) : null, summarized: 0, createTime: now + 1 });
+  return { isolationKey: key, reply: result.text, applied: false, userMessageId };
 });
 
 export default router;

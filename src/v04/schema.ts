@@ -64,6 +64,30 @@ export async function initializeV04Schema(db: Knex) {
     t.primary(["projectId", "scriptId", "canonicalKey"]);
     t.unique(["projectId", "scriptId", "assetId"]);
   });
+  if (!await db.schema.hasTable("o_v04AgentAttachment")) await db.schema.createTable("o_v04AgentAttachment", t => {
+    t.text("id").primary();
+    t.integer("projectId").notNullable().index();
+    t.integer("scriptId").nullable();
+    t.text("messageId").nullable().index();
+    t.text("contextJson").notNullable();
+    t.text("filePath").notNullable();
+    t.text("originalName").notNullable();
+    t.text("mimeType").notNullable();
+    t.integer("bytes").notNullable();
+    t.text("sha256").notNullable();
+    t.text("purpose").notNullable().defaultTo("CONVERSATIONAL_REFERENCE");
+    t.integer("createdAt").notNullable();
+  });
+  if (!await db.schema.hasTable("o_v04AgentReference")) await db.schema.createTable("o_v04AgentReference", t => {
+    t.text("id").primary();
+    t.integer("projectId").notNullable().index();
+    t.integer("scriptId").nullable();
+    t.text("attachmentId").notNullable().index();
+    t.text("targetType").notNullable();
+    t.text("targetKey").nullable();
+    t.integer("assetId").nullable();
+    t.integer("createdAt").notNullable();
+  });
 }
 
 export async function initializeV04Profile(db: Knex) {

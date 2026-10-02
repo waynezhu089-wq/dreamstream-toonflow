@@ -7,7 +7,7 @@ const ts = require('typescript');
 const knex = require('knex');
 const root = path.resolve(__dirname, '..');
 
-function loadSource(file, db, cache = new Map()) {
+function loadSource(file, db, cache = new Map(), oss = null) {
   file = path.resolve(file);
   if (cache.has(file)) return cache.get(file).exports;
   const module = { exports: {} }; cache.set(file, module);
@@ -16,6 +16,18 @@ function loadSource(file, db, cache = new Map()) {
   }, fileName: file }).outputText;
   new Function('require', 'module', 'exports', code)(name => {
     if (name === '@/utils/db') return { db };
+    if (name === '@/utils') return { oss, Ai: { Text: () => ({ invoke: async input => { oss.modelCalls.push(input); if (oss.modelError) throw Error('provider cannot read image'); return { text: 'I can inspect the attached image.', output: oss.proposalOutput }; } }) } };
+    if (name === '@/utils/getPath') return () => path.join(oss.testDir,'v04-conversation');
+    if (name === '@/services/modelPreset') return { requireModel: async () => 'fake:local' };
+    if (name === '@/utils/agent/memory') return class { async get() { return {rag:[], summaries:[]}; } };
+    if (name === '@/utils/agent/embedding') return { getEmbedding: async () => [] };
+    if (name === './skills') return { previewSkill: async () => ({}), previewCreativeProposal: async () => ({}) };
+    if (name === '@/services/assetUploadSource') return { recordAssetUpload: async (trx, source) => {
+      const asset = await trx('o_assets').where({ id: source.assetId, projectId: source.projectId, imageId: source.imageId }).first();
+      const image = await trx('o_image').where({ id: source.imageId, assetsId: source.assetId, filePath: source.filePath }).first();
+      if (!asset || !image || image.model) throw Error('UPLOAD_SOURCE_INVALID');
+      await trx('o_assetUploadSource').insert(source);
+    } };
     if (name === '@/services/advertisementAssetPlan') return { readAssetPlanInTransaction: async (trx, scope) => ({items: (await trx('o_advertisementAssetPlan').where(scope).orderBy('position')).map(row => ({...row,bindingValid:row.assetId != null}))}), assertAssetPlanBinding: async (trx, scope, item) => {
       const asset = await trx('o_assets').where({ id: item.assetId, projectId: scope.projectId, scriptId: scope.scriptId }).first();
       const linked = asset && await trx('o_scriptAssets').where({ scriptId: scope.scriptId, assetId: asset.id }).first();
@@ -29,7 +41,7 @@ function loadSource(file, db, cache = new Map()) {
     if (name === '@/services/orchestrator/videoProductionProfile') return { advertisement001eDefinition: {} };
     if (name === '@/services/orchestrator/profileDefinition') return { definitionHash: () => 'a'.repeat(64) };
     if (name === '@/lib/advertisementAssetPlanSchema') return { ASSET_PLAN_TABLE: 'o_advertisementAssetPlan' };
-    if (name.startsWith('.')) return loadSource(path.resolve(path.dirname(file), name + '.ts'), db, cache);
+    if (name.startsWith('.')) return loadSource(path.resolve(path.dirname(file), name + '.ts'), db, cache, oss);
     return require(name);
   }, module, module.exports);
   return module.exports;
@@ -37,6 +49,9 @@ function loadSource(file, db, cache = new Map()) {
 async function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v04-pilot-'));
   const db = knex({ client: 'better-sqlite3', connection: { filename: path.join(dir, 'test.sqlite') }, useNullAsDefault: true });
+  const oss = { writeFile: async (p, bytes) => { const target=path.join(dir,'oss',p.replace(/^\//,'')); fs.mkdirSync(path.dirname(target),{recursive:true}); fs.writeFileSync(target,bytes); }, getFile: async p => fs.readFileSync(path.join(dir,'oss',p.replace(/^\//,''))), deleteFile: async p => fs.rmSync(path.join(dir,'oss',p.replace(/^\//,'')),{force:true}) };
+  oss.modelCalls=[];
+  oss.testDir=dir;
   t.after(async () => { await db.destroy(); fs.rmSync(dir, { recursive: true, force: true }); });
   await db.schema.createTable('o_project', x => { x.bigInteger('id').primary(); x.string('projectType'); x.string('type'); x.string('name'); x.text('intro'); x.string('artStyle'); x.string('directorManual'); x.string('videoRatio'); x.string('imageModel'); x.string('videoModel'); x.string('imageQuality'); x.string('mode'); x.integer('userId'); x.bigInteger('createTime'); });
   await db.schema.createTable('o_script', x => { x.increments('id'); x.bigInteger('projectId'); x.string('name'); x.text('content'); x.bigInteger('createTime'); });
@@ -46,12 +61,14 @@ async function fixture(t) {
   await db('o_productionProfileVersion').insert({profileKey:'advertisement',version:2,status:'ACTIVE',definition:'{}',definitionHash:'a'.repeat(64)});
   await db.schema.createTable('o_assets', x => { x.increments('id'); x.bigInteger('projectId'); x.integer('scriptId'); x.integer('imageId'); x.string('name'); x.text('describe'); x.text('prompt'); x.string('type'); x.bigInteger('startTime'); });
   await db.schema.createTable('o_scriptAssets', x => { x.integer('scriptId'); x.integer('assetId'); x.primary(['scriptId','assetId']); });
-  await db.schema.createTable('o_image', x => { x.increments('id'); x.integer('assetsId'); x.string('state'); x.string('filePath'); x.string('model'); });
+  await db.schema.createTable('o_image', x => { x.increments('id'); x.integer('assetsId'); x.string('state'); x.string('filePath'); x.string('model'); x.string('type'); });
   await db.schema.createTable('o_assetUploadSource', x => { x.integer('projectId'); x.integer('assetId'); x.integer('imageId'); x.string('filePath'); });
   await db.schema.createTable('o_advertisementAssetPlan', x => { x.bigInteger('projectId'); x.integer('scriptId'); x.string('assetKey'); x.string('name'); x.string('category'); x.integer('required'); x.string('sourcePolicy'); x.integer('assetId'); x.integer('position'); x.primary(['projectId','scriptId','assetKey']); });
+  await db.schema.createTable('memories', x => { x.string('id').primary(); x.string('isolationKey'); x.string('type'); x.string('role'); x.text('content'); x.text('embedding'); x.integer('summarized'); x.bigInteger('createTime'); });
   const schema = loadSource(path.join(root,'src/v04/schema.ts'),db);
   await schema.initializeV04Schema(db); await schema.initializeV04Schema(db);
-  return { db, service: loadSource(path.join(root,'src/v04/service.ts'),db) };
+  const cache = new Map();
+  return { db, oss, cache, service: loadSource(path.join(root,'src/v04/service.ts'),db,cache,oss), agent: loadSource(path.join(root,'src/v04/agentAttachments.ts'),db,cache,oss) };
 }
 const asset = (name='Dreamer', category='CHAR', sourcePolicy='AI_ALLOWED') => ({ name, category, description:'calm', identityAnchors:['left eyebrow scar'], mustPreserve:['scar'], forbiddenChanges:['redraw brand text'], ownerKey:null, variantOf:null, sourcePolicy, prompt:'' });
 test('Project Agent keeps a project-level memory identity and reads selected shot context without a production write route', () => {
@@ -60,6 +77,129 @@ test('Project Agent keeps a project-level memory identity and reads selected sho
   assert.match(source,/selectedShotAndNeighbors = selectedShotIndex < 0/);
   assert.match(source,/reply: result\.text, applied: false/);
   assert.doesNotMatch(source,/trx\("o_storyboard"\)\.insert|trx\("o_storyboard"\)\.update/);
+});
+
+test('chat image stays a scoped conversational reference until separately previewed and confirmed', async t => {
+  const { db, oss, service:s, agent } = await fixture(t);
+  const scope = await s.createPilotProject({name:'Image dialogue',brief:'Real UI stays real',targetDuration:30,aspectRatio:'16:9'}, 7);
+  const ctx = { ...scope, currentStage:'creative', currentRoute:'pilot/creative', selectedObject:null };
+  const png = await require('sharp')({create:{width:8,height:8,channels:4,background:'#17497f'}}).png().toBuffer();
+  const upload = await agent.uploadAgentImage({context:ctx,name:'screen.png',dataUrl:`data:image/png;base64,${png.toString('base64')}`});
+  assert.equal(upload.purpose,'CONVERSATIONAL_REFERENCE');
+  assert.equal(fs.existsSync(path.join(oss.testDir,'oss','v04-conversation',String(scope.projectId))),false);
+  assert.equal(fs.existsSync(path.join(oss.testDir,'v04-conversation',String(scope.projectId))),true);
+  assert.equal((await agent.attachmentsForMessage(scope.projectId,[upload.id])).length,1);
+  assert.deepEqual((await agent.getAgentAttachmentBytes(scope.projectId,upload.id)).bytes,png);
+  assert.equal((await db('o_image').count({n:'id'}).first()).n,0);
+  assert.equal((await db('o_assetUploadSource').count({n:'assetId'}).first()).n,0);
+  await db('o_v04AgentAttachment').where({id:upload.id}).update({messageId:'user-message-1'});
+  assert.equal(JSON.parse((await db('o_v04AgentAttachment').where({id:upload.id}).first()).contextJson).currentRoute,'pilot/creative');
+  const request={context:ctx,attachmentId:upload.id,targetType:'PROJECT_REFERENCE',targetKey:null};
+  const preview=await agent.previewAttachmentPromotion(request);
+  assert.equal((await db('o_v04AgentReference').count({n:'id'}).first()).n,0);
+  await agent.applyAttachmentPromotion({...request,previewHash:preview.previewHash});
+  assert.equal((await db('o_v04AgentReference').first()).targetType,'PROJECT_REFERENCE');
+  assert.equal((await db('o_image').count({n:'id'}).first()).n,0);
+  await assert.rejects(agent.applyAttachmentPromotion({...request,previewHash:preview.previewHash}),e=>e.code==='PILOT_REFERENCE_EXISTS');
+  const other=await s.createPilotProject({name:'Other',brief:'',targetDuration:30,aspectRatio:'16:9'},7);
+  await assert.rejects(agent.getAgentAttachmentBytes(other.projectId,upload.id),e=>e.code==='PILOT_ATTACHMENT_NOT_FOUND');
+  await assert.rejects(agent.uploadAgentImage({context:ctx,name:'fake.png',dataUrl:'data:image/png;base64,AAAA'}),e=>e.code==='PILOT_IMAGE_INVALID');
+});
+
+test('authenticated HTTP chat sends real image bytes to the Agent and restores them across stage changes', async t => {
+  const { db, oss, cache, service:s } = await fixture(t);
+  const scope=await s.createPilotProject({name:'Cross-page chat',brief:'',targetDuration:30,aspectRatio:'16:9'},7);
+  const express=require('express');
+  const app=express(); app.use(express.json({limit:'12mb'})); app.use((req,_res,next)=>{req.user={id:7};next();});
+  app.use('/api/v04',loadSource(path.join(root,'src/v04/router.ts'),db,cache,oss).default);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const base=`http://127.0.0.1:${server.address().port}/api/v04`;
+  const post=async (route,body)=>{const response=await fetch(base+route,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});return {status:response.status,body:await response.json()};};
+  const png=await require('sharp')({create:{width:8,height:8,channels:4,background:'#123456'}}).png().toBuffer();
+  const creative={...scope,currentStage:'creative',currentRoute:'pilot/creative',selectedObject:null};
+  const uploaded=await post('/agent/image/upload',{context:creative,name:'look.png',dataUrl:`data:image/png;base64,${png.toString('base64')}`});
+  assert.equal(uploaded.status,200);
+  const attachmentId=uploaded.body.data.id;
+  const chat=await post('/agent/chat',{context:creative,message:'Compare this composition.',attachmentIds:[attachmentId]});
+  assert.equal(chat.status,200);
+  assert.equal(chat.body.data.applied,false);
+  assert.equal(oss.modelCalls.length,1);
+  assert.equal(oss.modelCalls[0].messages[0].content[1].type,'image');
+  assert.equal(oss.modelCalls[0].messages[0].content[1].image,`data:image/png;base64,${png.toString('base64')}`);
+  const assets={...creative,currentStage:'assets',currentRoute:'pilot/assets',selectedObject:{type:'PROJECT',key:'all'}};
+  const later=await post('/agent/chat',{context:assets,message:'Do you remember our composition discussion?',attachmentIds:[]});
+  assert.equal(later.status,200);
+  assert.match(oss.modelCalls[1].system,/Compare this composition/);
+  const history=await post('/agent/history',scope);
+  assert.equal(history.status,200);
+  assert.equal(history.body.data.isolationKey,`project:${scope.projectId}:projectAgent`);
+  assert.equal(history.body.data.messages.length,4);
+  assert.equal(history.body.data.messages[0].attachments[0].id,attachmentId);
+  assert.equal(history.body.data.messages[0].attachments[0].context.currentRoute,'pilot/creative');
+  const [secondUnit]=await db('o_script').insert({projectId:scope.projectId,name:'Second production unit',content:'',createTime:Date.now()});
+  const nextUnit={...assets,scriptId:secondUnit,currentStage:'storyboard',currentRoute:'production/storyboard',selectedObject:{type:'SHOT',key:'9'}};
+  const acrossUnit=await post('/agent/chat',{context:nextUnit,message:'Same project, new production unit.',attachmentIds:[]});
+  assert.equal(acrossUnit.status,200);
+  assert.match(oss.modelCalls[2].system,new RegExp(`当前制作单元: ${secondUnit}`));
+  const secondHistory=await post('/agent/history',{projectId:scope.projectId,scriptId:secondUnit});
+  assert.equal(secondHistory.body.data.isolationKey,history.body.data.isolationKey);
+  assert.equal(secondHistory.body.data.messages.length,6);
+  assert.equal((await post('/project/read',{projectId:scope.projectId,scriptId:secondUnit})).status,404);
+  const image=await fetch(`${base}/agent/image/${scope.projectId}/${attachmentId}`);
+  assert.equal(image.status,200);
+  assert.deepEqual(Buffer.from(await image.arrayBuffer()),png);
+  assert.equal((await db('o_image').count({n:'id'}).first()).n,0);
+  const failedUpload=await post('/agent/image/upload',{context:assets,name:'second.png',dataUrl:`data:image/png;base64,${png.toString('base64')}`});
+  oss.modelError=true;
+  const failedChat=await post('/agent/chat',{context:assets,message:'Inspect this too',attachmentIds:[failedUpload.body.data.id]});
+  assert.equal(failedChat.status,409);
+  assert.equal(failedChat.body.code,'PILOT_IMAGE_MODEL_UNSUPPORTED');
+  const recovered=await post('/agent/history',scope);
+  assert.equal(recovered.body.data.messages.length,7);
+  assert.equal(recovered.body.data.messages[6].attachments[0].id,failedUpload.body.data.id);
+});
+
+test('Creative Agent proposal uses project conversation and remains zero-write until preview/apply', async t => {
+  const { db, oss, cache, service:s } = await fixture(t);
+  const scope=await s.createPilotProject({name:'Proposal',brief:'Original brief',targetDuration:30,aspectRatio:'16:9'},7);
+  await db('memories').insert({id:'prior-user',isolationKey:`project:${scope.projectId}:projectAgent`,type:'message',role:'user',content:'Keep the product interface exact.',embedding:null,summarized:0,createTime:Date.now()});
+  oss.proposalOutput={proposedText:'Original brief, with a restrained reveal.',reason:'Keeps the exact interface while sharpening the opening.'};
+  const skills=loadSource(path.join(root,'src/v04/skills.ts'),db,cache,oss);
+  const before=await db('o_v04Creative').where(scope).first();
+  const result=await skills.previewCreativeProposal({...scope,target:'brief',instruction:'Make the opening clearer.'});
+  assert.equal(result.applied,false);
+  assert.equal(result.candidate.proposedText,oss.proposalOutput.proposedText);
+  assert.match(oss.modelCalls[0].messages[0].content[0].text,/Keep the product interface exact/);
+  assert.deepEqual(await db('o_v04Creative').where(scope).first(),before);
+  const preview=await s.previewCreative({...scope,brief:result.candidate.proposedText,treatment:'',script:'',expectedVersion:before.version});
+  assert.equal(preview.proposed.brief,result.candidate.proposedText);
+  assert.deepEqual(await db('o_v04Creative').where(scope).first(),before);
+});
+
+test('explicit image promotion uses current-unit Asset Plan and server upload provenance', async t => {
+  const { db, service:s, agent } = await fixture(t);
+  const scope=await s.createPilotProject({name:'Real asset',brief:'',targetDuration:30,aspectRatio:'16:9'},7);
+  const changes=[{operation:'ADD',clientRef:'screen',asset:asset('Real screen','UI','REAL_REQUIRED')}];
+  const plan=await s.previewAssets({...scope,changes});
+  const created=await s.applyAssets({...scope,changes,previewHash:plan.previewHash});
+  const canonicalKey=created.applied[0].canonicalKey, assetId=created.applied[0].assetId;
+  const ctx={...scope,currentStage:'assets',currentRoute:'pilot/assets',selectedObject:{type:'ASSET',key:canonicalKey}};
+  const png=await require('sharp')({create:{width:8,height:8,channels:4,background:'#a15231'}}).png().toBuffer();
+  const uploaded=await agent.uploadAgentImage({context:ctx,name:'brand-screen.png',dataUrl:`data:image/png;base64,${png.toString('base64')}`});
+  await db('o_v04AgentAttachment').where({id:uploaded.id}).update({messageId:'user-message-2'});
+  assert.equal((await db('o_advertisementAssetPlan').where({...scope,assetKey:canonicalKey}).first()).assetId,null);
+  const request={context:ctx,attachmentId:uploaded.id,targetType:'PRODUCTION_ASSET',targetKey:canonicalKey};
+  const preview=await agent.previewAttachmentPromotion(request);
+  assert.equal((await db('o_image').count({n:'id'}).first()).n,0);
+  const promoted=await agent.applyAttachmentPromotion({...request,previewHash:preview.previewHash});
+  assert.equal(promoted.assetId,assetId);
+  const image=await db('o_image').where({assetsId:assetId}).first();
+  assert.equal(image.state,'已完成');
+  assert.deepEqual((await agent.getAgentAttachmentBytes(scope.projectId,uploaded.id)).bytes,png);
+  assert.equal((await db('o_assetUploadSource').where({assetId,imageId:image.id,filePath:image.filePath}).count({n:'assetId'}).first()).n,1);
+  assert.equal((await db('o_advertisementAssetPlan').where({...scope,assetKey:canonicalKey}).first()).assetId,assetId);
+  assert.deepEqual((await s.resolveAssets({...scope,canonicalKeys:[canonicalKey]})).associateAssetsIds,[assetId]);
 });
 test('creative and asset preview have zero writes; stale preview cannot apply', async t => {
   const { db, service:s } = await fixture(t);

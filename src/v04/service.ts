@@ -60,11 +60,11 @@ export async function listPilotProjects(actorUserId: number) {
   return q("o_v04Creative as c").join("o_project as p", "p.id", "c.projectId")
     .where("p.userId", actorUserId).select("c.projectId", "c.scriptId", "c.targetDuration", "c.aspectRatio", "p.name").orderBy("p.createTime", "desc").limit(100);
 }
-export async function readPilot(input: unknown) {
+export async function readPilot(input: unknown, allowProjectCreativeFallback = false) {
   const parsed = scope.parse(input);
   return q.transaction(async trx => {
     const { project } = await checkedScope(trx, parsed);
-    const creative = await trx("o_v04Creative").where(parsed).first();
+    const creative = await trx("o_v04Creative").where(parsed).first() || (allowProjectCreativeFallback ? await trx("o_v04Creative").where({ projectId: parsed.projectId }).orderBy("scriptId").first() : null);
     if (!creative) throw new PilotError("PILOT_NOT_FOUND", "该项目没有 V0.4 工作空间", 404);
     const assets = await trx("o_v04Asset").where({ projectId: parsed.projectId }).orderBy("canonicalKey");
     const storyboards = await trx("o_storyboard").where(parsed).whereNull("retiredAt").orderBy("index", "asc").orderBy("id", "asc").select("id", "index", "prompt", "duration", "videoDesc", "productionSpec", "state", "filePath", "currentImageAttemptId", "activeImageAttemptId");
@@ -83,7 +83,9 @@ export async function readPilot(input: unknown) {
       return { ...item, ready, status: item.assetId === null ? "UNBOUND" : !item.bindingValid ? "SOURCE_INVALID" : ready ? "READY" : "INCOMPLETE" };
     });
     const decisions = await trx("o_v04Decision").where({ projectId: parsed.projectId }).orderBy("createdAt", "desc").limit(100);
-    return { project: { id: project.id, name: project.name }, creative, storyboards, assets: assets.map(a => ({ ...a, identityAnchors: JSON.parse(a.identityAnchors), mustPreserve: JSON.parse(a.mustPreserve), forbiddenChanges: JSON.parse(a.forbiddenChanges) })), bindings, assetPlan, decisions: decisions.map(d => ({ ...d, sourceMessageIds: JSON.parse(d.sourceMessageIds) })) };
+    const agentReferences = await trx("o_v04AgentReference as ref").join("o_v04AgentAttachment as image", "image.id", "ref.attachmentId")
+      .where("ref.projectId", parsed.projectId).select("ref.id", "ref.scriptId", "ref.targetType", "ref.targetKey", "ref.assetId", "ref.attachmentId", "image.originalName", "image.mimeType", "image.sha256").orderBy("ref.createdAt", "desc").limit(200);
+    return { project: { id: project.id, name: project.name }, creative, storyboards, assets: assets.map(a => ({ ...a, identityAnchors: JSON.parse(a.identityAnchors), mustPreserve: JSON.parse(a.mustPreserve), forbiddenChanges: JSON.parse(a.forbiddenChanges) })), bindings, assetPlan, agentReferences, decisions: decisions.map(d => ({ ...d, sourceMessageIds: JSON.parse(d.sourceMessageIds) })) };
   });
 }
 function creativePlan(current: any, data: z.infer<typeof creativeRequest>) {
