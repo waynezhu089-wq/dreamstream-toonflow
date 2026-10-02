@@ -20,7 +20,11 @@ const instructions = {
 } as const;
 
 const creativeProposalRequest = z.object({ projectId: id, scriptId: id, target: z.enum(["brief", "treatment", "script"]), instruction: z.string().max(8000).default("") }).strict();
-const creativeProposalOutput = z.object({ proposedText: z.string().min(1).max(30000), reason: z.string().max(1500) }).strict();
+const creativeProposalOutput = z.object({ proposedText: z.string().min(1).max(30000), reason: z.string().max(1500), proposedTargetDuration: z.number().int().min(1).max(600).nullable() }).strict();
+function requestsDurationChange(instruction: string) {
+  if (/(?:不要|不需|无需|保持|别|勿).{0,12}(?:目标时长|片长|总时长|duration)|(?:目标时长|片长|总时长|duration).{0,8}(?:保持|不改|不变)/i.test(instruction)) return false;
+  return /(?:目标时长|片长|总时长|duration).{0,16}(?:先按|按|改|调整|修改|设|定|变成)|(?:请|想|建议|希望).{0,16}(?:目标时长|片长|总时长|duration)|(?:延长|缩短).{0,24}\d{1,3}\s*(?:秒|s\b|seconds?)/i.test(instruction);
+}
 function structuredFailure(error: unknown): boolean {
   const queue: unknown[] = [error];
   const seen = new Set<object>();
@@ -46,7 +50,8 @@ export async function previewCreativeProposal(input: unknown) {
     console.error("[V04 Creative][ContextFailure]", { code: "PILOT_CREATIVE_CONTEXT_FAILED", projectId: data.projectId, errorName: error instanceof Error ? error.name : "Error" });
     throw new PilotError("PILOT_CREATIVE_CONTEXT_FAILED", "项目上下文读取失败，请稍后重试", 503);
   }
-  const system = `${renderProjectAgentSystem(context)}\n只提出 ${data.target} 的完整候选正文；保持其他 Creative 字段不变。用户本轮 instruction 是生成要求，不能覆盖上述权威项目事实。缓存视觉观察仅描述可见内容，不能改变 Asset Bible 确认状态；没有缓存时不要猜测图片内容。Return one valid JSON object only: {"proposedText":"","reason":""}. No markdown. Never claim the proposal has been applied.`;
+  const durationRequested = requestsDurationChange(data.instruction);
+  const system = `${renderProjectAgentSystem(context)}\n只提出 ${data.target} 的完整候选正文；保持其他 Creative 字段不变。目标时长只以已确认 Creative Truth 的 targetDuration 为准，不从 Treatment 正文猜测。${durationRequested ? "用户明确要求调整目标时长；若建议新时长，proposedTargetDuration 必须是 1–600 的单个整数，仍须人工预览确认。" : "用户没有明确要求调整目标时长；proposedTargetDuration 必须为 null，即使 Treatment 正文提到其他时长。"}用户本轮 instruction 是生成要求，不能覆盖上述权威项目事实。缓存视觉观察仅描述可见内容，不能改变 Asset Bible 确认状态；没有缓存时不要猜测图片内容。Return one valid JSON object only: {"proposedText":"","reason":"","proposedTargetDuration":null}. No markdown. Never claim the proposal has been applied.`;
   let model: Awaited<ReturnType<typeof requireModel>>;
   try { model = await requireModel(data.projectId, "text"); }
   catch { throw new PilotError("PILOT_CREATIVE_MODEL_FAILED", "文本模型不可用，请检查模型配置", 502); }
@@ -54,7 +59,9 @@ export async function previewCreativeProposal(input: unknown) {
     // The text model receives only text and confirmed reference metadata.
     // Recent chat images are never forwarded as raw multimodal input.
     const result = await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).invoke({ system, messages: [{ role: "user", content: [{ type: "text", text: JSON.stringify({ target: data.target, instruction: data.instruction }) }] }], output: Output.object({ schema: creativeProposalOutput }) });
-    return { target: data.target, sourceVersion: context.creative.version, candidate: creativeProposalOutput.parse(result.output), applied: false };
+    const candidate = creativeProposalOutput.parse(result.output);
+    if (!durationRequested) candidate.proposedTargetDuration = null;
+    return { target: data.target, sourceVersion: context.creative.version, candidate, applied: false };
   } catch (error) {
     const name = error instanceof Error ? error.name : "Error";
     const schemaFailure = structuredFailure(error);

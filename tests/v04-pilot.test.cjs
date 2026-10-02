@@ -360,18 +360,75 @@ test('Creative Agent proposal uses project conversation and remains zero-write u
   const { db, oss, cache, service:s } = await fixture(t);
   const scope=await s.createPilotProject({name:'Proposal',brief:'Original brief',targetDuration:30,aspectRatio:'16:9'},7);
   await db('memories').insert({id:'prior-user',isolationKey:`project:${scope.projectId}:projectAgent`,type:'message',role:'user',content:'Keep the product interface exact.',embedding:null,summarized:0,createTime:Date.now()});
-  oss.proposalOutput={proposedText:'Original brief, with a restrained reveal.',reason:'Keeps the exact interface while sharpening the opening.'};
+  oss.proposalOutput={proposedText:'Original brief, with a restrained reveal.',reason:'Keeps the exact interface while sharpening the opening.',proposedTargetDuration:null};
   const skills=loadSource(path.join(root,'src/v04/skills.ts'),db,cache,oss);
   const before=await db('o_v04Creative').where(scope).first();
   const result=await skills.previewCreativeProposal({...scope,target:'brief',instruction:'Make the opening clearer.'});
   assert.equal(result.applied,false);
   assert.equal(result.candidate.proposedText,oss.proposalOutput.proposedText);
+  assert.equal(result.candidate.proposedTargetDuration,null);
   assert.match(oss.modelCalls[0].system,/Keep the product interface exact/);
   assert.match(oss.modelCalls[0].messages[0].content[0].text,/Make the opening clearer/);
   assert.deepEqual(await db('o_v04Creative').where(scope).first(),before);
-  const preview=await s.previewCreative({...scope,brief:result.candidate.proposedText,treatment:'',script:'',expectedVersion:before.version});
+  const preview=await s.previewCreative({...scope,brief:result.candidate.proposedText,treatment:'',script:'',targetDuration:before.targetDuration,expectedVersion:before.version});
   assert.equal(preview.proposed.brief,result.candidate.proposedText);
   assert.deepEqual(await db('o_v04Creative').where(scope).first(),before);
+});
+
+test('OPT-019 duration is versioned Creative Truth with zero-write preview and stale protection', async t => {
+  const {db,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Duration',brief:'An unchanged brief',targetDuration:30,aspectRatio:'16:9'},7);
+  const original=await db('o_v04Creative').where(scope).first();
+  const change={...scope,brief:original.brief,treatment:original.treatment,script:original.script,targetDuration:40,expectedVersion:original.version};
+  const preview=await s.previewCreative(change);
+  assert.equal(preview.current.targetDuration,30);
+  assert.equal(preview.proposed.targetDuration,40);
+  assert.deepEqual(await db('o_v04Creative').where(scope).first(),original,'duration-only Preview does not write');
+  await assert.rejects(s.applyCreative({...change,targetDuration:39,previewHash:preview.previewHash}),e=>e.code==='PILOT_PREVIEW_STALE','duration is part of preview hash');
+  assert.deepEqual(await db('o_v04Creative').where(scope).first(),original);
+  await s.applyCreative({...change,previewHash:preview.previewHash});
+  const persisted=await s.readPilot(scope);
+  assert.equal(persisted.creative.targetDuration,40);
+  assert.equal(persisted.creative.version,original.version+1);
+  assert.equal(persisted.creative.brief,original.brief,'Brief is never rewritten to match duration');
+  await assert.rejects(s.applyCreative({...change,previewHash:preview.previewHash}),e=>e.code==='PILOT_PREVIEW_STALE');
+  const old={...scope,brief:'Old preview',treatment:'',script:'',targetDuration:40,expectedVersion:2};
+  const oldPreview=await s.previewCreative(old);
+  const other={...old,brief:'New confirmed brief'};
+  const otherPreview=await s.previewCreative(other);
+  await s.applyCreative({...other,previewHash:otherPreview.previewHash});
+  await assert.rejects(s.applyCreative({...old,previewHash:oldPreview.previewHash}),e=>e.code==='PILOT_PREVIEW_STALE');
+  assert.equal((await s.readPilot(scope)).creative.targetDuration,40);
+});
+
+test('OPT-019 Agent and Storyboard Skill receive confirmed duration; proposal duration requires explicit instruction', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Duration context',brief:'A brand story',targetDuration:30,aspectRatio:'16:9'},7);
+  const skills=loadSource(path.join(root,'src/v04/skills.ts'),db,cache,oss);
+  oss.proposalOutput={proposedText:'Treatment explores a 38–40 second arc.',reason:'A clear arc.',proposedTargetDuration:40};
+  const before=await db('o_v04Creative').where(scope).first();
+  const implicit=await skills.previewCreativeProposal({...scope,target:'treatment',instruction:'Expand this treatment.'});
+  assert.equal(implicit.candidate.proposedTargetDuration,null,'Treatment text cannot silently change canonical duration');
+  assert.match(oss.modelCalls.at(-1).system,/"targetDuration":30/);
+  const mention=await skills.previewCreativeProposal({...scope,target:'treatment',instruction:'Treatment 正文提到 40 秒，但目标时长不改。'});
+  assert.equal(mention.candidate.proposedTargetDuration,null,'a duration mention with no change request remains null');
+  const explicit=await skills.previewCreativeProposal({...scope,target:'treatment',instruction:'目标时长先按 38–40 秒设计，建议一个正式时长。'});
+  assert.equal(explicit.candidate.proposedTargetDuration,40);
+  assert.equal(explicit.applied,false);
+  assert.deepEqual(await db('o_v04Creative').where(scope).first(),before,'proposal never writes');
+  const change={...scope,brief:before.brief,treatment:explicit.candidate.proposedText,script:before.script,targetDuration:explicit.candidate.proposedTargetDuration,expectedVersion:before.version};
+  const preview=await s.previewCreative(change);
+  assert.equal(preview.current.targetDuration,30);
+  assert.equal(preview.proposed.targetDuration,40);
+  assert.equal((await db('o_v04Creative').where(scope).first()).targetDuration,30);
+  await s.applyCreative({...change,previewHash:preview.previewHash});
+  await skills.previewCreativeProposal({...scope,target:'script',instruction:'Continue the script.'});
+  assert.match(oss.modelCalls.at(-1).system,/"targetDuration":40/,'Project Agent reads the confirmed value');
+  assert.match(oss.modelCalls.at(-1).system,/"aspectRatio":"16:9"/);
+  oss.proposalOutput={shots:[{duration:3,prompt:'Brand ending',videoDesc:'',productionMode:'AI_TEXT_TO_IMAGE',primaryKey:null,canonicalKeys:[]}]};
+  await skills.previewSkill({...scope,method:'STORYBOARD_BATCH'});
+  assert.match(oss.modelCalls.at(-1).system,/"targetDuration":40/,'Storyboard Skill reads confirmed duration');
+  assert.doesNotMatch(oss.modelCalls.at(-1).system,/"targetDuration":30/);
 });
 
 test('OPT-018 Proposal uses shared project truth and cached Vision text, never a recent raw image in the text model', async t => {
@@ -399,7 +456,7 @@ test('OPT-018 Proposal uses shared project truth and cached Vision text, never a
   await db('memories').insert({id:'old-wrong-agent',isolationKey:`project:${scope.projectId}:projectAgent`,type:'message',role:'assistant',content:'BRAND-001 不存在；Logo 只是对话参考。',embedding:null,summarized:0,createTime:Date.now()+1});
   const before=await db('o_v04Creative').where(scope).first();
   const visionCalls=oss.visionCalls;
-  oss.proposalOutput={proposedText:'保留真实 Dream Stream Logo 的品牌片尾。',reason:'使用当前确认的品牌参考。'};
+  oss.proposalOutput={proposedText:'保留真实 Dream Stream Logo 的品牌片尾。',reason:'使用当前确认的品牌参考。',proposedTargetDuration:null};
   const proposal=await post('/agent/creative-proposal',{...scope,target:'treatment',instruction:'就按刚才这一版，核心内容不要再改。'});
   assert.equal(proposal.status,200);
   assert.equal(proposal.body.data.applied,false);
@@ -436,7 +493,7 @@ test('OPT-018 Proposal uses shared project truth and cached Vision text, never a
   assert.equal(skill.status,200);
   assert.match(oss.modelCalls.at(-1).system,/CONFIRMED_ASSET_BIBLE_REFERENCE/,'V0.4 Skills use the same authoritative context');
 
-  oss.proposalOutput={proposedText:'Other project treatment.',reason:'Separate truth.'};
+  oss.proposalOutput={proposedText:'Other project treatment.',reason:'Separate truth.',proposedTargetDuration:null};
   assert.equal((await post('/agent/creative-proposal',{...other,target:'treatment',instruction:'继续。'})).status,200);
   assert.doesNotMatch(oss.modelCalls.at(-1).system,/BRAND-001|dreamstream桌面\.png|Dream Stream Logo/,'another project cannot read the first project truth');
 });
@@ -466,7 +523,7 @@ test('OPT-018 Creative Proposal returns distinct safe context, model and schema 
   assert.equal(provider.status,502); assert.equal(provider.body.code,'PILOT_CREATIVE_MODEL_FAILED');
   assert.match(provider.body.message,/供应商配置/);
   oss.textError=false;
-  oss.proposalOutput={proposedText:'',reason:'bad'};
+  oss.proposalOutput={proposedText:'',reason:'bad',proposedTargetDuration:null};
   const malformed=await post();
   assert.equal(malformed.status,502); assert.equal(malformed.body.code,'PILOT_CREATIVE_SCHEMA_FAILED');
   assert.match(malformed.body.message,/结构不符合要求/);
@@ -500,7 +557,7 @@ test('creative and asset preview have zero writes; stale preview cannot apply', 
   const { db, service:s } = await fixture(t);
   const scope = await s.createPilotProject({name:'V04 Test',brief:'A dream becomes a film',targetDuration:30,aspectRatio:'16:9'}, 7);
   const before = await db('o_v04Creative').where(scope).first();
-  const input = {...scope,brief:'Revised',treatment:'A new treatment',script:'Scene one',expectedVersion:1};
+  const input = {...scope,brief:'Revised',treatment:'A new treatment',script:'Scene one',targetDuration:30,expectedVersion:1};
   const p = await s.previewCreative(input);
   assert.deepEqual(await db('o_v04Creative').where(scope).first(), before);
   await s.applyCreative({...input, previewHash:p.previewHash});
@@ -513,7 +570,7 @@ test('creative and asset preview have zero writes; stale preview cannot apply', 
   await assert.rejects(s.applyAssets({...scope,changes,previewHash:preview.previewHash}), e => e.code === 'PILOT_PREVIEW_STALE');
   const staleChanges=[{operation:'ADD',clientRef:'from-old-script',asset:asset('Old script candidate')}];
   const stalePreview=await s.previewAssets({...scope,changes:staleChanges,sourceCreativeVersion:2});
-  const nextCreative={...scope,brief:'Revised again',treatment:'Another treatment',script:'Scene two',expectedVersion:2};
+  const nextCreative={...scope,brief:'Revised again',treatment:'Another treatment',script:'Scene two',targetDuration:30,expectedVersion:2};
   const nextPreview=await s.previewCreative(nextCreative);
   await s.applyCreative({...nextCreative,previewHash:nextPreview.previewHash});
   await assert.rejects(s.applyAssets({...scope,changes:staleChanges,sourceCreativeVersion:2,previewHash:stalePreview.previewHash}),e=>e.code==='PILOT_SOURCE_STALE');

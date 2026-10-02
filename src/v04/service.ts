@@ -31,7 +31,7 @@ const assetChange = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("RETIRE"), canonicalKey: z.string().min(1).max(128), expectedRevision: id }).strict(),
 ]);
 const assetRequest = scope.extend({ changes: z.array(assetChange).min(1).max(100), sourceCreativeVersion: id.optional(), previewHash: z.string().length(64).optional() });
-const creativeRequest = scope.extend({ brief: text, treatment: text, script: text, expectedVersion: id, previewHash: z.string().length(64).optional() });
+const creativeRequest = scope.extend({ brief: text, treatment: text, script: text, targetDuration: z.number().int().min(1).max(600), expectedVersion: id, previewHash: z.string().length(64).optional() });
 
 async function checkedScope(trx: Knex.Transaction, input: z.infer<typeof scope>) {
   const [project, unit] = await Promise.all([
@@ -90,9 +90,9 @@ export async function readPilot(input: unknown, allowProjectCreativeFallback = f
 }
 function creativePlan(current: any, data: z.infer<typeof creativeRequest>) {
   if (current.version !== data.expectedVersion) throw new PilotError("PILOT_PREVIEW_STALE", "创意内容已更新，请重新预览", 409);
-  const proposed = { brief: data.brief, treatment: data.treatment, script: data.script };
+  const proposed = { brief: data.brief, treatment: data.treatment, script: data.script, targetDuration: data.targetDuration };
   if (Object.keys(proposed).every(key => proposed[key as keyof typeof proposed] === current[key])) throw new PilotError("PILOT_NO_CHANGE", "没有可确认的更改");
-  return { current: { brief: current.brief, treatment: current.treatment, script: current.script, version: current.version }, proposed, previewHash: hash({ projectId: data.projectId, scriptId: data.scriptId, current, proposed }) };
+  return { current: { brief: current.brief, treatment: current.treatment, script: current.script, targetDuration: current.targetDuration, version: current.version }, proposed, previewHash: hash({ projectId: data.projectId, scriptId: data.scriptId, current, proposed }) };
 }
 export async function previewCreative(input: unknown) {
   const data = creativeRequest.parse(input);
