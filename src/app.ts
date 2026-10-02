@@ -11,7 +11,7 @@ import buildRoute from "@/core";
 import path from "path";
 import fs from "fs";
 import u from "@/utils";
-import { dbReady } from "@/utils/db";
+import { db, dbReady } from "@/utils/db";
 import jwt from "jsonwebtoken";
 import socketInit from "@/socket/index";
 import { isEletron } from "@/utils/getPath";
@@ -41,6 +41,8 @@ import { initializeRevisionSchema } from "@/lib/revisionSchema";
 import { initializeVideoProductionSchema } from "@/lib/videoProductionSchema";
 import supervisor from "@/routes/supervisor";
 import validateAcceptedVideoMaterialRoute from "@/routes/production/workbench/validateAcceptedVideoMaterial";
+import { initializeV04Schema, initializeV04Profile } from "@/v04/schema";
+import v04Pilot from "@/v04/router";
 
 const app = express();
 const server = http.createServer(app);
@@ -83,6 +85,8 @@ export default async function startServe(randomPort: Boolean = false) {
   await initializeSupervisorSchema(u.db);
   await initializeRevisionSchema(u.db);
   await initializeVideoProductionSchema(u.db);
+  await initializeV04Schema(db);
+  if (process.env.DS_V04_PILOT === "1") await initializeV04Profile(db);
 
   await u.writeVersion();
   const io = new Server(server, { cors: { origin: "*" } });
@@ -234,6 +238,7 @@ export default async function startServe(randomPort: Boolean = false) {
   app.use("/api/stageOrchestrator", stageOrchestrator);
   app.use("/api/supervisor", supervisor);
   app.use("/api/modelSelect/presets", modelPresets);
+  app.use("/api/v04", v04Pilot);
   app.use(modelUseGate);
   app.use("/api/project/advertisement/assetPlan", assetPlan);
   const router = await import("@/router");
@@ -252,7 +257,9 @@ export default async function startServe(randomPort: Boolean = false) {
     res.status(err.status || 500).send(err);
   });
 
-  const port = randomPort ? 0 : 10588;
+  const configuredPort = Number(process.env.DS_PORT ?? process.env.PORT ?? 10588);
+  if (!Number.isInteger(configuredPort) || configuredPort < 1 || configuredPort > 65535) throw new Error("Invalid DS_PORT");
+  const port = randomPort ? 0 : configuredPort;
   return await new Promise((resolve) => {
     server.listen(port, async () => {
       const address = server.address();

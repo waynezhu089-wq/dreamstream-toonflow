@@ -27,8 +27,9 @@ function vectorSearch(rows: MemoryRow[], queryEmbedding: number[], limit: number
   return rows
     .map((row) => {
       const emb: number[] = JSON.parse(row.embedding ?? "[]");
-      return { ...row, similarity: cosineSimilarity(queryEmbedding, emb) };
+      return { ...row, similarity: emb.length === queryEmbedding.length && emb.length > 0 ? cosineSimilarity(queryEmbedding, emb) : Number.NaN };
     })
+    .filter(row => Number.isFinite(row.similarity))
     .sort((a, b) => b.similarity - a.similarity)
     .slice(0, limit);
 }

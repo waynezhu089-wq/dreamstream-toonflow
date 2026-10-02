@@ -933,8 +933,16 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
         ];
         await Promise.all(
           list.map(async (item) => {
-            const embedding = await getEmbedding(item.description);
-            item.embedding = JSON.stringify(embedding);
+            try {
+              const embedding = await getEmbedding(item.description);
+              item.embedding = JSON.stringify(embedding);
+            } catch (error: any) {
+              // Fresh V0.4 workspaces may intentionally have no local ONNX model.
+              // Preserve the skill text; an empty embedding is not a fabricated
+              // search result. Existing installations retain their old behavior.
+              if (process.env.DS_V04_PILOT !== "1" || !String(error?.message).includes("Embedding 模型文件不存在")) throw error;
+              item.embedding = "";
+            }
           }),
         );
         await knex("o_skillList").insert(list);
