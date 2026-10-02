@@ -48,6 +48,7 @@ web/*
 *.sqlite
 
 router.ts
+!src/v04/router.ts
 
 database.d.ts
 
