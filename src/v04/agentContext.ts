@@ -45,31 +45,37 @@ export async function buildProjectAgentContext(scope: ProjectAgentScope, message
     byKey.set(reference.targetKey, group);
   }
   const planByKey = new Map(state.assetPlan.map(item => [item.assetKey, item]));
+  const reviewByKey = new Map(state.reviewPlans.map(item => [item.canonicalKey, item]));
   const detail = active.map(asset => {
     const links = byKey.get(asset.canonicalKey) ?? [];
     const confirmed = links.filter(link => link.targetType === "ASSET_BIBLE" || link.targetType === "BIND_SELECTED_ASSET");
     const production = links.filter(link => link.targetType === "PRODUCTION_ASSET");
     const plan = planByKey.get(asset.canonicalKey);
+    const review = reviewByKey.get(asset.canonicalKey);
     return {
       canonicalKey: asset.canonicalKey, name: asset.name, category: asset.category,
       description: asset.description, prompt: asset.prompt,
       sourcePolicy: asset.sourcePolicy, status: asset.status, revision: asset.revision,
       identityAnchors: asset.identityAnchors, mustPreserve: asset.mustPreserve,
       forbiddenChanges: asset.forbiddenChanges, ownerKey: asset.ownerKey, variantOf: asset.variantOf,
+      assetKind: asset.assetKind, importance: asset.importance, relatedKeys: asset.relatedKeys, sharedVisualSystemKey: asset.sharedVisualSystemKey,
       confirmedAssetBibleReferences: confirmed.map(link => ({ name: link.originalName, attachmentId: link.attachmentId, provenance: "CONFIRMED_ASSET_BIBLE_REFERENCE" })),
       productionReferences: production.map(link => ({ name: link.originalName, attachmentId: link.attachmentId, scriptId: link.scriptId, assetId: link.assetId, provenance: "PRODUCTION_ASSET" })),
       currentUnitProductionBinding: plan ? { assetId: plan.assetId, ready: plan.ready, status: plan.status, sourcePolicy: plan.sourcePolicy } : null,
+      reviewPlan: review ? { previewKind: review.previewKind, previewStatus: review.previewStatus, turnaroundStatus: review.turnaroundStatus } : null,
     };
   });
   const assetBibleIndex = detail.map(asset => ({
     canonicalKey: asset.canonicalKey, name: asset.name, category: asset.category,
     sourcePolicy: asset.sourcePolicy, status: asset.status, revision: asset.revision,
+    assetKind: asset.assetKind, importance: asset.importance, relatedKeys: asset.relatedKeys, sharedVisualSystemKey: asset.sharedVisualSystemKey,
     identityAnchors: asset.identityAnchors, mustPreserve: asset.mustPreserve,
     forbiddenChanges: asset.forbiddenChanges, ownerKey: asset.ownerKey, variantOf: asset.variantOf,
     confirmedAssetBibleReferenceCount: asset.confirmedAssetBibleReferences.length,
     confirmedAssetBibleReferences: asset.confirmedAssetBibleReferences.slice(0, 3).map(link => link.name),
     productionReferenceCount: asset.productionReferences.length,
     currentUnitProductionBinding: asset.currentUnitProductionBinding,
+    reviewPlan: asset.reviewPlan,
   }));
   const selected = scope.selectedObject?.type === "ASSET" ? scope.selectedObject.key : null;
   const selectedShotIndex = scope.selectedObject?.type === "SHOT" ? state.storyboards.findIndex(shot => String(shot.id) === scope.selectedObject?.key) : -1;
@@ -110,6 +116,7 @@ export async function buildProjectAgentContext(scope: ProjectAgentScope, message
     scope, project: state.project, creative: state.creative,
     decisions: state.decisions.filter(decision => decision.status === "ACCEPTED" || decision.status === "REJECTED"),
     assetBibleIndex, relevantAssets,
+    assetCoverage: { stale: state.coverage.stale, sourceCreativeVersion: state.coverage.sourceCreativeVersion, items: state.coverage.items.map(item => ({ label: item.label, coverageType: item.coverageType, classification: item.classification, status: item.status, canonicalKeys: item.canonicalKeys })) },
     selectedAsset: selected ? active.find(asset => asset.canonicalKey === selected) ?? null : null,
     storyboardContext: selectedShotIndex < 0 ? [] : state.storyboards.slice(Math.max(0, selectedShotIndex - 1), selectedShotIndex + 2),
     confirmedReferences: relevantAssets.flatMap(asset => asset.confirmedAssetBibleReferences.map(ref => ({ canonicalKey: asset.canonicalKey, ...ref }))),
@@ -129,6 +136,7 @@ export function renderProjectAgentSystem(context: Awaited<ReturnType<typeof buil
     `创意权威状态: ${JSON.stringify({ brief: context.creative.brief, treatment: context.creative.treatment, script: context.creative.script, targetDuration: context.creative.targetDuration, aspectRatio: context.creative.aspectRatio })}`,
     `项目决定: ${JSON.stringify(context.decisions.map(d => ({ status: d.status, content: d.content, subjectKey: d.subjectKey })))}`,
     `项目 ACTIVE Asset Bible 索引（跨页面权威，非图片字节）: ${JSON.stringify(context.assetBibleIndex)}`,
+    `已确认素材覆盖审计（过期时不得称已覆盖）: ${JSON.stringify(context.assetCoverage)}`,
     `当前话题相关资产: ${JSON.stringify(context.relevantAssets)}`,
     `已选资产详情（仅当前关注对象）: ${JSON.stringify(context.selectedAsset)}`,
     `已选镜头与前后镜头: ${JSON.stringify(context.storyboardContext)}`,

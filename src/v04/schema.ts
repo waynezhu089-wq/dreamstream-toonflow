@@ -1,6 +1,7 @@
 import type { Knex } from "knex";
 import { advertisement001eDefinition } from "@/services/orchestrator/videoProductionProfile";
 import { definitionHash } from "@/services/orchestrator/profileDefinition";
+import { reviewPlanFor } from "./assetWorkflow";
 
 // Experimental authoring data. Existing production tables remain the authority
 // for media, Gate, Stage, Attempt and accepted video state.
@@ -44,11 +45,37 @@ export async function initializeV04Schema(db: Knex) {
     t.text("variantOf").nullable();
     t.text("sourcePolicy").notNullable();
     t.text("prompt").notNullable().defaultTo("");
+    t.text("assetKind").notNullable().defaultTo("OTHER");
+    t.text("importance").notNullable().defaultTo("SUPPORTING");
+    t.text("relatedKeys").notNullable().defaultTo("[]");
+    t.text("sharedVisualSystemKey").nullable();
     t.text("status").notNullable().defaultTo("ACTIVE");
     t.integer("revision").notNullable().defaultTo(1);
     t.integer("createdAt").notNullable();
     t.integer("updatedAt").notNullable();
     t.primary(["projectId", "canonicalKey"]);
+  });
+  // Existing experimental pilot databases are upgraded without touching production tables.
+  for (const [column, add] of [
+    ["assetKind", (t: Knex.AlterTableBuilder) => t.text("assetKind").notNullable().defaultTo("OTHER")],
+    ["importance", (t: Knex.AlterTableBuilder) => t.text("importance").notNullable().defaultTo("SUPPORTING")],
+    ["relatedKeys", (t: Knex.AlterTableBuilder) => t.text("relatedKeys").notNullable().defaultTo("[]")],
+    ["sharedVisualSystemKey", (t: Knex.AlterTableBuilder) => t.text("sharedVisualSystemKey").nullable()],
+  ] as const) if (!await db.schema.hasColumn("o_v04Asset", column)) await db.schema.alterTable("o_v04Asset", add);
+  if (!await db.schema.hasTable("o_v04AssetReviewPlan")) await db.schema.createTable("o_v04AssetReviewPlan", t => {
+    t.integer("projectId").notNullable(); t.integer("scriptId").notNullable(); t.text("canonicalKey").notNullable();
+    t.text("previewKind").notNullable(); t.text("previewStatus").notNullable(); t.text("turnaroundStatus").notNullable();
+    t.text("previewFilePath").nullable(); t.text("turnaroundFilePaths").notNullable().defaultTo("[]");
+    t.text("previewSpec").notNullable().defaultTo("{}"); t.text("turnaroundSpec").notNullable().defaultTo("{}");
+    t.integer("updatedAt").notNullable(); t.primary(["projectId", "scriptId", "canonicalKey"]);
+  });
+  if (!await db.schema.hasColumn("o_v04AssetReviewPlan", "previewSpec")) await db.schema.alterTable("o_v04AssetReviewPlan", t => t.text("previewSpec").notNullable().defaultTo("{}"));
+  if (!await db.schema.hasColumn("o_v04AssetReviewPlan", "turnaroundSpec")) await db.schema.alterTable("o_v04AssetReviewPlan", t => t.text("turnaroundSpec").notNullable().defaultTo("{}"));
+  if (!await db.schema.hasTable("o_v04AssetCoverage")) await db.schema.createTable("o_v04AssetCoverage", t => {
+    t.integer("projectId").notNullable(); t.integer("scriptId").notNullable(); t.integer("creativeVersion").notNullable();
+    t.integer("position").notNullable(); t.text("label").notNullable(); t.text("coverageType").notNullable();
+    t.text("classification").notNullable(); t.text("canonicalKeys").notNullable().defaultTo("[]");
+    t.text("note").notNullable().defaultTo(""); t.primary(["projectId", "scriptId", "position"]);
   });
   if (!await db.schema.hasTable("o_v04AssetSequence")) await db.schema.createTable("o_v04AssetSequence", t => {
     t.integer("projectId").notNullable();
@@ -95,6 +122,16 @@ export async function initializeV04Schema(db: Knex) {
     t.text("observationJson").notNullable();
     t.integer("createdAt").notNullable();
     t.primary(["attachmentId", "modelFingerprint", "analysisVersion"]);
+  });
+  // Previously confirmed experimental identities get an honest review plan on upgrade.
+  // Existing media and production bindings are never changed by this backfill.
+  const missingPlans = await db("o_v04AssetBinding as binding")
+    .join("o_v04Asset as asset", function () { this.on("asset.projectId", "=", "binding.projectId").andOn("asset.canonicalKey", "=", "binding.canonicalKey"); })
+    .leftJoin("o_v04AssetReviewPlan as plan", function () { this.on("plan.projectId", "=", "binding.projectId").andOn("plan.scriptId", "=", "binding.scriptId").andOn("plan.canonicalKey", "=", "binding.canonicalKey"); })
+    .where("asset.status", "ACTIVE").whereNull("plan.canonicalKey")
+    .select("binding.projectId", "binding.scriptId", "binding.canonicalKey", "asset.category", "asset.assetKind", "asset.importance", "asset.sourcePolicy");
+  if (missingPlans.length) await db.transaction(async trx => {
+    for (const row of missingPlans) await trx("o_v04AssetReviewPlan").insert({ projectId: row.projectId, scriptId: row.scriptId, canonicalKey: row.canonicalKey, ...reviewPlanFor(row), previewFilePath: null, turnaroundFilePaths: "[]", updatedAt: Date.now() }).onConflict(["projectId", "scriptId", "canonicalKey"]).ignore();
   });
 }
 

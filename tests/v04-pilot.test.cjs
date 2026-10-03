@@ -86,6 +86,25 @@ async function fixture(t) {
   return { db, oss, cache, service: loadSource(path.join(root,'src/v04/service.ts'),db,cache,oss), agent: loadSource(path.join(root,'src/v04/agentAttachments.ts'),db,cache,oss) };
 }
 const asset = (name='Dreamer', category='CHAR', sourcePolicy='AI_ALLOWED') => ({ name, category, description:'calm', identityAnchors:['left eyebrow scar'], mustPreserve:['scar'], forbiddenChanges:['redraw brand text'], ownerKey:null, variantOf:null, sourcePolicy, prompt:'' });
+
+test('existing experimental Asset Bible schema upgrades additively and stays idempotent', async t => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'v04-asset-upgrade-'));
+  const db=knex({client:'better-sqlite3',connection:{filename:path.join(dir,'upgrade.sqlite')},useNullAsDefault:true});
+  t.after(async()=>{await db.destroy();fs.rmSync(dir,{recursive:true,force:true});});
+  await db.schema.createTable('o_v04Asset',x=>{x.integer('projectId');x.text('canonicalKey');x.text('name');x.text('category');x.text('sourcePolicy');x.text('status');x.primary(['projectId','canonicalKey']);});
+  await db.schema.createTable('o_v04AssetBinding',x=>{x.integer('projectId');x.integer('scriptId');x.text('canonicalKey');x.integer('assetId');x.primary(['projectId','scriptId','canonicalKey']);});
+  await db('o_v04Asset').insert({projectId:17,canonicalKey:'BRAND-001',name:'Original logo',category:'BRAND',sourcePolicy:'REAL_REQUIRED',status:'ACTIVE'});
+  await db('o_v04AssetBinding').insert({projectId:17,scriptId:2,canonicalKey:'BRAND-001',assetId:9});
+  const schema=loadSource(path.join(root,'src/v04/schema.ts'),db);
+  await schema.initializeV04Schema(db);await schema.initializeV04Schema(db);
+  const row=await db('o_v04Asset').where({projectId:17,canonicalKey:'BRAND-001'}).first();
+  assert.equal(row.name,'Original logo');assert.equal(row.assetKind,'OTHER');assert.equal(row.importance,'SUPPORTING');assert.equal(row.relatedKeys,'[]');
+  for(const column of ['previewSpec','turnaroundSpec']) assert.equal(await db.schema.hasColumn('o_v04AssetReviewPlan',column),true);
+  const review=await db('o_v04AssetReviewPlan').where({projectId:17,scriptId:2,canonicalKey:'BRAND-001'});
+  assert.equal(review.length,1,'upgrade backfills an existing confirmed identity exactly once');
+  assert.equal(review[0].previewStatus,'REFERENCE_REQUIRED');
+  assert.equal(JSON.parse(review[0].previewSpec).aiRedrawAllowed,false);
+});
 test('Project Agent keeps a project-level memory identity and reads selected shot context without a production write route', () => {
   const source=fs.readFileSync(path.join(root,'src/v04/router.ts'),'utf8');
   const shared=fs.readFileSync(path.join(root,'src/v04/agentContext.ts'),'utf8');
@@ -496,7 +515,9 @@ test('OPT-021 structured Skill repair uses one pinned session and never persists
   oss.skillResponses=[{candidates:[{name:'Missing contract fields'}],mergeSuggestions:[]},valid];
   const result=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
   assert.equal(result.applied,false);
-  assert.deepEqual(result.output,valid);
+  assert.equal(result.output.candidates[0].name,valid.candidates[0].name);
+  assert.equal(result.output.candidates[0].assetKind,'OTHER','old provider-shaped candidate remains compatible');
+  assert.deepEqual(result.output.coverage,[]);
   assert.equal(result.sourceVersion,1);
   assert.equal(oss.sessionCount,1,'repair pins one model session');
   assert.equal(oss.modelCalls.length,2,'at most one repair');
@@ -536,14 +557,114 @@ test('OPT-021 Skill context and references fail closed; existing identity stays 
   assert.equal(proposal.applied,false);
   assert.equal(proposal.output.mergeSuggestions[0].existingCanonicalKey,'BRAND-001');
   assert.match(oss.modelCalls.at(-1).system,/已有 canonical identity 不得重复创建/);
-  assert.match(oss.modelCalls.at(-1).system,/蓝色荧光梦物质/);
+  assert.match(oss.modelCalls.at(-1).system,/持续 FX/);
   assert.deepEqual(await db('o_v04Creative').where(scope).first(),beforeCreative);
   assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),beforeAssets);
   const creativeChange={...scope,brief:'New confirmed brief',treatment:'',script:'',targetDuration:40,expectedVersion:1};
   const creativePreview=await s.previewCreative(creativeChange);
   await s.applyCreative({...creativeChange,previewHash:creativePreview.previewHash});
-  const staleChanges=[{operation:'ADD',clientRef:'blue',asset:proposal.output.candidates[1]}];
+  const staleChanges=[{operation:'ADD',clientRef:'blue',asset:asset('Blue luminous matter','FX')}];
   await assert.rejects(s.previewAssets({...scope,changes:staleChanges,sourceCreativeVersion:proposal.sourceVersion}),e=>e.code==='PILOT_SOURCE_STALE');
+});
+
+test('V0.4 coverage extraction stays proposal-only, then confirmed assets get scoped review plans and relations', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Dream matter',brief:'Dream Stream brand film',targetDuration:40,aspectRatio:'16:9'},7);
+  const other=await s.createPilotProject({name:'Other film',brief:'Separate world',targetDuration:30,aspectRatio:'16:9'},7);
+  const brand=[{operation:'ADD',clientRef:'logo',asset:asset('Dream Stream Logo','BRAND','REAL_REQUIRED')}];
+  const brandPreview=await s.previewAssets({...scope,changes:brand});await s.applyAssets({...scope,changes:brand,previewHash:brandPreview.previewHash});
+  const treatment='小男孩在静谧海岛·夜看见鲸鱼，穿过广阔海域·夜与鲸腹梦境空间。海盗船、潜水艇、飞马共享蓝色梦物质，驶向云端月夜与月亮目标构图。Dream Stream Logo 片尾出现，远处的灯塔仍待设计。';
+  const creative={...scope,brief:'Dream Stream brand film',treatment,script:'',targetDuration:40,expectedVersion:1};
+  const creativePreview=await s.previewCreative(creative);await s.applyCreative({...creative,previewHash:creativePreview.previewHash});
+  const specs=[
+    ['小男孩','CHAR','HUMAN_CHARACTER','CORE'],['鲸鱼','CHAR','CREATURE','CORE'],['海盗船','PROP','VEHICLE','CORE'],['潜水艇','PROP','VEHICLE','CORE'],['飞马','CHAR','CREATURE','CORE'],
+    ['蓝色梦物质','FX','MATERIAL_FX','SUPPORTING'],['静谧海岛·夜','LOC','ENVIRONMENT','SUPPORTING'],['广阔海域·夜','LOC','ENVIRONMENT','SUPPORTING'],['鲸腹梦境空间','LOC','ENVIRONMENT','SUPPORTING'],['云端月夜','LOC','CELESTIAL','SUPPORTING'],
+  ];
+  const candidates=specs.map(([name,category,assetKind,importance],index)=>({...asset(name,category),assetKind,importance,relatedExistingKeys:[],relatedCandidateIndexes:index===5?[2,3,4]:[],sharedVisualSystemKey:null,sharedVisualSystemCandidateIndex:[2,3,4].includes(index)?5:null,extractionPass:index<5?'ENTITY':index===5?'VISUAL_SYSTEM':'ENVIRONMENT'}));
+  const coverage=specs.map(([name],index)=>({label:name,coverageType:['PERSON','CREATURE','VEHICLE','VEHICLE','CREATURE','FX_MATERIAL','SCENE','SCENE','SCENE','COMPOSITION_GOAL'][index],classification:index===5?'VISUAL_SYSTEM':'CANONICAL_ASSET',candidateIndexes:[index],existingCanonicalKeys:[],note:''}));
+  coverage.push({label:'Dream Stream Logo',coverageType:'BRAND',classification:'CANONICAL_ASSET',candidateIndexes:[],existingCanonicalKeys:['BRAND-001'],note:'Use real confirmed reference'});
+  coverage.push({label:'月亮目标构图',coverageType:'COMPOSITION_GOAL',classification:'COMPOSITION_MOTIF',candidateIndexes:[],existingCanonicalKeys:[],note:'Shot composition, not a new canonical identity'});
+  coverage.push({label:'远处灯塔',coverageType:'SCENE',classification:'SCENE_ANCHOR',candidateIndexes:[],existingCanonicalKeys:[],note:'Still missing'});
+  oss.proposalOutput={candidates,mergeSuggestions:[],coverage};
+  const skills=loadSource(path.join(root,'src/v04/skills.ts'),db,cache,oss);
+  const proposed=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
+  assert.equal(proposed.skillId,'v04.asset-extraction.v2');
+  assert.equal(proposed.output.candidates.length,10);
+  assert.equal((await db('o_v04Asset').where({projectId:scope.projectId}).count({n:'canonicalKey'}).first()).n,1,'extraction alone does not persist candidates');
+  assert.equal((await db('o_v04AssetCoverage').where(scope).count({n:'position'}).first()).n,0);
+  assert.equal((await db('o_v04AssetReviewPlan').where(scope).count({n:'canonicalKey'}).first()).n,1);
+  await assert.rejects(s.previewAssets({...scope,changes:[{operation:'ADD',clientRef:'invalid',asset:{...asset('Bad ship','PROP'),assetKind:'VEHICLE',sharedVisualSystemKey:'BRAND-001'}}]}),e=>e.code==='PILOT_RELATION_INVALID','a logo cannot masquerade as a visual system');
+  const refs=candidates.map((_,i)=>`candidate_${i}`);
+  const changes=candidates.map((c,i)=>{const {relatedExistingKeys,relatedCandidateIndexes,sharedVisualSystemCandidateIndex,extractionPass,...fields}=c;return {operation:'ADD',clientRef:refs[i],asset:{...fields,relatedKeys:relatedExistingKeys},relatedClientRefs:relatedCandidateIndexes.map(j=>refs[j]),sharedVisualSystemClientRef:sharedVisualSystemCandidateIndex===null?null:refs[sharedVisualSystemCandidateIndex]};});
+  const coverageRequest=coverage.map(item=>({label:item.label,coverageType:item.coverageType,classification:item.classification,candidateRefs:item.candidateIndexes.map(i=>refs[i]),existingCanonicalKeys:item.existingCanonicalKeys,note:item.note}));
+  const input={...scope,changes,coverage:coverageRequest,sourceCreativeVersion:proposed.sourceVersion};
+  const preview=await s.previewAssets(input);
+  assert.equal((await db('o_v04AssetCoverage').where(scope).count({n:'position'}).first()).n,0,'preview is zero write');
+  const applied=await s.applyAssets({...input,previewHash:preview.previewHash});
+  const keys=new Map(applied.applied.map(row=>[row.clientRef,row.canonicalKey]));
+  const state=await s.readPilot(scope);
+  assert.equal(state.assets.filter(a=>a.name==='Dream Stream Logo').length,1,'BRAND-001 not duplicated');
+  assert.equal(state.assets.length,11);
+  const ship=state.assets.find(a=>a.name==='海盗船'); const matter=state.assets.find(a=>a.name==='蓝色梦物质');
+  assert.equal(ship.sharedVisualSystemKey,matter.canonicalKey);
+  assert.deepEqual(matter.relatedKeys.sort(),[keys.get(refs[2]),keys.get(refs[3]),keys.get(refs[4])].sort());
+  for(const i of [0,1,2,3,4]) { const plan=state.reviewPlans.find(p=>p.canonicalKey===keys.get(refs[i]));assert.equal(plan.turnaroundStatus,'PLANNED');assert.deepEqual(plan.turnaroundSpec.views,['FRONT','SIDE','BACK']);assert.equal(plan.previewSpec.maxEdge,512);assert.equal(plan.previewSpec.reviewOnly,true); }
+  for(const i of [6,7,8,9]) {const plan=state.reviewPlans.find(p=>p.canonicalKey===keys.get(refs[i]));assert.equal(plan.previewKind,'ESTABLISHING');assert.equal(plan.turnaroundStatus,'NOT_APPLICABLE');}
+  assert.equal(state.reviewPlans.find(p=>p.canonicalKey==='BRAND-001').previewStatus,'REFERENCE_REQUIRED');
+  assert.equal(state.reviewPlans.find(p=>p.canonicalKey==='BRAND-001').previewSpec.aiRedrawAllowed,false);
+  assert.equal(state.reviewPlans.every(p=>p.previewFilePath===null),true,'plans never pretend to contain generated media');
+  assert.equal(state.coverage.items.find(x=>x.label==='远处灯塔').status,'UNCOVERED');
+  assert.equal(state.coverage.items.find(x=>x.label==='月亮目标构图').status,'DOCUMENTED');
+  assert.equal(state.coverage.items.find(x=>x.label==='Dream Stream Logo').status,'COVERED');
+  assert.deepEqual((await s.readPilot(other)).assets,[],'another project sees no canonical assets');
+  const contextApi=loadSource(path.join(root,'src/v04/agentContext.ts'),db,cache,oss);
+  const agentContext=await contextApi.buildProjectAgentContext({...scope,currentStage:'storyboard',currentRoute:'pilot/storyboard',selectedObject:null},'检查素材覆盖');
+  assert.equal(agentContext.assetCoverage.items.find(item=>item.label==='远处灯塔').status,'UNCOVERED');
+  assert.equal(agentContext.assetBibleIndex.find(item=>item.name==='海盗船').reviewPlan.turnaroundStatus,'PLANNED');
+  const otherContext=await contextApi.buildProjectAgentContext({...other,currentStage:'creative',currentRoute:'pilot/creative',selectedObject:null},'检查素材覆盖');
+  assert.deepEqual(otherContext.assetCoverage.items,[]);
+  await assert.rejects(s.planOptionalTurnaround({...other,canonicalKey:ship.canonicalKey}),e=>e.code==='PILOT_TURNAROUND_UNAVAILABLE');
+  const supporting={...asset('Compass','PROP'),assetKind:'PROP',importance:'SUPPORTING'};
+  const extra=[{operation:'ADD',clientRef:'compass',asset:supporting}];const extraPreview=await s.previewAssets({...scope,changes:extra});
+  const extraApplied=await s.applyAssets({...scope,changes:extra,previewHash:extraPreview.previewHash});
+  const compassKey=extraApplied.applied[0].canonicalKey;
+  assert.equal((await s.readPilot(scope)).reviewPlans.find(p=>p.canonicalKey===compassKey).turnaroundStatus,'OPTIONAL');
+  const express=require('express');const app=express();app.use(express.json());app.use((req,_res,next)=>{req.user={id:7};next();});
+  app.use('/api/v04',loadSource(path.join(root,'src/v04/router.ts'),db,cache,oss).default);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v04/assets/turnaround/plan`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...scope,canonicalKey:compassKey})});
+  assert.equal(response.status,200);assert.equal((await response.json()).data.generated,false);
+  assert.equal((await s.readPilot(scope)).reviewPlans.find(p=>p.canonicalKey===compassKey).turnaroundStatus,'PLANNED');
+  const realEdit=[{operation:'EDIT',canonicalKey:compassKey,expectedRevision:1,patch:{sourcePolicy:'REAL_REQUIRED'}}];
+  const realPreview=await s.previewAssets({...scope,changes:realEdit});await s.applyAssets({...scope,changes:realEdit,previewHash:realPreview.previewHash});
+  const realState=await s.readPilot(scope);const realReview=realState.reviewPlans.find(p=>p.canonicalKey===compassKey);
+  assert.equal(realReview.previewStatus,'REFERENCE_REQUIRED');assert.equal(realReview.turnaroundStatus,'NOT_APPLICABLE');assert.equal(realReview.previewSpec.aiRedrawAllowed,false);
+  assert.equal(realState.assetPlan.find(item=>item.assetKey===compassKey).assetId,null,'REAL_REQUIRED is not inferred from a planned AI asset');
+  assert.equal((await db('o_image').count({n:'id'}).first()).n,0,'planning never creates a production image');
+  const changedCreative={...scope,brief:'Dream Stream brand film',treatment:treatment+' 新的场景需求。',script:'',targetDuration:40,expectedVersion:2};
+  const changePreview=await s.previewCreative(changedCreative);await s.applyCreative({...changedCreative,previewHash:changePreview.previewHash});
+  assert.equal((await s.readPilot(scope)).coverage.stale,true,'changed Creative truth invalidates accepted coverage audit');
+  assert.equal(oss.modelCalls.length,1,'no image or paid production calls');
+});
+
+test('nonempty Treatment requires a real coverage audit; repair is bounded and still zero-write', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Audit',brief:'A boy and a whale',targetDuration:30,aspectRatio:'16:9'},7);
+  const creative={...scope,brief:'A boy and a whale',treatment:'A whale crosses the night sea.',script:'',targetDuration:30,expectedVersion:1};
+  const preview=await s.previewCreative(creative);await s.applyCreative({...creative,previewHash:preview.previewHash});
+  const valid={candidates:[{...asset('Whale','CHAR'),assetKind:'CREATURE',importance:'CORE',extractionPass:'ENTITY'}],mergeSuggestions:[],coverage:[{label:'Whale',coverageType:'CREATURE',classification:'CANONICAL_ASSET',candidateIndexes:[0],existingCanonicalKeys:[],note:''},{label:'Night sea',coverageType:'SCENE',classification:'SCENE_ANCHOR',candidateIndexes:[],existingCanonicalKeys:[],note:'Missing environment'}]};
+  oss.skillResponses=[{...valid,coverage:[]},valid];
+  const skills=loadSource(path.join(root,'src/v04/skills.ts'),db,cache,oss);
+  const result=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
+  assert.equal(result.output.coverage.length,2);
+  assert.equal(oss.sessionCount,1);
+  assert.equal(oss.modelCalls.length,2);
+  assert.equal((await db('o_v04Asset').count({n:'canonicalKey'}).first()).n,0);
+  assert.equal((await db('o_v04AssetCoverage').count({n:'position'}).first()).n,0);
+  oss.skillResponses=[{...valid,coverage:[]},{...valid,coverage:[]}];
+  await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_SCHEMA_FAILED');
+  assert.equal((await db('o_v04AssetCoverage').count({n:'position'}).first()).n,0);
 });
 
 test('OPT-018 Proposal uses shared project truth and cached Vision text, never a recent raw image in the text model', async t => {

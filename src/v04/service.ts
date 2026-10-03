@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db } from "@/utils/db";
 import { assertAssetPlanBinding, readAssetPlanInTransaction } from "@/services/advertisementAssetPlan";
 import { ASSET_PLAN_TABLE } from "@/lib/advertisementAssetPlanSchema";
+import { assetKinds, reviewPlanFor } from "./assetWorkflow";
 
 export class PilotError extends Error {
   constructor(public code: string, message: string, public status = 400) { super(message); }
@@ -24,13 +25,20 @@ const newAsset = z.object({
   variantOf: z.string().max(128).nullable().default(null),
   sourcePolicy: z.enum(["REAL_REQUIRED", "AI_ALLOWED"]).default("AI_ALLOWED"),
   prompt: z.string().max(8000).default(""),
+  assetKind: z.enum(assetKinds).default("OTHER"),
+  importance: z.enum(["CORE", "SUPPORTING"]).default("SUPPORTING"),
+  relatedKeys: z.array(z.string().min(1).max(128)).max(30).default([]),
+  sharedVisualSystemKey: z.string().min(1).max(128).nullable().default(null),
 }).strict();
 const assetChange = z.discriminatedUnion("operation", [
-  z.object({ operation: z.literal("ADD"), clientRef: z.string().min(1).max(80), asset: newAsset }).strict(),
+  z.object({ operation: z.literal("ADD"), clientRef: z.string().min(1).max(80), asset: newAsset,
+    relatedClientRefs: z.array(z.string().min(1).max(80)).max(30).default([]),
+    sharedVisualSystemClientRef: z.string().min(1).max(80).nullable().default(null) }).strict(),
   z.object({ operation: z.literal("EDIT"), canonicalKey: z.string().min(1).max(128), expectedRevision: id, patch: newAsset.partial() }).strict(),
   z.object({ operation: z.literal("RETIRE"), canonicalKey: z.string().min(1).max(128), expectedRevision: id }).strict(),
 ]);
-const assetRequest = scope.extend({ changes: z.array(assetChange).min(1).max(100), sourceCreativeVersion: id.optional(), previewHash: z.string().length(64).optional() });
+const coverageItem = z.object({ label: z.string().trim().min(1).max(200), coverageType: z.enum(["PERSON", "CREATURE", "VEHICLE", "SCENE", "FX_MATERIAL", "BRAND", "COMPOSITION_GOAL", "PROP", "OTHER"]), classification: z.enum(["CANONICAL_ASSET", "VARIANT", "SCENE_ANCHOR", "VISUAL_SYSTEM", "SHOT_LOCAL", "COMPOSITION_MOTIF"]), candidateRefs: z.array(z.string().min(1).max(80)).max(20), existingCanonicalKeys: z.array(z.string().min(1).max(128)).max(20), note: z.string().max(600) }).strict();
+const assetRequest = scope.extend({ changes: z.array(assetChange).max(100), sourceCreativeVersion: id.optional(), coverage: z.array(coverageItem).max(100).optional(), previewHash: z.string().length(64).optional() });
 const creativeRequest = scope.extend({ brief: text, treatment: text, script: text, targetDuration: z.number().int().min(1).max(600), expectedVersion: id, previewHash: z.string().length(64).optional() });
 
 async function checkedScope(trx: Knex.Transaction, input: z.infer<typeof scope>) {
@@ -67,6 +75,8 @@ export async function readPilot(input: unknown, allowProjectCreativeFallback = f
     const creative = await trx("o_v04Creative").where(parsed).first() || (allowProjectCreativeFallback ? await trx("o_v04Creative").where({ projectId: parsed.projectId }).orderBy("scriptId").first() : null);
     if (!creative) throw new PilotError("PILOT_NOT_FOUND", "该项目没有 V0.4 工作空间", 404);
     const assets = await trx("o_v04Asset").where({ projectId: parsed.projectId }).orderBy("canonicalKey");
+    const reviewPlans = await trx("o_v04AssetReviewPlan").where(parsed).orderBy("canonicalKey");
+    const coverageRows = await trx("o_v04AssetCoverage").where(parsed).orderBy("position");
     const storyboards = await trx("o_storyboard").where(parsed).whereNull("retiredAt").orderBy("index", "asc").orderBy("id", "asc").select("id", "index", "prompt", "duration", "videoDesc", "productionSpec", "state", "filePath", "currentImageAttemptId", "activeImageAttemptId");
     const bindings = await trx("o_v04AssetBinding").where(parsed);
     const unitPlan = await readAssetPlanInTransaction(trx, parsed);
@@ -85,7 +95,9 @@ export async function readPilot(input: unknown, allowProjectCreativeFallback = f
     const decisions = await trx("o_v04Decision").where({ projectId: parsed.projectId }).orderBy("createdAt", "desc").limit(100);
     const agentReferences = await trx("o_v04AgentReference as ref").join("o_v04AgentAttachment as image", "image.id", "ref.attachmentId")
       .where("ref.projectId", parsed.projectId).select("ref.id", "ref.scriptId", "ref.targetType", "ref.targetKey", "ref.assetId", "ref.attachmentId", "image.originalName", "image.mimeType", "image.sha256").orderBy("ref.createdAt", "desc").limit(200);
-    return { project: { id: project.id, name: project.name }, creative, storyboards, assets: assets.map(a => ({ ...a, identityAnchors: JSON.parse(a.identityAnchors), mustPreserve: JSON.parse(a.mustPreserve), forbiddenChanges: JSON.parse(a.forbiddenChanges) })), bindings, assetPlan, agentReferences, decisions: decisions.map(d => ({ ...d, sourceMessageIds: JSON.parse(d.sourceMessageIds) })) };
+    const activeKeys = new Set(assets.filter(a => a.status === "ACTIVE").map(a => a.canonicalKey));
+    const coverage = coverageRows.map(row => { const canonicalKeys: string[] = JSON.parse(row.canonicalKeys); return { ...row, canonicalKeys, status: canonicalKeys.some(key => activeKeys.has(key)) ? "COVERED" : ["SHOT_LOCAL", "COMPOSITION_MOTIF"].includes(row.classification) ? "DOCUMENTED" : "UNCOVERED" }; });
+    return { project: { id: project.id, name: project.name }, creative, storyboards, assets: assets.map(a => ({ ...a, identityAnchors: JSON.parse(a.identityAnchors), mustPreserve: JSON.parse(a.mustPreserve), forbiddenChanges: JSON.parse(a.forbiddenChanges), relatedKeys: JSON.parse(a.relatedKeys) })), bindings, assetPlan, reviewPlans: reviewPlans.map(p => ({ ...p, turnaroundFilePaths: JSON.parse(p.turnaroundFilePaths), previewSpec: JSON.parse(p.previewSpec), turnaroundSpec: JSON.parse(p.turnaroundSpec) })), coverage: { sourceCreativeVersion: coverageRows[0]?.creativeVersion ?? null, items: coverage, stale: coverageRows.length > 0 && coverageRows[0].creativeVersion !== creative.version }, agentReferences, decisions: decisions.map(d => ({ ...d, sourceMessageIds: JSON.parse(d.sourceMessageIds) })) };
   });
 }
 function creativePlan(current: any, data: z.infer<typeof creativeRequest>) {
@@ -113,6 +125,7 @@ export async function applyCreative(input: unknown) {
 }
 
 async function planAssets(trx: Knex.Transaction, data: z.infer<typeof assetRequest>) {
+  if (!data.changes.length && !data.coverage?.length) throw new PilotError("PILOT_NO_CHANGE", "需要素材变更或覆盖审计");
   await checkedScope(trx, data);
   if (data.sourceCreativeVersion !== undefined) {
     const creative = await trx("o_v04Creative").where({ projectId: data.projectId, scriptId: data.scriptId }).first();
@@ -120,13 +133,18 @@ async function planAssets(trx: Knex.Transaction, data: z.infer<typeof assetReque
   }
   const rows = await trx("o_v04Asset").where({ projectId: data.projectId }).orderBy("canonicalKey");
   const byKey = new Map(rows.map(r => [r.canonicalKey as string, r]));
+  const addRefs = new Set(data.changes.filter(c => c.operation === "ADD").map(c => c.clientRef));
+  const addByRef = new Map(data.changes.filter(c => c.operation === "ADD").map(c => [c.clientRef, c] as const));
+  const isVisualSystem = (asset: { category: string; assetKind: string } | undefined) => asset?.category === "FX" || asset?.assetKind === "MATERIAL_FX";
   const refs = new Set<string>();
   const suggestions: any[] = [];
   const changes = data.changes.map(change => {
     if (change.operation === "ADD") {
       if (refs.has(change.clientRef)) throw new PilotError("PILOT_DUPLICATE_REF", "候选引用重复");
       refs.add(change.clientRef);
-      for (const key of [change.asset.ownerKey, change.asset.variantOf]) if (key && (!byKey.has(key) || byKey.get(key)?.status !== "ACTIVE")) throw new PilotError("PILOT_RELATION_INVALID", "归属或变体来源必须是当前项目现有的有效身份");
+      for (const key of [change.asset.ownerKey, change.asset.variantOf, change.asset.sharedVisualSystemKey, ...change.asset.relatedKeys]) if (key && (!byKey.has(key) || byKey.get(key)?.status !== "ACTIVE")) throw new PilotError("PILOT_RELATION_INVALID", "关系必须指向当前项目现有的有效身份");
+      for (const ref of [...change.relatedClientRefs, ...(change.sharedVisualSystemClientRef ? [change.sharedVisualSystemClientRef] : [])]) if (ref === change.clientRef || !addRefs.has(ref)) throw new PilotError("PILOT_RELATION_INVALID", "候选关系引用无效");
+      if (change.asset.sharedVisualSystemKey && !isVisualSystem(byKey.get(change.asset.sharedVisualSystemKey)) || change.sharedVisualSystemClientRef && !isVisualSystem(addByRef.get(change.sharedVisualSystemClientRef)?.asset)) throw new PilotError("PILOT_RELATION_INVALID", "共享视觉系统必须指向 FX / 材质身份");
       // Names are suggestions only: never silently merge identities by name.
       suggestions.push({ clientRef: change.clientRef, possibleMatches: rows.filter(r => r.status === "ACTIVE" && r.name.toLowerCase() === change.asset.name.toLowerCase()).map(r => r.canonicalKey) });
       return change;
@@ -134,12 +152,17 @@ async function planAssets(trx: Knex.Transaction, data: z.infer<typeof assetReque
     const row = byKey.get(change.canonicalKey);
     if (!row || row.status !== "ACTIVE") throw new PilotError("PILOT_ASSET_NOT_FOUND", "资产身份不存在或已退休", 404);
     if (row.revision !== change.expectedRevision) throw new PilotError("PILOT_PREVIEW_STALE", "资产身份已变化", 409);
-    if (change.operation === "EDIT") for (const key of [change.patch.ownerKey, change.patch.variantOf]) if (key && (key === change.canonicalKey || !byKey.has(key) || byKey.get(key)?.status !== "ACTIVE")) throw new PilotError("PILOT_RELATION_INVALID", "归属或变体来源无效");
+    if (change.operation === "EDIT") for (const key of [change.patch.ownerKey, change.patch.variantOf, change.patch.sharedVisualSystemKey, ...(change.patch.relatedKeys ?? [])]) if (key && (key === change.canonicalKey || !byKey.has(key) || byKey.get(key)?.status !== "ACTIVE")) throw new PilotError("PILOT_RELATION_INVALID", "关系来源无效");
+    if (change.operation === "EDIT" && change.patch.sharedVisualSystemKey && !isVisualSystem(byKey.get(change.patch.sharedVisualSystemKey))) throw new PilotError("PILOT_RELATION_INVALID", "共享视觉系统必须指向 FX / 材质身份");
     if (refs.has(change.canonicalKey)) throw new PilotError("PILOT_CONFLICT", "同一资产存在冲突操作");
     refs.add(change.canonicalKey);
     return change;
   });
-  return { changes, suggestions, previewHash: hash({ projectId: data.projectId, scriptId: data.scriptId, rows, changes }) };
+  if (data.coverage) for (const item of data.coverage) {
+    if (item.candidateRefs.some(ref => !addRefs.has(ref)) || item.existingCanonicalKeys.some(key => byKey.get(key)?.status !== "ACTIVE")) throw new PilotError("PILOT_COVERAGE_REFERENCE_INVALID", "覆盖清单引用无效", 422);
+  }
+  const currentCoverage = data.coverage ? await trx("o_v04AssetCoverage").where({ projectId: data.projectId, scriptId: data.scriptId }).orderBy("position") : null;
+  return { changes, suggestions, coverage: data.coverage ?? null, previewHash: hash({ projectId: data.projectId, scriptId: data.scriptId, rows, changes, coverage: data.coverage ?? null, currentCoverage }) };
 }
 export async function previewAssets(input: unknown) {
   const data = assetRequest.parse(input);
@@ -151,6 +174,7 @@ export async function applyAssets(input: unknown) {
     const plan = await planAssets(trx, data);
     if (plan.previewHash !== data.previewHash) throw new PilotError("PILOT_PREVIEW_STALE", "素材预览已过期", 409);
     const applied: { clientRef?: string; canonicalKey: string; assetId?: number }[] = [];
+    const keyByClientRef = new Map<string, string>();
     for (const change of plan.changes) {
       if (change.operation === "ADD") {
         const prefix = change.asset.category;
@@ -160,7 +184,9 @@ export async function applyAssets(input: unknown) {
         if (seq) await trx("o_v04AssetSequence").where({ projectId: data.projectId, prefix }).update({ nextNumber: number + 1 });
         else await trx("o_v04AssetSequence").insert({ projectId: data.projectId, prefix, nextNumber: 2 });
         const a = change.asset;
-        await trx("o_v04Asset").insert({ projectId: data.projectId, canonicalKey, category: a.category, name: a.name, description: a.description, identityAnchors: JSON.stringify(a.identityAnchors), mustPreserve: JSON.stringify(a.mustPreserve), forbiddenChanges: JSON.stringify(a.forbiddenChanges), ownerKey: a.ownerKey, variantOf: a.variantOf, sourcePolicy: a.sourcePolicy, prompt: a.prompt, status: "ACTIVE", revision: 1, createdAt: Date.now(), updatedAt: Date.now() });
+        await trx("o_v04Asset").insert({ projectId: data.projectId, canonicalKey, category: a.category, name: a.name, description: a.description, identityAnchors: JSON.stringify(a.identityAnchors), mustPreserve: JSON.stringify(a.mustPreserve), forbiddenChanges: JSON.stringify(a.forbiddenChanges), ownerKey: a.ownerKey, variantOf: a.variantOf, sourcePolicy: a.sourcePolicy, prompt: a.prompt, assetKind: a.assetKind, importance: a.importance, relatedKeys: JSON.stringify(a.relatedKeys), sharedVisualSystemKey: a.sharedVisualSystemKey, status: "ACTIVE", revision: 1, createdAt: Date.now(), updatedAt: Date.now() });
+        keyByClientRef.set(change.clientRef, canonicalKey);
+        await trx("o_v04AssetReviewPlan").insert({ projectId: data.projectId, scriptId: data.scriptId, canonicalKey, ...reviewPlanFor(a), previewFilePath: null, turnaroundFilePaths: "[]", updatedAt: Date.now() });
         const [assetId] = await trx("o_assets").insert({ projectId: data.projectId, scriptId: data.scriptId, name: a.name, describe: a.description, prompt: a.prompt, type: ({ CHAR: "role", LOC: "scene" } as Record<string, string>)[a.category] ?? "tool", startTime: Date.now() });
         await trx("o_scriptAssets").insert({ scriptId: data.scriptId, assetId });
         await trx("o_v04AssetBinding").insert({ projectId: data.projectId, scriptId: data.scriptId, canonicalKey, assetId });
@@ -171,8 +197,14 @@ export async function applyAssets(input: unknown) {
         applied.push({ clientRef: change.clientRef, canonicalKey, assetId });
       } else if (change.operation === "EDIT") {
         const patch: Record<string, unknown> = { ...change.patch, revision: change.expectedRevision + 1, updatedAt: Date.now() };
-        for (const key of ["identityAnchors", "mustPreserve", "forbiddenChanges"]) if (key in patch) patch[key] = JSON.stringify(patch[key]);
+        for (const key of ["identityAnchors", "mustPreserve", "forbiddenChanges", "relatedKeys"]) if (key in patch) patch[key] = JSON.stringify(patch[key]);
         await trx("o_v04Asset").where({ projectId: data.projectId, canonicalKey: change.canonicalKey }).update(patch);
+        if (["assetKind", "importance", "sourcePolicy", "category"].some(key => key in change.patch)) {
+          const updated = await trx("o_v04Asset").where({ projectId: data.projectId, canonicalKey: change.canonicalKey }).first();
+          const existingPlan = await trx("o_v04AssetReviewPlan").where({ projectId: data.projectId, scriptId: data.scriptId, canonicalKey: change.canonicalKey }).first();
+          const next = reviewPlanFor(updated);
+          if (existingPlan) await trx("o_v04AssetReviewPlan").where({ projectId: data.projectId, scriptId: data.scriptId, canonicalKey: change.canonicalKey }).update({ ...next, previewFilePath: null, turnaroundFilePaths: "[]", updatedAt: Date.now() });
+        }
         if (change.patch.name !== undefined || change.patch.category !== undefined || change.patch.sourcePolicy !== undefined) {
           const planPatch = { ...(change.patch.name !== undefined ? { name: change.patch.name } : {}), ...(change.patch.category !== undefined ? { category: change.patch.category } : {}), ...(change.patch.sourcePolicy !== undefined ? { sourcePolicy: change.patch.sourcePolicy, assetId: null } : {}) };
           await trx(ASSET_PLAN_TABLE).where({ projectId: data.projectId, scriptId: data.scriptId, assetKey: change.canonicalKey }).update(planPatch);
@@ -189,7 +221,30 @@ export async function applyAssets(input: unknown) {
         applied.push({ canonicalKey: change.canonicalKey });
       }
     }
+    // Resolve sibling candidate relationships only after every canonical ID exists.
+    for (const change of plan.changes) if (change.operation === "ADD" && (change.relatedClientRefs.length || change.sharedVisualSystemClientRef)) {
+      const canonicalKey = keyByClientRef.get(change.clientRef)!;
+      const relatedKeys = [...new Set([...change.asset.relatedKeys, ...change.relatedClientRefs.map(ref => keyByClientRef.get(ref)! )])];
+      await trx("o_v04Asset").where({ projectId: data.projectId, canonicalKey }).update({ relatedKeys: JSON.stringify(relatedKeys), sharedVisualSystemKey: change.sharedVisualSystemClientRef ? keyByClientRef.get(change.sharedVisualSystemClientRef) : change.asset.sharedVisualSystemKey });
+    }
+    if (plan.coverage !== null) {
+      await trx("o_v04AssetCoverage").where({ projectId: data.projectId, scriptId: data.scriptId }).delete();
+      const creative = await trx("o_v04Creative").where({ projectId: data.projectId, scriptId: data.scriptId }).first();
+      for (const [position, item] of plan.coverage.entries()) await trx("o_v04AssetCoverage").insert({ projectId: data.projectId, scriptId: data.scriptId, creativeVersion: creative.version, position, label: item.label, coverageType: item.coverageType, classification: item.classification, canonicalKeys: JSON.stringify([...new Set([...item.existingCanonicalKeys, ...item.candidateRefs.map(ref => keyByClientRef.get(ref)!)])]), note: item.note });
+    }
     return { applied };
+  });
+}
+
+export async function planOptionalTurnaround(input: unknown) {
+  const data = scope.extend({ canonicalKey: z.string().min(1).max(128) }).strict().parse(input);
+  return q.transaction(async trx => {
+    await checkedScope(trx, data);
+    const asset = await trx("o_v04Asset").where({ projectId: data.projectId, canonicalKey: data.canonicalKey, status: "ACTIVE" }).first();
+    const row = await trx("o_v04AssetReviewPlan").where({ projectId: data.projectId, scriptId: data.scriptId, canonicalKey: data.canonicalKey }).first();
+    if (!asset || !row || row.turnaroundStatus !== "OPTIONAL") throw new PilotError("PILOT_TURNAROUND_UNAVAILABLE", "该资产不支持手动三视图计划", 409);
+    await trx("o_v04AssetReviewPlan").where({ projectId: data.projectId, scriptId: data.scriptId, canonicalKey: data.canonicalKey }).update({ turnaroundStatus: "PLANNED", updatedAt: Date.now() });
+    return { canonicalKey: data.canonicalKey, turnaroundStatus: "PLANNED", generated: false };
   });
 }
 
