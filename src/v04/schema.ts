@@ -123,6 +123,30 @@ export async function initializeV04Schema(db: Knex) {
     t.integer("createdAt").notNullable();
     t.primary(["attachmentId", "modelFingerprint", "analysisVersion"]);
   });
+  if (!await db.schema.hasTable("o_v04AssetVisualSpec")) await db.schema.createTable("o_v04AssetVisualSpec", t => {
+    t.integer("projectId").notNullable(); t.text("canonicalKey").notNullable();
+    t.integer("revision").notNullable(); t.text("status").notNullable();
+    t.integer("sourceAssetRevision").notNullable(); t.text("specJson").notNullable();
+    t.integer("createdAt").notNullable(); t.integer("updatedAt").notNullable();
+    t.primary(["projectId", "canonicalKey", "revision"]);
+    t.index(["projectId", "canonicalKey", "status"]);
+  });
+  if (!await db.schema.hasTable("o_v04AssetPromptBuild")) await db.schema.createTable("o_v04AssetPromptBuild", t => {
+    t.integer("projectId").notNullable(); t.text("canonicalKey").notNullable();
+    t.integer("visualSpecRevision").notNullable(); t.text("compilerVersion").notNullable();
+    t.text("generationIntent").notNullable(); t.text("targetProfile").notNullable();
+    t.text("promptIrJson").notNullable(); t.text("renderedPromptJson").notNullable();
+    t.text("status").notNullable(); t.integer("createdAt").notNullable(); t.integer("updatedAt").notNullable();
+    t.primary(["projectId", "canonicalKey", "visualSpecRevision", "compilerVersion", "generationIntent", "targetProfile"]);
+    t.index(["projectId", "canonicalKey", "status"]);
+  });
+  if (!await db.schema.hasTable("o_v04AssetLibraryBinding")) await db.schema.createTable("o_v04AssetLibraryBinding", t => {
+    t.integer("projectId").notNullable(); t.text("canonicalKey").notNullable();
+    t.text("libraryAssetId").nullable(); t.integer("libraryVersion").nullable();
+    t.text("visualProfileId").nullable(); t.integer("visualProfileVersion").nullable();
+    t.text("reuseMode").nullable(); t.integer("createdAt").notNullable(); t.integer("updatedAt").notNullable();
+    t.primary(["projectId", "canonicalKey"]);
+  });
   // Previously confirmed experimental identities get an honest review plan on upgrade.
   // Existing media and production bindings are never changed by this backfill.
   const missingPlans = await db("o_v04AssetBinding as binding")

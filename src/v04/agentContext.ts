@@ -25,6 +25,8 @@ export async function buildProjectAgentContext(scope: ProjectAgentScope, message
   }
 
   const active = state.assets.filter(asset => asset.status === "ACTIVE");
+  const visualByKey = new Map(state.visualSpecs.map(row => [row.canonicalKey, row]));
+  const promptByKey = new Map(state.promptBuilds.filter(row => row.effectiveStatus === "READY").map(row => [row.canonicalKey, row]));
   const keys = active.map(asset => asset.canonicalKey);
   // References are confirmed links, distinct from the attachment's original
   // CONVERSATIONAL_REFERENCE purpose. Join by project as well as attachment ID.
@@ -63,6 +65,10 @@ export async function buildProjectAgentContext(scope: ProjectAgentScope, message
       productionReferences: production.map(link => ({ name: link.originalName, attachmentId: link.attachmentId, scriptId: link.scriptId, assetId: link.assetId, provenance: "PRODUCTION_ASSET" })),
       currentUnitProductionBinding: plan ? { assetId: plan.assetId, ready: plan.ready, status: plan.status, sourcePolicy: plan.sourcePolicy } : null,
       reviewPlan: review ? { previewKind: review.previewKind, previewStatus: review.previewStatus, turnaroundStatus: review.turnaroundStatus } : null,
+      visualSpecRevision: visualByKey.get(asset.canonicalKey)?.revision ?? null,
+      visualSpecStatus: visualByKey.get(asset.canonicalKey)?.effectiveStatus ?? "NONE",
+      promptStatus: promptByKey.has(asset.canonicalKey) ? "READY" : state.promptBuilds.some(row => row.canonicalKey === asset.canonicalKey) ? "STALE" : "NONE",
+      visualSpec: visualByKey.get(asset.canonicalKey)?.effectiveStatus === "CONFIRMED" ? visualByKey.get(asset.canonicalKey)?.spec : null,
     };
   });
   const assetBibleIndex = detail.map(asset => ({
@@ -76,6 +82,7 @@ export async function buildProjectAgentContext(scope: ProjectAgentScope, message
     productionReferenceCount: asset.productionReferences.length,
     currentUnitProductionBinding: asset.currentUnitProductionBinding,
     reviewPlan: asset.reviewPlan,
+    visualSpecRevision: asset.visualSpecRevision, visualSpecStatus: asset.visualSpecStatus, promptStatus: asset.promptStatus,
   }));
   const selected = scope.selectedObject?.type === "ASSET" ? scope.selectedObject.key : null;
   const selectedShotIndex = scope.selectedObject?.type === "SHOT" ? state.storyboards.findIndex(shot => String(shot.id) === scope.selectedObject?.key) : -1;
@@ -117,7 +124,7 @@ export async function buildProjectAgentContext(scope: ProjectAgentScope, message
     decisions: state.decisions.filter(decision => decision.status === "ACCEPTED" || decision.status === "REJECTED"),
     assetBibleIndex, relevantAssets,
     assetCoverage: { stale: state.coverage.stale, sourceCreativeVersion: state.coverage.sourceCreativeVersion, items: state.coverage.items.map(item => ({ label: item.label, coverageType: item.coverageType, classification: item.classification, status: item.status, canonicalKeys: item.canonicalKeys })) },
-    selectedAsset: selected ? active.find(asset => asset.canonicalKey === selected) ?? null : null,
+    selectedAsset: selected ? detail.find(asset => asset.canonicalKey === selected) ?? null : null,
     storyboardContext: selectedShotIndex < 0 ? [] : state.storyboards.slice(Math.max(0, selectedShotIndex - 1), selectedShotIndex + 2),
     confirmedReferences: relevantAssets.flatMap(asset => asset.confirmedAssetBibleReferences.map(ref => ({ canonicalKey: asset.canonicalKey, ...ref }))),
     productionBindings: state.assetPlan.map(item => ({ canonicalKey: item.assetKey, assetId: item.assetId, ready: item.ready, status: item.status, sourcePolicy: item.sourcePolicy })),

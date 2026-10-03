@@ -5,6 +5,7 @@ import { db } from "@/utils/db";
 import { assertAssetPlanBinding, readAssetPlanInTransaction } from "@/services/advertisementAssetPlan";
 import { ASSET_PLAN_TABLE } from "@/lib/advertisementAssetPlanSchema";
 import { assetKinds, reviewPlanFor } from "./assetWorkflow";
+import { PROMPT_COMPILER_VERSION } from "./promptCompiler";
 
 export class PilotError extends Error {
   constructor(public code: string, message: string, public status = 400) { super(message); }
@@ -75,6 +76,9 @@ export async function readPilot(input: unknown, allowProjectCreativeFallback = f
     const creative = await trx("o_v04Creative").where(parsed).first() || (allowProjectCreativeFallback ? await trx("o_v04Creative").where({ projectId: parsed.projectId }).orderBy("scriptId").first() : null);
     if (!creative) throw new PilotError("PILOT_NOT_FOUND", "该项目没有 V0.4 工作空间", 404);
     const assets = await trx("o_v04Asset").where({ projectId: parsed.projectId }).orderBy("canonicalKey");
+    const specRows = await trx("o_v04AssetVisualSpec").where({ projectId: parsed.projectId, status: "CONFIRMED" }).orderBy("canonicalKey").orderBy("revision", "desc");
+    const promptRows = await trx("o_v04AssetPromptBuild").where({ projectId: parsed.projectId }).orderBy("canonicalKey").orderBy("createdAt", "desc");
+    const libraryBindings = await trx("o_v04AssetLibraryBinding").where({ projectId: parsed.projectId });
     const reviewPlans = await trx("o_v04AssetReviewPlan").where(parsed).orderBy("canonicalKey");
     const coverageRows = await trx("o_v04AssetCoverage").where(parsed).orderBy("position");
     const storyboards = await trx("o_storyboard").where(parsed).whereNull("retiredAt").orderBy("index", "asc").orderBy("id", "asc").select("id", "index", "prompt", "duration", "videoDesc", "productionSpec", "state", "filePath", "currentImageAttemptId", "activeImageAttemptId");
@@ -97,7 +101,13 @@ export async function readPilot(input: unknown, allowProjectCreativeFallback = f
       .where("ref.projectId", parsed.projectId).select("ref.id", "ref.scriptId", "ref.targetType", "ref.targetKey", "ref.assetId", "ref.attachmentId", "image.originalName", "image.mimeType", "image.sha256").orderBy("ref.createdAt", "desc").limit(200);
     const activeKeys = new Set(assets.filter(a => a.status === "ACTIVE").map(a => a.canonicalKey));
     const coverage = coverageRows.map(row => { const canonicalKeys: string[] = JSON.parse(row.canonicalKeys); return { ...row, canonicalKeys, status: canonicalKeys.some(key => activeKeys.has(key)) ? "COVERED" : ["SHOT_LOCAL", "COMPOSITION_MOTIF"].includes(row.classification) ? "DOCUMENTED" : "UNCOVERED" }; });
-    return { project: { id: project.id, name: project.name }, creative, storyboards, assets: assets.map(a => ({ ...a, identityAnchors: JSON.parse(a.identityAnchors), mustPreserve: JSON.parse(a.mustPreserve), forbiddenChanges: JSON.parse(a.forbiddenChanges), relatedKeys: JSON.parse(a.relatedKeys) })), bindings, assetPlan, reviewPlans: reviewPlans.map(p => ({ ...p, turnaroundFilePaths: JSON.parse(p.turnaroundFilePaths), previewSpec: JSON.parse(p.previewSpec), turnaroundSpec: JSON.parse(p.turnaroundSpec) })), coverage: { sourceCreativeVersion: coverageRows[0]?.creativeVersion ?? null, items: coverage, stale: coverageRows.length > 0 && coverageRows[0].creativeVersion !== creative.version }, agentReferences, decisions: decisions.map(d => ({ ...d, sourceMessageIds: JSON.parse(d.sourceMessageIds) })) };
+    const assetRevision = new Map(assets.map(a => [a.canonicalKey, { revision: a.revision, status: a.status }]));
+    const visualSpecs = specRows.map(row => ({ ...row, spec: JSON.parse(row.specJson),
+      effectiveStatus: assetRevision.get(row.canonicalKey)?.status !== "ACTIVE" || assetRevision.get(row.canonicalKey)?.revision !== row.sourceAssetRevision ? "STALE" : "CONFIRMED" }));
+    const currentSpecRevision = new Map(visualSpecs.map(row => [row.canonicalKey, row.effectiveStatus === "CONFIRMED" ? row.revision : null]));
+    const promptBuilds = promptRows.map(row => ({ ...row, promptIr: JSON.parse(row.promptIrJson), renderedPrompt: JSON.parse(row.renderedPromptJson),
+      effectiveStatus: row.status === "READY" && row.compilerVersion === PROMPT_COMPILER_VERSION && currentSpecRevision.get(row.canonicalKey) === row.visualSpecRevision ? "READY" : "STALE" }));
+    return { project: { id: project.id, name: project.name }, creative, storyboards, assets: assets.map(a => ({ ...a, identityAnchors: JSON.parse(a.identityAnchors), mustPreserve: JSON.parse(a.mustPreserve), forbiddenChanges: JSON.parse(a.forbiddenChanges), relatedKeys: JSON.parse(a.relatedKeys) })), bindings, assetPlan, visualSpecs, promptBuilds, libraryBindings, reviewPlans: reviewPlans.map(p => ({ ...p, turnaroundFilePaths: JSON.parse(p.turnaroundFilePaths), previewSpec: JSON.parse(p.previewSpec), turnaroundSpec: JSON.parse(p.turnaroundSpec) })), coverage: { sourceCreativeVersion: coverageRows[0]?.creativeVersion ?? null, items: coverage, stale: coverageRows.length > 0 && coverageRows[0].creativeVersion !== creative.version }, agentReferences, decisions: decisions.map(d => ({ ...d, sourceMessageIds: JSON.parse(d.sourceMessageIds) })) };
   });
 }
 function creativePlan(current: any, data: z.infer<typeof creativeRequest>) {
@@ -204,6 +214,7 @@ export async function applyAssets(input: unknown) {
         const patch: Record<string, unknown> = { ...change.patch, revision: change.expectedRevision + 1, updatedAt: Date.now() };
         for (const key of ["identityAnchors", "mustPreserve", "forbiddenChanges", "relatedKeys"]) if (key in patch) patch[key] = JSON.stringify(patch[key]);
         await trx("o_v04Asset").where({ projectId: data.projectId, canonicalKey: change.canonicalKey }).update(patch);
+        await trx("o_v04AssetPromptBuild").where({ projectId: data.projectId, canonicalKey: change.canonicalKey, status: "READY" }).update({ status: "STALE", updatedAt: Date.now() });
         if (["assetKind", "importance", "sourcePolicy", "category"].some(key => key in change.patch)) {
           const updated = await trx("o_v04Asset").where({ projectId: data.projectId, canonicalKey: change.canonicalKey }).first();
           const existingPlan = await trx("o_v04AssetReviewPlan").where({ projectId: data.projectId, scriptId: data.scriptId, canonicalKey: change.canonicalKey }).first();
@@ -221,6 +232,7 @@ export async function applyAssets(input: unknown) {
         applied.push({ canonicalKey: change.canonicalKey });
       } else {
         await trx("o_v04Asset").where({ projectId: data.projectId, canonicalKey: change.canonicalKey }).update({ status: "RETIRED", revision: change.expectedRevision + 1, updatedAt: Date.now() });
+        await trx("o_v04AssetPromptBuild").where({ projectId: data.projectId, canonicalKey: change.canonicalKey, status: "READY" }).update({ status: "STALE", updatedAt: Date.now() });
         await trx(ASSET_PLAN_TABLE).where({ projectId: data.projectId, scriptId: data.scriptId, assetKey: change.canonicalKey }).update({ assetId: null });
         // Preserve historical assetId, bindings and production outputs.
         applied.push({ canonicalKey: change.canonicalKey });
