@@ -577,7 +577,7 @@ test('OPT-024 compact extraction normalizes safe defaults and name refs without 
   }
   assert.equal(oss.modelCalls.length,7,'three malformed shapes each receive exactly one repair');
   assert.deepEqual(diagnostics.slice(0,2).map(entry=>entry[1].repairAttempt),[0,1]);
-  assert.deepEqual(diagnostics[0][1].validation,[{path:'candidates.0.sourcePolicy',failureType:'invalid_value'}]);
+  assert.deepEqual(diagnostics[0][1].validation,[{path:'candidates.0.sourcePolicy',failureType:'custom'}]);
   assert.doesNotMatch(JSON.stringify(diagnostics),/Shared blue luminous material|Dream Stream Logo|Bearer|Authorization/,'diagnostics contain paths and types, not model content');
   for(const invalid of [
     {...compact,candidates:[{...compact.candidates[1],relatedCandidateIndexes:[99]}],mergeSuggestions:[],coverage:[compact.coverage[1]]},
@@ -588,6 +588,76 @@ test('OPT-024 compact extraction normalizes safe defaults and name refs without 
     assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),before);
   }
   assert.equal(oss.modelCalls.length,9,'semantic violations do not trigger blind structured retries');
+});
+
+test('OPT-024B provider labels accept common English and Chinese aliases; canonical proposal remains strict', () => {
+  const {assetExtractionModelSchema,normalizeAssetExtraction,assetExtractionProposalSchema}=loadSource(path.join(root,'src/v04/assetExtractionOutput.ts'),null);
+  const rows=[
+    ['Boy','CHARACTER','HUMAN_CHARACTER','PERSON'],['Whale','生物','动物','CREATURE'],
+    ['Ship','VEHICLE','载具','VEHICLE'],['Island','ENVIRONMENT',null,'SCENE'],
+    ['Dream matter','VISUAL_SYSTEM','MATERIAL','FX_MATERIAL'],['Glow','材质',null,'FX_MATERIAL'],
+    ['Logo','LOGO','品牌标识','BRAND'],['Girl','人物','人类角色','PERSON'],
+    ['Submarine','交通工具',null,'VEHICLE'],['Night sea','环境',null,'SCENE'],
+    ['Brand mark','品牌标识',null,'BRAND'],
+  ];
+  const output={candidates:rows.map(([name,category,assetKind])=>({name,category,assetKind,description:'Pilot fixture',sourcePolicy:name.includes('Logo')||name==='Brand mark'?'必须上传真实素材':'允许AI生成',importance:['Boy','Whale','Ship','Girl','Submarine'].includes(name)?'核心':undefined})),
+    coverage:rows.map(([name,, ,coverageType])=>({label:name,coverageType:coverageType==='CREATURE'?'CHARACTER':coverageType,classification:'正式资产',candidateRefs:[name]}))};
+  assert.equal(assetExtractionModelSchema.safeParse(output).success,true,'provider-facing DTO accepts aliases before normalization');
+  const normalized=normalizeAssetExtraction(output);
+  assert.equal(normalized.candidates.length,11);
+  assert.deepEqual(normalized.candidates.map(c=>c.category),['CHAR','CHAR','PROP','LOC','FX','FX','BRAND','CHAR','PROP','LOC','BRAND']);
+  assert.deepEqual(normalized.candidates.map(c=>c.assetKind),['HUMAN_CHARACTER','CREATURE','VEHICLE','ENVIRONMENT','MATERIAL_FX','MATERIAL_FX','BRAND_MARK','HUMAN_CHARACTER','VEHICLE','ENVIRONMENT','BRAND_MARK']);
+  assert.equal(normalized.coverage[1].coverageType,'CREATURE','linked candidate determines coverage despite ambiguous duplicate classification');
+  assert.equal(normalized.candidates[6].sourcePolicy,'REAL_REQUIRED');
+  assert.equal(assetExtractionProposalSchema.safeParse(normalized).success,true);
+  assert.equal(assetExtractionProposalSchema.safeParse(output).success,false,'persisted proposal never accepts aliases');
+  const celestial=structuredClone(output);
+  celestial.candidates[3].assetKind='CELESTIAL';
+  assert.equal(normalizeAssetExtraction(celestial).candidates[3].assetKind,'CELESTIAL','a broad environment label can still describe a celestial asset');
+  for(const [mutate,expectedPath] of [
+    [x=>x.candidates[0].category='UNKNOWN_CREATURE','candidates.0.category'],
+    [x=>{x.candidates[0].category='CHARACTER';delete x.candidates[0].assetKind},'candidates.0.assetKind'],
+    [x=>x.candidates[0].assetKind='UNKNOWN_KIND','candidates.0.assetKind'],
+    [x=>{x.coverage[0].candidateRefs=[];x.coverage[0].coverageType='UNKNOWN_TYPE'},'coverage.0.coverageType'],
+  ]){
+    const invalid=structuredClone(output);mutate(invalid);
+    assert.throws(()=>normalizeAssetExtraction(invalid),e=>e.issues?.some(issue=>issue.path.join('.')===expectedPath));
+  }
+});
+
+test('OPT-024B pilot-scale 11 candidates and 18 coverage rows remain proposal-only with existing BRAND merge', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Alias pilot',brief:'Dream Stream film',targetDuration:40,aspectRatio:'16:9'},7);
+  const brand=[{operation:'ADD',clientRef:'brand',asset:asset('Dream Stream Logo','BRAND','REAL_REQUIRED')}];
+  const brandPreview=await s.previewAssets({...scope,changes:brand});await s.applyAssets({...scope,changes:brand,previewHash:brandPreview.previewHash});
+  const creative={...scope,brief:'Dream Stream film',treatment:'Boy, whale, ship, submarine, pegasus and blue dream matter cross an island and night sea. The real Dream Stream Logo closes the film.',script:'',targetDuration:40,expectedVersion:1};
+  const creativePreview=await s.previewCreative(creative);await s.applyCreative({...creative,previewHash:creativePreview.previewHash});
+  const candidates=[
+    ['Boy','CHARACTER','HUMAN_CHARACTER'],['Whale','CREATURE','CREATURE'],['Ship','VEHICLE','VEHICLE'],['Submarine','载具','VEHICLE'],['Pegasus','生物','CREATURE'],
+    ['Dream Matter','VISUAL_SYSTEM','MATERIAL'],['Island','ENVIRONMENT','ENVIRONMENT'],['Night Sea','场景','ENVIRONMENT'],['Whale Interior','LOCATION','ENVIRONMENT'],['Moon','LOC','CELESTIAL'],['Dream Stream Logo','LOGO','LOGO'],
+  ].map(([name,category,assetKind],i)=>({name,category,assetKind,description:'Pilot semantic alias',sourcePolicy:i===10?'REAL_REQUIRED':'AI_ALLOWED',importance:i<5?'CORE':undefined,
+    relatedCandidateRefs:i===5?['Ship','Submarine','Pegasus']:[],sharedVisualSystemRef:[2,3,4].includes(i)?'Dream Matter':undefined}));
+  const coverage=candidates.map((candidate,i)=>({label:candidate.name,coverageType:i===9?'COMPOSITION_GOAL':i===10?'LOGO':'CHARACTER',classification:i===5?'VISUAL_SYSTEM':'CANONICAL_ASSET',
+    candidateRefs:i===10?[]:[candidate.name],existingCanonicalKeys:i===10?['BRAND-001']:[]}));
+  for(let i=0;i<7;i++) coverage.push({label:`Additional scene beat ${i}`,coverageType:i%2?'SCENE':'COMPOSITION_GOAL',classification:i%2?'SCENE_ANCHOR':'COMPOSITION_MOTIF',candidateRefs:[],existingCanonicalKeys:[],note:'Human review required'});
+  const output={candidates,mergeSuggestions:[{candidateRef:'Dream Stream Logo',existingCanonicalKey:'BRAND-001',reason:'Existing real logo'}],coverage};
+  const model=loadSource(path.join(root,'src/v04/assetExtractionOutput.ts'),db,cache,oss);
+  assert.equal(model.assetExtractionModelSchema.safeParse(output).success,true);
+  const normalized=model.normalizeAssetExtraction(output);
+  assert.deepEqual([...new Set([...normalized.coverage.flatMap(row=>row.candidateIndexes),...normalized.mergeSuggestions.map(row=>row.candidateIndex)])].sort((a,b)=>a-b),Array.from({length:11},(_,i)=>i));
+  const beforeAssets=await db('o_v04Asset').where({projectId:scope.projectId});
+  oss.proposalOutput=output;
+  const skills=loadSource(path.join(root,'src/v04/skills.ts'),db,cache,oss);
+  const preview=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
+  assert.equal(preview.output.candidates.length,11);
+  assert.equal(preview.output.coverage.length,18);
+  assert.equal(preview.output.mergeSuggestions[0].existingCanonicalKey,'BRAND-001');
+  assert.equal(preview.output.candidates[10].sourcePolicy,'REAL_REQUIRED');
+  assert.equal(preview.output.coverage[1].coverageType,'CREATURE');
+  assert.equal(preview.applied,false);
+  assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),beforeAssets);
+  assert.equal((await db('o_v04AssetCoverage').where(scope)).length,0);
+  assert.equal(oss.modelCalls.length,1,'valid alias output needs no repair or paid model');
 });
 
 test('OPT-021 Skill context and references fail closed; existing identity stays a merge suggestion', async t => {
