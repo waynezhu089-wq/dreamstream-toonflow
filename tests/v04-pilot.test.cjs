@@ -602,7 +602,7 @@ test('OPT-024B provider labels accept common English and Chinese aliases; canoni
     ['Brand mark','品牌标识',null,'BRAND'],
   ];
   const output={candidates:rows.map(([name,category,assetKind])=>({name,category,assetKind,description:'Pilot fixture',sourcePolicy:name.includes('Logo')||name==='Brand mark'?'必须上传真实素材':'允许AI生成',importance:['Boy','Whale','Ship','Girl','Submarine'].includes(name)?'核心':undefined})),
-    coverage:rows.map(([name,, ,coverageType])=>({label:name,coverageType:coverageType==='CREATURE'?'CHARACTER':coverageType,classification:'正式资产',candidateRefs:[name]}))};
+    coverage:rows.map(([name,, ,coverageType])=>({label:name,coverageType:coverageType==='CREATURE'?'CHARACTER':coverageType,classification:coverageType==='FX_MATERIAL'?'视觉系统':'正式资产',candidateRefs:[name]}))};
   assert.equal(assetExtractionModelSchema.safeParse(output).success,true,'provider-facing DTO accepts aliases before normalization');
   const normalized=normalizeAssetExtraction(output);
   assert.equal(normalized.candidates.length,11);
@@ -645,10 +645,25 @@ test('OPT-024C cross-field category and coverage classification use deterministi
   assert.deepEqual(output.coverage.map(row=>row.classification),['CANONICAL_ASSET','COMPOSITION_MOTIF','VISUAL_SYSTEM','SCENE_ANCHOR','VARIANT']);
   assert.equal(assetExtractionProposalSchema.safeParse(output).success,true);
   assert.deepEqual(output.coverage[3].candidateIndexes,[],'classification never manufactures coverage linkage');
+  const unknownButRedundant=structuredClone(input);
+  unknownButRedundant.coverage[2].classification='SHARED_VISUAL_SYSTEM';
+  assert.equal(normalizeAssetExtraction(unknownButRedundant).coverage[2].classification,'VISUAL_SYSTEM');
+  const recognizedConflict=structuredClone(input);
+  recognizedConflict.coverage[2].classification='CANONICAL_ASSET';
+  assert.throws(()=>normalizeAssetExtraction(recognizedConflict),error=>{
+    const detail=semanticLabelDiagnostics(error)[0];
+    return detail?.path==='coverage.2.classification' && detail.failureType==='conflict';
+  });
+  const noEvidence=structuredClone(input);
+  noEvidence.coverage[3].coverageType='OTHER';
+  noEvidence.coverage[3].classification='SHARED_VISUAL_SYSTEM';
+  assert.throws(()=>normalizeAssetExtraction(noEvidence),error=>{
+    const detail=semanticLabelDiagnostics(error)[0];
+    return detail?.path==='coverage.3.classification' && detail.failureType==='unknown_or_ambiguous';
+  });
   for(const [mutate,path,failureType] of [
     [x=>x.candidates[0].category='VEHICLE','candidates.0.category','conflict'],
     [x=>x.candidates[1].category='MYSTERY','candidates.1.category','unknown_or_ambiguous'],
-    [x=>x.coverage[0].classification='MYSTERY','coverage.0.classification','unknown_or_ambiguous'],
     [x=>{x.coverage[3].classification='PERSON'},'coverage.3.classification','conflict'],
     [x=>{x.coverage[3].candidateRefs=['Moon']},'coverage.3.classification','conflict'],
   ]) {
@@ -677,7 +692,7 @@ test('OPT-024B pilot-scale 11 candidates and 18 coverage rows remain proposal-on
     ['Dream Matter','VISUAL_SYSTEM','MATERIAL'],['Island','ENVIRONMENT','ENVIRONMENT'],['Night Sea','场景','ENVIRONMENT'],['Whale Interior','LOCATION','ENVIRONMENT'],['Moon','CELESTIAL','CELESTIAL'],['Dream Stream Logo','LOGO','LOGO'],
   ].map(([name,category,assetKind],i)=>({name,category,assetKind,description:'Pilot semantic alias',sourcePolicy:i===10?'REAL_REQUIRED':'AI_ALLOWED',importance:i<5?'CORE':undefined,
     relatedCandidateRefs:i===5?['Ship','Submarine','Pegasus']:[],sharedVisualSystemRef:[2,3,4].includes(i)?'Dream Matter':undefined}));
-  const coverage=candidates.map((candidate,i)=>({label:candidate.name,coverageType:i===9?'COMPOSITION_GOAL':i===10?'LOGO':'CHARACTER',classification:i===5?'FX_MATERIAL':i===10?'BRAND':'CANONICAL_ASSET',
+  const coverage=candidates.map((candidate,i)=>({label:candidate.name,coverageType:i===9?'COMPOSITION_GOAL':i===10?'LOGO':'CHARACTER',classification:i===5?'SHARED_VISUAL_SYSTEM':i===9?'COMPOSITION_GOAL':i===10?'BRAND':'CANONICAL_ASSET',
     candidateRefs:i===10?[]:[candidate.name],existingCanonicalKeys:i===10?['BRAND-001']:[]}));
   for(let i=0;i<7;i++) coverage.push({label:`Additional scene beat ${i}`,coverageType:i%2?'SCENE':'COMPOSITION_GOAL',classification:i%2?'SCENE':'COMPOSITION_GOAL',candidateRefs:[],existingCanonicalKeys:[],note:'Human review required'});
   const output={candidates,mergeSuggestions:[{candidateRef:'Dream Stream Logo',existingCanonicalKey:'BRAND-001',reason:'Existing real logo'}],coverage};
@@ -754,7 +769,7 @@ test('V0.4 coverage extraction stays proposal-only, then confirmed assets get sc
     ['蓝色梦物质','FX','MATERIAL_FX','SUPPORTING'],['静谧海岛·夜','LOC','ENVIRONMENT','SUPPORTING'],['广阔海域·夜','LOC','ENVIRONMENT','SUPPORTING'],['鲸腹梦境空间','LOC','ENVIRONMENT','SUPPORTING'],['云端月夜','LOC','CELESTIAL','SUPPORTING'],
   ];
   const candidates=specs.map(([name,category,assetKind,importance],index)=>({...asset(name,category),assetKind,importance,relatedExistingKeys:[],relatedCandidateIndexes:index===5?[2,3,4]:[],sharedVisualSystemKey:null,sharedVisualSystemCandidateIndex:[2,3,4].includes(index)?5:null,extractionPass:index<5?'ENTITY':index===5?'VISUAL_SYSTEM':'ENVIRONMENT'}));
-  const coverage=specs.map(([name],index)=>({label:name,coverageType:['PERSON','CREATURE','VEHICLE','VEHICLE','CREATURE','FX_MATERIAL','SCENE','SCENE','SCENE','COMPOSITION_GOAL'][index],classification:index===5?'VISUAL_SYSTEM':'CANONICAL_ASSET',candidateIndexes:[index],existingCanonicalKeys:[],note:''}));
+  const coverage=specs.map(([name],index)=>({label:name,coverageType:['PERSON','CREATURE','VEHICLE','VEHICLE','CREATURE','FX_MATERIAL','SCENE','SCENE','SCENE','COMPOSITION_GOAL'][index],classification:index===5?'VISUAL_SYSTEM':index===9?'COMPOSITION_MOTIF':'CANONICAL_ASSET',candidateIndexes:[index],existingCanonicalKeys:[],note:''}));
   coverage.push({label:'Dream Stream Logo',coverageType:'BRAND',classification:'CANONICAL_ASSET',candidateIndexes:[],existingCanonicalKeys:['BRAND-001'],note:'Use real confirmed reference'});
   coverage.push({label:'月亮目标构图',coverageType:'COMPOSITION_GOAL',classification:'COMPOSITION_MOTIF',candidateIndexes:[],existingCanonicalKeys:[],note:'Shot composition, not a new canonical identity'});
   coverage.push({label:'远处灯塔',coverageType:'SCENE',classification:'SCENE_ANCHOR',candidateIndexes:[],existingCanonicalKeys:[],note:'Still missing'});

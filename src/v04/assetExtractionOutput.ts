@@ -255,12 +255,21 @@ export function normalizeAssetExtraction(raw: unknown) {
       const classKey = labelKey(item.classification);
       const classResult = classification.safeParse(classificationAliases[classKey] ?? classKey);
       const confusedType = coverageType.safeParse(coverageAliases[classKey] ?? classKey);
-      if (!classResult.success && !confusedType.success)
-        invalidLabel(["coverage", i, "classification"], item.classification, "unknown_or_ambiguous");
-      if (confusedType.success && !classResult.success &&
-        (!inferredClassification || (canonicalClassificationByCoverage[confusedType.data] !== inferredClassification &&
-          !(inferredClassification === "VARIANT" && confusedType.data === normalizedCoverageType))))
-        invalidLabel(["coverage", i, "classification"], item.classification, "conflict");
+      // A deterministic relationship wins over an unrecognized redundant model label.
+      // A recognized, contradictory classification still fails instead of being silently rewritten.
+      if (inferredClassification) {
+        if (classResult.success && classResult.data !== inferredClassification)
+          invalidLabel(["coverage", i, "classification"], item.classification, "conflict");
+        if (!classResult.success && confusedType.success) {
+          const assertedClass = canonicalClassificationByCoverage[confusedType.data];
+          if (assertedClass && assertedClass !== inferredClassification &&
+            !(inferredClassification === "VARIANT" && confusedType.data === normalizedCoverageType))
+            invalidLabel(["coverage", i, "classification"], item.classification, "conflict");
+        }
+      } else if (!classResult.success) {
+        invalidLabel(["coverage", i, "classification"], item.classification,
+          confusedType.success ? "conflict" : "unknown_or_ambiguous");
+      }
       return {
         label: item.label,
         coverageType: normalizedCoverageType,
