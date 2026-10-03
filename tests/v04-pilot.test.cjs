@@ -1418,6 +1418,77 @@ test('OPT-027A-HOTFIX-02 MATERIAL_FX semantic states compile into one strict ord
   assert.throws(()=>contract.visualSpecSchema.parse({...strict,details:{...strict.details,states:[...strict.details.states,strict.details.states[0]]}}),'canonical validation still rejects extra states');
 });
 
+test('Visual Semantic Ingress compiles clean, dirty, minimal and mixed payloads for every AI asset kind', async t => {
+  const {db,oss,cache}=await fixture(t);
+  const contract=loadSource(path.join(root,'src/v04/visualSpecContract.ts'),db,cache,oss);
+  const kindDetails={
+    HUMAN_CHARACTER:{faceShape:'round',hairColor:'black',bodyBuild:'slim',wardrobeUpper:'blue coat',footwear:'赤足或软底鞋',expressionRange:'curious',embeddedElements:'ignored'},
+    CREATURE:{species:'whale',bodyStructure:'large whale',skin:'blue skin',movement:'swimming'},
+    VEHICLE:{type:'pirate ship',silhouette:'curved hull',structure:'wooden frame',surface:'weathered'},
+    PROP:{type:'compass',construction:'brass casing',purpose:'navigation'},
+    ENVIRONMENT:{spaceType:'island',foreground:'shore',midground:'trees',background:'sea',lighting:'moonlight',atmosphere:'quiet',architectureOrNaturalForms:'rock arch',recurringAnchors:['moon',null,17],emptyEnvironmentPolicy:'空场景'},
+    MATERIAL_FX:{baseColor:'blue',emissionColor:'cyan',states:[{key:'solid form',appearance:'solid'},{key:'fog',appearance:'mist'}],transitionRules:null},
+    CELESTIAL:{form:'moon',surface:'silver glow',palette:'silver blue',role:'final composition'},
+    OTHER:{type:'keepsake',construction:'wood',function:'reminder'},
+  };
+  for(const [kind,details] of Object.entries(kindDetails)){
+    const identity={assetKind:kind,name:'Example',description:'Known visual identity',identityAnchors:[],mustPreserve:[],forbiddenChanges:[]};
+    const shapes=[
+      {visualIdentitySummary:'Example identity',primaryPalette:['blue'],details:contract.visualDetailTemplate(kind)},
+      {result:{visualIdentitySummary:'Example identity',primaryPalette:'blue',materials:null,details,
+        embeddedElements:[{name:'Moon pendant',placement:'neck',continuityImportance:'high',promotionRecommendation:'高'},{name:'',placement:''}]}},
+      {visualSpec:{details:{}}},
+      [{visualIdentitySummary:'Example identity',primaryPalette:['blue',null,5],distinctiveFeatures:'glowing',details:{...details,unknownProviderField:'ignored'},irrelevant:'ignored'}],
+    ];
+    for(const raw of shapes){
+      const result=contract.compileVisualSemanticWithDiagnostics(identity,raw);
+      assert.equal(contract.visualSpecSchema.parse(result.spec).assetKind,kind);
+      assert.equal(result.spec.assetKind,kind);
+      assert.ok(Array.isArray(result.normalizationWarnings));
+    }
+  }
+  const human={assetKind:'HUMAN_CHARACTER',name:'Boy',description:'Dreamer',identityAnchors:[],mustPreserve:[],forbiddenChanges:[]};
+  const proposed=contract.compileVisualSemanticWithDiagnostics(human,{details:kindDetails.HUMAN_CHARACTER,
+    embeddedElements:[{name:'Moon pendant',placement:'neck',continuityImportance:'high',promotionRecommendation:'高'},{name:'Nameless',placement:''}]});
+  assert.equal(proposed.spec.details.face.faceShape,'round');
+  assert.equal(proposed.spec.details.hair.color,'black');
+  assert.equal(proposed.spec.details.body.build,'slim');
+  assert.equal(proposed.spec.embeddedElements.length,1,'unplaced human accessory is not made canonical-looking');
+  assert.equal(proposed.spec.embeddedElements[0].promotionRecommendation,'HIGH');
+  assert.deepEqual(proposed.qualityWarnings,[{path:'details.footwear',code:'AMBIGUOUS_IDENTITY_VALUE'}]);
+  const env={assetKind:'ENVIRONMENT',name:'Island',description:'Night island',identityAnchors:[],mustPreserve:[],forbiddenChanges:[]};
+  const environment=contract.compileVisualSemanticWithDiagnostics(env,{details:kindDetails.ENVIRONMENT});
+  assert.equal(environment.spec.details.emptyEnvironmentPolicy,'EMPTY_CANONICAL_REFERENCE');
+  assert.deepEqual(environment.spec.details.architectureOrNaturalForms,['rock arch']);
+  assert.deepEqual(environment.spec.details.recurringAnchors,['moon']);
+  assert.throws(()=>contract.compileVisualSemantic(human,[]),error=>error.code==='SEMANTIC_ROOT_INVALID');
+  assert.throws(()=>contract.compileVisualSemantic(human,[{},{}]),error=>error.code==='SEMANTIC_ROOT_INVALID');
+});
+
+test('Visual Spec batch preserves five zero-write candidates when the sixth semantic root fails and permits one-item retry', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const visual=loadSource(path.join(root,'src/v04/visualSpec.ts'),db,cache,oss);
+  const scope=await s.createPilotProject({name:'Visual batch',brief:'Six visual identities',targetDuration:40,aspectRatio:'16:9'},7);
+  const changes=Array.from({length:6},(_,index)=>({operation:'ADD',clientRef:`item-${index}`,asset:{...asset(`Boy ${index}`),assetKind:'HUMAN_CHARACTER'}}));
+  const preview=await s.previewAssets({...scope,changes});await s.applyAssets({...scope,changes,previewHash:preview.previewHash});
+  const semantic={visualIdentitySummary:'Blue-coated boy',silhouette:'small child',primaryPalette:'blue',details:{faceShape:'round',hairColor:'black',bodyBuild:'slim',wardrobeUpper:'blue coat',footwear:'canvas shoes'}};
+  oss.skillResponses=[semantic,semantic,semantic,semantic,semantic,[]];
+  const keys=Array.from({length:6},(_,index)=>`CHAR-${String(index+1).padStart(3,'0')}`);
+  const result=await visual.proposeVisualSpecs({...scope,canonicalKeys:keys});
+  assert.equal(result.candidates.length,5);assert.equal(result.failures.length,1);
+  assert.equal(result.failures[0].canonicalKey,keys[5]);
+  assert.equal(result.failures[0].code,'PILOT_VISUAL_SEMANTIC_ROOT_INVALID');
+  assert.equal((await db('o_v04AssetVisualSpec').count({n:'revision'}).first()).n,0);
+  assert.equal((await db('o_v04AssetPromptBuild').count({n:'canonicalKey'}).first()).n,0);
+  oss.skillResponses=[semantic];
+  const retry=await visual.proposeVisualSpecs({...scope,canonicalKeys:[keys[5]]});
+  assert.equal(retry.candidates.length,1);assert.deepEqual(retry.failures,[]);
+  const missing=await visual.previewVisualSpec({...scope,canonicalKey:keys[5],sourceAssetRevision:retry.candidates[0].sourceAssetRevision,spec:retry.candidates[0].spec});
+  assert.ok(missing.issues.includes('details.hair.silhouette'),'missing creative detail is reviewed rather than invented or rejected as structure');
+  await assert.rejects(visual.applyVisualSpec({...scope,canonicalKey:keys[5],sourceAssetRevision:retry.candidates[0].sourceAssetRevision,spec:retry.candidates[0].spec,previewHash:missing.previewHash}),error=>error.code==='PILOT_VISUAL_INCOMPLETE');
+  assert.equal((await db('o_v04AssetVisualSpec').count({n:'revision'}).first()).n,0);
+});
+
 test('OPT-027A future library binding pins version without allocating a global identity or changing project key', async t => {
   const {db,oss,cache,service:s}=await fixture(t);
   const visual=loadSource(path.join(root,'src/v04/visualSpec.ts'),db,cache,oss);

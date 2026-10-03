@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AssetKind } from "./assetWorkflow";
+import { normalizeVisualSemantic, visualDetailTemplates, visualQualityWarnings, type VisualWarning } from "./visualSemanticNormalizer";
 
 const line = z.string().max(600);
 const lines = z.array(line).max(30);
@@ -57,130 +58,24 @@ export const visualSpecSchema = z.discriminatedUnion("assetKind", [
 ]);
 export type VisualSpec = z.infer<typeof visualSpecSchema>;
 
-// The provider supplies visual meaning, never database identity or canonical enums.
-export const visualSemanticDto = z.object({
-  visualIdentitySummary: line.optional(), silhouette: line.optional(), scale: line.optional(), proportion: line.optional(),
-  primaryPalette: lines.optional(), secondaryPalette: lines.optional(), materials: lines.optional(),
-  surfaceLanguage: line.optional(), distinctiveFeatures: lines.optional(), continuityNotes: lines.optional(),
-  identityAnchors: lines.optional(), mustPreserve: lines.optional(), forbiddenChanges: lines.optional(),
-  embeddedElements: z.array(z.object({ name: line, visualDescription: line.optional(), placement: line.optional(),
-    continuityImportance: z.enum(["LOW", "MEDIUM", "HIGH"]).optional(), promotionRecommendation: z.enum(["LOW", "MEDIUM", "HIGH"]).optional() }).passthrough()).max(30).optional(),
-  details: z.record(z.string(), z.unknown()).optional(),
-}).passthrough();
-
-function fillShape(example: unknown, incoming: unknown): unknown {
-  if (Array.isArray(example)) return Array.isArray(incoming) ? incoming : example;
-  if (example && typeof example === "object") {
-    const source = incoming && typeof incoming === "object" && !Array.isArray(incoming) ? incoming as Record<string, unknown> : {};
-    return Object.fromEntries(Object.entries(example).map(([key, value]) => [key, fillShape(value, source[key])]));
-  }
-  return typeof incoming === typeof example ? incoming : example;
-}
-
-const detailDefaults: Record<AssetKind, unknown> = {
-  HUMAN_CHARACTER: { ageRange: "", genderPresentation: "", face: { faceShape: "", facialFeatures: "", skinTone: "", eyeLanguage: "" }, hair: { color: "", length: "", silhouette: "", styling: "" }, body: { build: "", heightProportion: "", ageProportion: "" }, wardrobe: { upper: "", lower: "", outer: "", material: "", palette: "" }, footwear: "", defaultExpression: "", expressionRange: [] },
-  CREATURE: { speciesOrForm: "", bodyStructure: "", anatomy: "", relativeScale: "", surface: "", skinFurFeatherLanguage: "", eyes: "", movementLanguage: "" },
-  VEHICLE: { vehicleType: "", overallSilhouette: "", relativeScale: "", mainStructure: "", secondaryStructure: "", surfaceTreatment: "", propulsion: "", windows: "", openings: "" },
-  PROP: { objectType: "", structure: "", use: "" },
-  ENVIRONMENT: { spaceType: "", geography: "", layout: "", scale: "", foreground: "", midground: "", background: "", architectureOrNaturalForms: [], timeOfDay: "", weather: "", atmosphere: "", lighting: "", recurringAnchors: [], emptyEnvironmentPolicy: "EMPTY_CANONICAL_REFERENCE" },
-  MATERIAL_FX: { baseColor: "", emissionColor: "", particleLanguage: "", edgeLanguage: "", density: "", transparency: "", states: [{ key: "MIST", appearance: "" }, { key: "PARTICLE", appearance: "" }, { key: "SILHOUETTE", appearance: "" }, { key: "SOLID", appearance: "" }], transitionRules: [], interactionRules: [], manifestationRules: [] },
-  CELESTIAL: { form: "", phase: "", surfaceOrGlow: "", halo: "", relativeScale: "", palette: [], compositionRole: "" },
-  BRAND_MARK: { referenceDerived: true, aiRedrawAllowed: false, referenceAttachmentIds: [], referenceConstraints: [], observedReferenceNotes: [] },
-  UI_REFERENCE: { referenceDerived: true, aiRedrawAllowed: false, referenceAttachmentIds: [], referenceConstraints: [], observedReferenceNotes: [] },
-  OTHER: { objectType: "", structure: "", use: "" },
-};
-
-const materialStateOrder = ["MIST", "PARTICLE", "SILHOUETTE", "SOLID"] as const;
-type MaterialState = typeof materialStateOrder[number];
-const materialStateAliases: Record<string, MaterialState> = {
-  MIST: "MIST", FOG: "MIST", VAPOR: "MIST", VAPOUR: "MIST", 雾: "MIST", 雾态: "MIST",
-  PARTICLE: "PARTICLE", PARTICLES: "PARTICLE", CONDENSATION: "PARTICLE", 颗粒: "PARTICLE", 粒子: "PARTICLE", 凝聚: "PARTICLE",
-  SILHOUETTE: "SILHOUETTE", CONTOUR: "SILHOUETTE", OUTLINE: "SILHOUETTE", EMERGING_FORM: "SILHOUETTE", 轮廓: "SILHOUETTE", 成形轮廓: "SILHOUETTE",
-  SOLID: "SOLID", SOLID_FORM: "SOLID", MANIFESTED: "SOLID", ENTITY: "SOLID", FINAL_FORM: "SOLID", 实体: "SOLID", 实体态: "SOLID",
-};
-
-function materialStateKey(value: unknown): MaterialState | null {
-  if (typeof value !== "string") return null;
-  return materialStateAliases[value.trim().toUpperCase().replace(/[\s-]+/g, "_")] ?? null;
-}
-
-function materialStateFromAppearance(appearance: string): MaterialState | null {
-  const cues: [MaterialState, RegExp][] = [
-    ["MIST", /\b(mist|fog|vapor|vapour)\b|雾/iu],
-    ["PARTICLE", /\b(particles?|grains?|condensation)\b|颗粒|粒子|凝聚/iu],
-    ["SILHOUETTE", /\b(silhouette|contour|outline)\b|轮廓/iu],
-    ["SOLID", /\b(solid|manifested|entity|final form)\b|实体/iu],
-  ];
-  const matched = cues.filter(([, pattern]) => pattern.test(appearance));
-  return matched.length === 1 ? matched[0][0] : null;
-}
-
-function compileMaterialFxDetails(asset: { name: string; description: string }, semantic: z.infer<typeof visualSemanticDto>) {
-  const incoming = semantic.details ?? {};
-  const details = fillShape(detailDefaults.MATERIAL_FX, incoming) as Record<string, unknown>;
-  const rawStates = incoming.states;
-  const states = Array.isArray(rawStates) ? rawStates : rawStates && typeof rawStates === "object"
-    ? Object.entries(rawStates).map(([key, value]) => typeof value === "string" ? { key, appearance: value } : { key, ...(value && typeof value === "object" ? value : {}) })
-    : [];
-  const keyed = new Map<MaterialState, string>();
-  const unkeyed: string[] = [];
-  for (const raw of states) {
-    const row: Record<string, unknown> = raw && typeof raw === "object" ? raw as Record<string, unknown> : { appearance: raw };
-    const appearance = [row.appearance, row.description].find(value => typeof value === "string" && value.trim()) as string | undefined;
-    if (!appearance) continue;
-    const label = row.key ?? row.name ?? row.state ?? row.phase ?? row.label;
-    const key = materialStateKey(label);
-    if (key && !keyed.has(key)) keyed.set(key, appearance);
-    else if (label == null) {
-      const inferred = materialStateFromAppearance(appearance);
-      if (inferred && !keyed.has(inferred)) keyed.set(inferred, appearance);
-      else if (!inferred) unkeyed.push(appearance);
-    }
-  }
-  const identity = [asset.name, asset.description, semantic.visualIdentitySummary].filter(value => typeof value === "string" && value.trim()).join(" — ").slice(0, 320);
-  const color = [details.baseColor, details.emissionColor, ...(semantic.primaryPalette ?? [])].filter(value => typeof value === "string" && value.trim()).join(", ").slice(0, 120);
-  const cues = `${identity}${color ? `; color and glow: ${color}` : ""}`;
-  const fallback: Record<MaterialState, string> = {
-    MIST: `Diffuse mist phase of ${cues}`,
-    PARTICLE: `Condensed particle phase of ${cues}; ${details.particleLanguage || "visible particles"}`,
-    SILHOUETTE: `Particles gather into a recognizable silhouette of ${cues}; ${details.edgeLanguage || "continuous contour"}`,
-    SOLID: `Coherent solid manifestation of ${cues}`,
-  };
-  details.states = materialStateOrder.map(key => ({ key, appearance: keyed.get(key) ?? unkeyed.shift() ?? fallback[key].slice(0, 600) }));
-  const rules: Record<string, string> = {
-    transitionRules: "Preserve one material identity and palette through MIST → PARTICLE → SILHOUETTE → SOLID.",
-    interactionRules: "Interactions preserve the same material identity and confirmed visual cues.",
-    manifestationRules: "Manifestation follows MIST → PARTICLE → SILHOUETTE → SOLID without introducing a new identity.",
-  };
-  for (const [field, rule] of Object.entries(rules)) if (Array.isArray(details[field]) && details[field].length === 0) details[field] = [rule];
-  return details;
-}
-
 export function visualDetailTemplate(kind: AssetKind): unknown {
-  return JSON.parse(JSON.stringify(detailDefaults[kind]));
+  return JSON.parse(JSON.stringify(visualDetailTemplates[kind]));
+}
+
+export function compileVisualSemanticWithDiagnostics(asset: { assetKind: AssetKind; name: string; description: string; identityAnchors: string[]; mustPreserve: string[]; forbiddenChanges: string[] }, raw: unknown, confirmedReferenceIds: string[] = [], observedReferenceNotes: { attachmentId: string; summary: string; uncertainty: string[] }[] = []): { spec: VisualSpec; normalizationWarnings: VisualWarning[]; qualityWarnings: VisualWarning[] } {
+  const referenceOnly = asset.assetKind === "BRAND_MARK" || asset.assetKind === "UI_REFERENCE";
+  const normalized = referenceOnly ? null : normalizeVisualSemantic(raw, asset);
+  const common = normalized?.common ?? { visualIdentitySummary: asset.description.slice(0, 600) || asset.name.slice(0, 600),
+    silhouette: "", scale: "", proportion: "", primaryPalette: [], secondaryPalette: [], materials: [], surfaceLanguage: "",
+    distinctiveFeatures: [], continuityNotes: [], identityAnchors: asset.identityAnchors, mustPreserve: asset.mustPreserve,
+    forbiddenChanges: asset.forbiddenChanges, embeddedElements: [] };
+  const details = referenceOnly ? { referenceDerived: true, aiRedrawAllowed: false,
+    referenceAttachmentIds: confirmedReferenceIds, referenceConstraints: [...asset.mustPreserve, ...asset.forbiddenChanges], observedReferenceNotes }
+    : normalized!.details;
+  const spec = visualSpecSchema.parse({ assetKind: asset.assetKind, ...common, details });
+  return { spec, normalizationWarnings: normalized?.warnings ?? [], qualityWarnings: visualQualityWarnings(spec) };
 }
 
 export function compileVisualSemantic(asset: { assetKind: AssetKind; name: string; description: string; identityAnchors: string[]; mustPreserve: string[]; forbiddenChanges: string[] }, raw: unknown, confirmedReferenceIds: string[] = [], observedReferenceNotes: { attachmentId: string; summary: string; uncertainty: string[] }[] = []): VisualSpec {
-  const semantic = visualSemanticDto.parse(raw);
-  const referenceOnly = asset.assetKind === "BRAND_MARK" || asset.assetKind === "UI_REFERENCE";
-  const details = referenceOnly ? { referenceDerived: true, aiRedrawAllowed: false,
-    referenceAttachmentIds: confirmedReferenceIds, referenceConstraints: [...asset.mustPreserve, ...asset.forbiddenChanges], observedReferenceNotes }
-    : asset.assetKind === "MATERIAL_FX" ? compileMaterialFxDetails(asset, semantic)
-    : fillShape(detailDefaults[asset.assetKind], semantic.details);
-  const elements = (semantic.embeddedElements ?? []).map((element, index) => ({
-    embeddedElementId: `embedded-${index + 1}`, name: element.name, visualDescription: element.visualDescription ?? "",
-    placement: element.placement ?? "", continuityImportance: element.continuityImportance ?? "LOW",
-    promotionRecommendation: element.promotionRecommendation ?? "LOW", suggestedCategory: null, suggestedAssetKind: null,
-  }));
-  return visualSpecSchema.parse({ assetKind: asset.assetKind,
-    visualIdentitySummary: semantic.visualIdentitySummary || asset.description || asset.name,
-    silhouette: semantic.silhouette ?? "", scale: semantic.scale ?? "", proportion: semantic.proportion ?? "",
-    primaryPalette: semantic.primaryPalette ?? [], secondaryPalette: semantic.secondaryPalette ?? [],
-    materials: semantic.materials ?? [], surfaceLanguage: semantic.surfaceLanguage ?? "",
-    distinctiveFeatures: semantic.distinctiveFeatures ?? [], continuityNotes: semantic.continuityNotes ?? [],
-    identityAnchors: semantic.identityAnchors ?? asset.identityAnchors,
-    mustPreserve: semantic.mustPreserve ?? asset.mustPreserve,
-    forbiddenChanges: semantic.forbiddenChanges ?? asset.forbiddenChanges,
-    embeddedElements: elements, details,
-  });
+  return compileVisualSemanticWithDiagnostics(asset, raw, confirmedReferenceIds, observedReferenceNotes).spec;
 }

@@ -7,7 +7,8 @@ import { db } from "@/utils/db";
 import { requireModel } from "@/services/modelPreset";
 import { PilotError } from "./service";
 import { reviewPlanFor, type AssetKind } from "./assetWorkflow";
-import { compileVisualSemantic, visualDetailTemplate, visualSpecSchema, type VisualSpec } from "./visualSpecContract";
+import { compileVisualSemanticWithDiagnostics, visualDetailTemplate, visualSpecSchema, type VisualSpec } from "./visualSpecContract";
+import { VISUAL_NORMALIZER_VERSION, VisualSemanticRootError } from "./visualSemanticNormalizer";
 import { compilePromptIR, compilerVersionForIntent, generationIntents, intentFromReviewPlan, renderGenericPrompt } from "./promptCompiler";
 
 const q = db as Knex;
@@ -111,49 +112,75 @@ function completenessIssues(spec: VisualSpec): string[] {
 // call and rechecked by Preview/Apply; it never becomes truth on its own.
 export async function proposeVisualSpecs(input: unknown) {
   const data = proposalRequest.parse(input);
+  const keys = [...new Set(data.canonicalKeys)];
   const captured = await q.transaction(async trx => {
     const unit = await trx("o_script").where({ id: data.scriptId, projectId: data.projectId }).first();
     if (!unit) throw new PilotError("PILOT_VISUAL_SCOPE_INVALID", "制作单元不存在", 404);
-    const results = [];
-    for (const canonicalKey of [...new Set(data.canonicalKeys)]) results.push({ canonicalKey, ...await current(trx, { ...data, canonicalKey }, true) });
+    const results: { canonicalKey: string; captured?: Awaited<ReturnType<typeof current>>; error?: PilotError }[] = [];
+    for (const canonicalKey of keys) {
+      try { results.push({ canonicalKey, captured: await current(trx, { ...data, canonicalKey }, true) }); }
+      catch (error) { if (!(error instanceof PilotError)) throw error; results.push({ canonicalKey, error }); }
+    }
     return results;
   });
-  const candidates = [];
+  const candidates = [], failures: { canonicalKey: string; name: string; code: string; message: string }[] = [];
   for (const entry of captured) {
-    const asset = identity(entry.asset, kindOf(entry.asset));
-    if (["BRAND_MARK", "UI_REFERENCE"].includes(asset.assetKind) && !entry.refs.length)
-      throw new PilotError("PILOT_VISUAL_REAL_REFERENCE_REQUIRED", "品牌或界面需要已确认的真实参考", 422);
-    let semantic: unknown = {};
-    if (!referenceOnly(entry.asset)) {
-      let model: Awaited<ReturnType<typeof requireModel>>;
-      try { model = await requireModel(data.projectId, "text"); }
-      catch { throw new PilotError("PILOT_VISUAL_MODEL_FAILED", "文本模型不可用，请检查配置", 502); }
-      try {
-        const system = `你为一个已确认的项目资产提出视觉规格草案，只输出一个 JSON 对象。不要写数据库字段、资产 ID 或图片生成指令。请描述稳定外观：visualIdentitySummary, silhouette, scale, proportion, primaryPalette[], secondaryPalette[], materials[], surfaceLanguage, distinctiveFeatures[], continuityNotes[], identityAnchors[], mustPreserve[], forbiddenChanges[], details（当前类型的外观细节）, embeddedElements[]。字段可省略，服务器会补确定性默认值。已确认身份和真实素材约束不可被推翻；挂件只作为 embeddedElements，不自动创建资产。不要重画真实 Logo/UI。`;
-        const result = await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).invoke({ system,
-          messages: [{ role: "user", content: [{ type: "text", text: JSON.stringify({ asset: {
-            canonicalKey: entry.canonicalKey, name: asset.name, assetKind: asset.assetKind, description: asset.description,
-            identityAnchors: asset.identityAnchors, mustPreserve: asset.mustPreserve, forbiddenChanges: asset.forbiddenChanges,
-            sharedVisualSystemKey: asset.sharedVisualSystemKey, relatedKeys: array(asset.relatedKeys),
-            optionalDetailHints: visualDetailTemplate(asset.assetKind),
-          } }) }] }], output: Output.json() });
-        semantic = result.output;
-      } catch (error) {
-        console.error("[V04 VisualSpec][ProposalFailure]", { projectId: data.projectId, canonicalKey: entry.canonicalKey,
-          errorName: error instanceof Error ? error.name : "Error" });
-        throw new PilotError("PILOT_VISUAL_MODEL_FAILED", "视觉规格模型调用失败，请稍后重试", 502);
+    const asset = entry.captured ? identity(entry.captured.asset, kindOf(entry.captured.asset)) : null;
+    try {
+      if (entry.error) throw entry.error;
+      if (!entry.captured || !asset) throw new PilotError("PILOT_VISUAL_SCOPE_INVALID", "有效资产不存在", 404);
+      if (["BRAND_MARK", "UI_REFERENCE"].includes(asset.assetKind) && !entry.captured.refs.length)
+        throw new PilotError("PILOT_VISUAL_REAL_REFERENCE_REQUIRED", "品牌或界面需要已确认的真实参考", 422);
+      let semantic: unknown = {};
+      if (!referenceOnly(entry.captured.asset)) {
+        let model: Awaited<ReturnType<typeof requireModel>>;
+        try { model = await requireModel(data.projectId, "text"); }
+        catch { throw new PilotError("PILOT_VISUAL_MODEL_FAILED", "文本模型不可用，请检查配置", 502); }
+        try {
+          const system = `你为一个已确认的项目资产提出视觉规格草案，只输出一个 JSON 对象。不要写数据库字段、资产 ID 或图片生成指令。请描述稳定外观：visualIdentitySummary, silhouette, scale, proportion, primaryPalette, secondaryPalette, materials, surfaceLanguage, distinctiveFeatures, continuityNotes, identityAnchors, mustPreserve, forbiddenChanges, details（当前类型的外观细节）, embeddedElements。字段可省略，数组可使用单项文字，服务器会规范化结构和枚举；不要编造缺失的创意细节。已确认身份和真实素材约束不可被推翻；挂件只作为 embeddedElements，不自动创建资产。不要重画真实 Logo/UI。`;
+          const result = await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).invoke({ system,
+            messages: [{ role: "user", content: [{ type: "text", text: JSON.stringify({ asset: {
+              canonicalKey: entry.canonicalKey, name: asset.name, assetKind: asset.assetKind, description: asset.description,
+              identityAnchors: asset.identityAnchors, mustPreserve: asset.mustPreserve, forbiddenChanges: asset.forbiddenChanges,
+              sharedVisualSystemKey: asset.sharedVisualSystemKey, relatedKeys: array(asset.relatedKeys),
+              optionalDetailHints: visualDetailTemplate(asset.assetKind),
+            } }) }] }], output: Output.json() });
+          semantic = result.output;
+        } catch (error) {
+          console.error("[V04 VisualSpec][ProposalFailure]", { projectId: data.projectId, canonicalKey: entry.canonicalKey,
+            assetKind: asset.assetKind, normalizerVersion: VISUAL_NORMALIZER_VERSION, code: "MODEL_FAILED",
+            errorName: error instanceof Error ? error.name : "Error" });
+          throw new PilotError("PILOT_VISUAL_MODEL_FAILED", "视觉规格模型调用失败，请稍后重试", 502);
+        }
       }
+      let compiled: ReturnType<typeof compileVisualSemanticWithDiagnostics>;
+      try {
+        compiled = compileVisualSemanticWithDiagnostics(asset, semantic, entry.captured.refs.map(ref => ref.attachmentId), entry.captured.observedReferenceNotes);
+        validateSpec(entry.captured.asset, entry.captured.refs, compiled.spec);
+      } catch (error) {
+        if (error instanceof PilotError) throw error;
+        const code = error instanceof VisualSemanticRootError ? "SEMANTIC_ROOT_INVALID" : "CANONICAL_COMPILER_FAILED";
+        const paths = error instanceof z.ZodError ? error.issues.map(issue => issue.path.join(".")).slice(0, 20)
+          : error instanceof VisualSemanticRootError ? [error.path] : [];
+        console.error("[V04 VisualSpec][NormalizationFailure]", { projectId: data.projectId, canonicalKey: entry.canonicalKey,
+          assetKind: asset.assetKind, normalizerVersion: VISUAL_NORMALIZER_VERSION, code, paths });
+        throw error instanceof VisualSemanticRootError
+          ? new PilotError("PILOT_VISUAL_SEMANTIC_ROOT_INVALID", "视觉语义根结构无效，请单项重试", 422)
+          : new PilotError("PILOT_VISUAL_COMPILER_FAILED", "视觉规格编译失败，请稍后重试", 500);
+      }
+      if (compiled.normalizationWarnings.length) console.info("[V04 VisualSpec][NormalizedWithWarnings]", {
+        canonicalKey: entry.canonicalKey, assetKind: asset.assetKind, normalizerVersion: VISUAL_NORMALIZER_VERSION,
+        code: "SEMANTIC_NORMALIZED_WITH_WARNINGS", paths: compiled.normalizationWarnings.map(warning => warning.path).slice(0, 30) });
+      candidates.push({ canonicalKey: entry.canonicalKey, sourceAssetRevision: entry.captured.asset.revision,
+        spec: compiled.spec, previousRevision: entry.captured.previous?.revision ?? null,
+        normalizationWarnings: compiled.normalizationWarnings, qualityWarnings: compiled.qualityWarnings, applied: false });
+    } catch (error) {
+      const safe = error instanceof PilotError ? error : new PilotError("PILOT_VISUAL_COMPILER_FAILED", "视觉规格编译失败，请稍后重试", 500);
+      if (keys.length === 1) throw safe;
+      failures.push({ canonicalKey: entry.canonicalKey, name: asset?.name ?? entry.canonicalKey, code: safe.code, message: safe.message });
     }
-    let spec: VisualSpec;
-    try { spec = compileVisualSemantic(asset, semantic, entry.refs.map(ref => ref.attachmentId), entry.observedReferenceNotes); validateSpec(entry.asset, entry.refs, spec); }
-    catch (error) {
-      if (error instanceof PilotError) throw error;
-      throw new PilotError("PILOT_VISUAL_SCHEMA_FAILED", "视觉规格草案结构不完整，请人工检查或重试", 422);
-    }
-    candidates.push({ canonicalKey: entry.canonicalKey, sourceAssetRevision: entry.asset.revision,
-      spec, previousRevision: entry.previous?.revision ?? null, applied: false });
   }
-  return { candidates, applied: false };
+  return { candidates, failures, applied: false };
 }
 
 async function plan(trx: Knex.Transaction, data: z.infer<typeof previewRequest>) {
