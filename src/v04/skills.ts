@@ -7,6 +7,8 @@ import { PilotError } from "./service";
 import { buildProjectAgentContext, renderProjectAgentSystem } from "./agentContext";
 import { safeStructuredStatus, structuredFailure, structuredRepairContext, structuredValidationSummary } from "./structuredOutputError";
 import { assetExtractionModelSchema, normalizeAssetExtraction, semanticLabelDiagnostics } from "./assetExtractionOutput";
+import { compileAssetExtractionSemantic } from "./assetExtractionSemantic";
+import { compileAssetExtractionRelations } from "./assetExtractionRelations";
 
 const id = z.number().int().positive();
 const request = z.object({ projectId: id, scriptId: id, method: z.enum(["ASSET_EXTRACTION", "ASSET_PROMPTS", "STORYBOARD_BATCH"]) }).strict();
@@ -16,7 +18,7 @@ const outputSchemas = {
   STORYBOARD_BATCH: z.object({ shots: z.array(z.object({ duration: z.number().positive().max(600), prompt: z.string().min(1).max(20000), videoDesc: z.string().max(20000), productionMode: z.enum(["REAL_ASSET_DIRECT", "AI_TEXT_TO_IMAGE", "REAL_AI_COMPOSITE"]), primaryKey: z.string().nullable(), canonicalKeys: z.array(z.string()).max(50) }).strict()).min(1).max(100) }).strict(),
 };
 const instructions = {
-  ASSET_EXTRACTION: "方法 v04.asset-extraction.v2：以已确认 Creative Truth（尤其 Treatment）为来源，按五个逻辑 pass 逐项检查：1 Entity 人物/生物/载具/道具/品牌；2 Environment 主/子/重复空间、环境锚点和时间氛围；3 Visual System 持续 FX、材质、能量、光与色彩；4 Continuity Relationship 共享视觉系统、变体、canonical 与 shot-local；5 Coverage Audit 列出 Treatment 每个重要视觉元素，包括尚未覆盖者，并给出分类。Treatment 非空时 coverage 不能是空数组。不要只提取主体，也不要凭空补 Treatment 没有的项目专属元素。核心人物、生物、载具、道具 importance=CORE，场景/FX/品牌不默认三视图。已有 canonical identity 不得重复创建；已存在的 Logo 只给 mergeSuggestions/reference usage。新候选彼此关联只用 relatedCandidateRefs/sharedVisualSystemRef；已存在身份只用 relatedExistingKeys/sharedVisualSystemKey/ownerKey/variantOf。真实 UI/Logo/产品文字必须 REAL_REQUIRED，不能 AI 重画。coverage 每项用 candidateRefs 或 existingCanonicalKeys 指明覆盖；未覆盖项留空并说明，shot-local/构图母题可分类记录而不伪造资产。prompt 可为空，详细 Prompt 留给 ASSET_PROMPTS。",
+  ASSET_EXTRACTION: "方法 v04.asset-extraction.v2：从已确认 Treatment 做五轮思考：持续视觉实体；空间环境；共享视觉系统/材质；实体关系；逐个重要视觉节拍的覆盖审计。只描述人的创意判断，不翻译数据库 schema。visualElements 包含所有重要的角色、生物、载具、道具、环境、天体、共享视觉系统及品牌/UI；不要把纯构图目标误建成资产。不同的持续空间/时间环境应分别记录，不能把开场场景、受限内部空间与终场天空随意合并。type 从 HUMAN_CHARACTER、CREATURE、VEHICLE、PROP、ENVIRONMENT、CELESTIAL、MATERIAL_FX、BRAND_MARK、UI_REFERENCE 中选一个；type 表示实体本体，不是叙事用途：有生命的坐骑是 CREATURE，即使它承担交通作用，也不是 VEHICLE。relatedNames 只记录 Treatment 明示的持续身份/形态关系，不要把同框出现的人、品牌、环境全部互连；sharedVisualSystemName 只能使用本次元素名称。不要猜测新资产未来的 canonical key。对已有 Asset Bible 身份（尤其已存在的品牌标识）使用真实 existingCanonicalKey 提合并，不建立第二身份。真实 Logo/UI 不能 AI 重画。coverage 为每个重要画面元素或构图目标列 label、type、所关联 elementNames 或 existingCanonicalKeys；未覆盖项保留空关联和说明，不伪造覆盖。不要输出 category、assetKind、sourcePolicy、classification、数字索引或数据库 ID，服务器会编译这些字段。",
   ASSET_PROMPTS: "方法 v04.asset-prompt.v1：为每个已有 Canonical Asset 生成独立且一致的素材 Prompt 草案。维持 identityAnchors 和 mustPreserve，遵守 forbiddenChanges。真实 UI、Logo、文字不能由 AI 重画。只返回现有 canonicalKey。",
   STORYBOARD_BATCH: "方法 v04.storyboard-batch.v1：根据已确认 Creative 和 Asset Bible 提出约目标时长的分镜方案。引用只用给定 canonicalKey。真实 UI/Logo 必须 REAL_ASSET_DIRECT 或 REAL_AI_COMPOSITE，不要用 AI_TEXT_TO_IMAGE 伪造真实界面。此结果只是提案，不是生产数据库。",
 } as const;
@@ -90,21 +92,34 @@ export async function previewSkill(input: unknown) {
     throw new PilotError("PILOT_SKILL_MODEL_FAILED", "文本模型调用失败，请检查供应商配置", 502);
   }
   const schema = outputSchemas[data.method];
-  const skeleton = data.method === "ASSET_EXTRACTION" ? { candidates: [{ name: "", category: "CHAR", assetKind: "HUMAN_CHARACTER", importance: "CORE", description: "", sourcePolicy: "AI_ALLOWED", extractionPass: "ENTITY" }], coverage: [{ label: "", coverageType: "PERSON", classification: "CANONICAL_ASSET", candidateRefs: ["candidate name"] }] } :
+  const skeleton = data.method === "ASSET_EXTRACTION" ? { visualElements: [{ name: "主体", type: "HUMAN_CHARACTER", description: "简短视觉描述" }], coverage: [{ label: "主体首次出现", type: "HUMAN_CHARACTER", elementNames: ["主体"] }] } :
     data.method === "ASSET_PROMPTS" ? { prompts: [{ canonicalKey: "", prompt: "", reason: "" }] } : { shots: [{ duration: 3, prompt: "", videoDesc: "", productionMode: "AI_TEXT_TO_IMAGE", primaryKey: null, canonicalKeys: [] }] };
-  const system = `${renderProjectAgentSystem(context)}\n${instructions[data.method]}\n${data.method === "ASSET_EXTRACTION" ? "候选关系、合并建议和 coverage 用候选名称或唯一 localRef（relatedCandidateRefs / sharedVisualSystemRef / candidateRef / candidateRefs），不要维护数字下标。已有身份用真实 canonicalKey。只有真实存在的关系才输出可选字段；identityAnchors、mustPreserve、forbiddenChanges、prompt、ownerKey、variantOf 等无内容时可省略，服务器会补安全默认值。Coverage 必须如实列出未覆盖项。" : ""}\nReturn one valid JSON object only. Use this JSON structure: ${JSON.stringify(skeleton)}. No markdown or extra fields. Do not claim changes were applied.`;
+  const system = `${renderProjectAgentSystem(context)}\n${instructions[data.method]}\n${data.method === "ASSET_EXTRACTION" ? "JSON 只含 visualElements 与 coverage 两个数组。每个元素给 name/type/description；可选 core、realSourceRequired、existingCanonicalKey、relatedNames、sharedVisualSystemName。不要输出 ownerKey、variantOf、relatedExistingKeys、sharedVisualSystemKey 等数据库关系字段。每个 coverage 给 label/type/elementNames/existingCanonicalKeys/note；没有关联时给空数组和未覆盖原因。保持名称引用完全一致，不输出候选数字下标。" : ""}\nReturn one valid JSON object only. Use this JSON structure: ${JSON.stringify(skeleton)}. No markdown or extra fields. Do not claim changes were applied.`;
   const user = JSON.stringify({ method: data.method });
   let output: any;
   let repairContext = "";
+  let repairAttempts = 0;
+  let semanticExtraction = false;
   for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) repairAttempts = 1;
     let candidate: unknown;
     try {
       // One pinned provider/model configuration for both structured attempts.
       const messages = [{ role: "user" as const, content: user }];
-      if (attempt) messages.push({ role: "user", content: `The previous structured result failed validation. Repair format and field types only; do not reconsider creative decisions or add new assets. Return one complete JSON object matching ${JSON.stringify(skeleton)}. Previous result or SDK repair context: ${repairContext}` });
-      const result = await session.invokeObject({ system, messages, schema: schema as any });
-      candidate = result.object;
-      output = data.method === "ASSET_EXTRACTION" ? normalizeAssetExtraction(candidate) : schema.parse(candidate);
+      if (attempt) messages.push({ role: "user", content: `The previous JSON result failed local validation. Repair references and format only; do not reconsider creative decisions or add new assets. Return one complete JSON object matching ${JSON.stringify(skeleton)}. Previous result or SDK repair context: ${repairContext}` });
+      if (data.method === "ASSET_EXTRACTION") {
+        // DeepSeek's chat JSON mode guarantees JSON syntax, not our full schema.
+        // Do not hand the canonical Proposal schema to the provider/SDK.
+        const result = await session.invoke({ system, messages, output: Output.json() });
+        candidate = result.output;
+        semanticExtraction = !!candidate && typeof candidate === "object" && "visualElements" in candidate;
+        output = semanticExtraction ? compileAssetExtractionSemantic(candidate, context.assetBibleIndex)
+          : normalizeAssetExtraction(candidate); // Accepted legacy DTOs remain locally validated.
+      } else {
+        const result = await session.invokeObject({ system, messages, schema: schema as any });
+        candidate = result.object;
+        output = schema.parse(candidate);
+      }
       if (data.method === "ASSET_EXTRACTION" && context.creative.treatment.trim() && !output.coverage.length)
         throw new z.ZodError([{ code: "custom", path: ["coverage"], message: "已确认 Treatment 必须有覆盖审计" }]);
       if (data.method === "ASSET_EXTRACTION" && context.creative.treatment.trim()) {
@@ -123,21 +138,54 @@ export async function previewSkill(input: unknown) {
       repairContext = structuredRepairContext(error, candidate);
     }
   }
+  if (data.method === "ASSET_EXTRACTION" && semanticExtraction && context.creative.treatment.trim() && output.candidates.length > 1) {
+    // A second small model call decides only relationships between the already
+    // compiled exact names. It cannot create entities, coverage or project truth.
+    const relationSystem = "根据 Treatment 判断已列视觉元素之间的持续身份/形态关系。只返回 JSON：sharedSystems=[{systemName,memberNames}] 与 continuityGroups=[{memberNames}]。systemName 必须是 MATERIAL_FX 元素，memberNames 必须是同一物质/视觉系统的连续形态；continuityGroups 只列 Treatment 明示为同一身份的不同形态。不要把仅同框出现的元素连起来。必须使用给定的原样名称，不发明 key，不增删视觉元素。";
+    const relationInput = JSON.stringify({ treatment: context.creative.treatment,
+      visualElements: output.candidates.map((item: any) => ({ name: item.name, type: item.assetKind })) });
+    let relationRepair = "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let relationCandidate: unknown;
+      try {
+        const messages = [{ role: "user" as const, content: relationInput }];
+        if (attempt) { repairAttempts++; messages.push({ role: "user", content: `Repair only JSON shape and exact element-name references. Do not change the creative interpretation. ${relationRepair}` }); }
+        const result = await session.invoke({ system: relationSystem, messages, output: Output.json() });
+        relationCandidate = result.output;
+        output = compileAssetExtractionRelations(output, relationCandidate);
+        break;
+      } catch (error) {
+        if (!structuredFailure(error)) {
+          logSkillFailure(data, correlationId, "PILOT_SKILL_MODEL_FAILED", error, session.modelReference, attempt);
+          throw new PilotError("PILOT_SKILL_MODEL_FAILED", "文本模型调用失败，请检查供应商配置", 502);
+        }
+        logSkillFailure(data, correlationId, "PILOT_SKILL_SCHEMA_FAILED", error, session.modelReference, attempt);
+        if (attempt) throw new PilotError("PILOT_SKILL_SCHEMA_FAILED", "模型已返回内容，但元素关系不符合要求，请重试", 502);
+        relationRepair = structuredRepairContext(error, relationCandidate);
+      }
+    }
+  }
   try {
     const keys = new Set(context.assetBibleIndex.map(a => a.canonicalKey));
     if (data.method === "ASSET_PROMPTS" && output.prompts.some((p: any) => !keys.has(p.canonicalKey))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "AI 提案引用了不存在的素材身份", 422);
     if (data.method === "STORYBOARD_BATCH" && output.shots.some((s: any) => [...s.canonicalKeys, ...(s.primaryKey ? [s.primaryKey] : [])].some(k => !keys.has(k)))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "AI 分镜引用了不存在的素材身份", 422);
     if (data.method === "ASSET_EXTRACTION") {
-      if (output.mergeSuggestions.some((s: any) => s.candidateIndex >= output.candidates.length || !keys.has(s.existingCanonicalKey))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "AI 合并建议引用无效", 422);
-      if (output.candidates.some((asset: any, index: number) => [asset.ownerKey, asset.variantOf, asset.sharedVisualSystemKey, ...asset.relatedExistingKeys].some(key => key && !keys.has(key)) || asset.relatedCandidateIndexes.some((i: number) => i >= output.candidates.length || i === index) || asset.sharedVisualSystemCandidateIndex !== null && (asset.sharedVisualSystemCandidateIndex >= output.candidates.length || asset.sharedVisualSystemCandidateIndex === index))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "候选关系只能引用当前项目身份或本次有效候选", 422);
+      const referenceError = (reason: string, message: string): never => {
+        console.error("[V04 Skill][ReferenceInvalid]", { method: data.method, projectId: data.projectId, scriptId: data.scriptId, correlationId, reason });
+        throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", message, 422);
+      };
+      if (output.mergeSuggestions.some((s: any) => s.candidateIndex >= output.candidates.length || !keys.has(s.existingCanonicalKey))) referenceError("MERGE_TARGET", "AI 合并建议引用无效");
+      if (output.candidates.some((asset: any) => [asset.ownerKey, asset.variantOf, asset.sharedVisualSystemKey, ...asset.relatedExistingKeys].some(key => key && !keys.has(key)))) referenceError("UNKNOWN_EXISTING_KEY", "候选关系只能引用当前项目身份或本次有效候选");
+      if (output.candidates.some((asset: any, index: number) => asset.relatedCandidateIndexes.some((i: number) => i >= output.candidates.length || i === index))) referenceError("BAD_CANDIDATE_LINK", "候选关系只能引用当前项目身份或本次有效候选");
+      if (output.candidates.some((asset: any, index: number) => asset.sharedVisualSystemCandidateIndex !== null && (asset.sharedVisualSystemCandidateIndex >= output.candidates.length || asset.sharedVisualSystemCandidateIndex === index))) referenceError("BAD_SHARED_SYSTEM_LINK", "候选关系只能引用当前项目身份或本次有效候选");
       if (output.candidates.some((asset: any) => (["BRAND", "UI"].includes(asset.category) && asset.sourcePolicy !== "REAL_REQUIRED") ||
         (asset.sharedVisualSystemCandidateIndex !== null && !["FX", "MATERIAL_FX"].includes(output.candidates[asset.sharedVisualSystemCandidateIndex]?.category) && output.candidates[asset.sharedVisualSystemCandidateIndex]?.assetKind !== "MATERIAL_FX") ||
         (asset.sharedVisualSystemKey && !context.assetBibleIndex.some(existing => existing.canonicalKey === asset.sharedVisualSystemKey && (existing.category === "FX" || existing.assetKind === "MATERIAL_FX")))))
-        throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "真实品牌与界面来源或共享视觉系统关系无效", 422);
-      if (output.coverage.some((item: any) => item.candidateIndexes.some((i: number) => i >= output.candidates.length) || item.existingCanonicalKeys.some((key: string) => !keys.has(key)))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "覆盖清单引用无效", 422);
-      if (output.candidates.some((asset: any, index: number) => context.assetBibleIndex.some(existing => existing.category === asset.category && existing.name.trim().toLocaleLowerCase() === asset.name.trim().toLocaleLowerCase() && !output.mergeSuggestions.some((s: any) => s.candidateIndex === index && s.existingCanonicalKey === existing.canonicalKey)))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "已有素材身份只能提出合并建议，不能作为新候选创建", 422);
+        referenceError("SOURCE_OR_VISUAL_SYSTEM", "真实品牌与界面来源或共享视觉系统关系无效");
+      if (output.coverage.some((item: any) => item.candidateIndexes.some((i: number) => i >= output.candidates.length) || item.existingCanonicalKeys.some((key: string) => !keys.has(key)))) referenceError("COVERAGE_REFERENCE", "覆盖清单引用无效");
+      if (output.candidates.some((asset: any, index: number) => context.assetBibleIndex.some(existing => existing.category === asset.category && existing.name.trim().toLocaleLowerCase() === asset.name.trim().toLocaleLowerCase() && !output.mergeSuggestions.some((s: any) => s.candidateIndex === index && s.existingCanonicalKey === existing.canonicalKey)))) referenceError("DUPLICATE_IDENTITY", "已有素材身份只能提出合并建议，不能作为新候选创建");
     }
-    return { method: data.method, skillId: `v04.${data.method.toLowerCase().replaceAll('_','-')}.${data.method === "ASSET_EXTRACTION" ? "v2" : "v1"}`, output, applied: false, sourceVersion: context.creative.version };
+    return { method: data.method, skillId: `v04.${data.method.toLowerCase().replaceAll('_','-')}.${data.method === "ASSET_EXTRACTION" ? "v2" : "v1"}`, output, applied: false, sourceVersion: context.creative.version, repairAttempts };
   } catch (error) {
     if (error instanceof PilotError) { logSkillFailure(data, correlationId, error.code, error, session.modelReference); throw error; }
     logSkillFailure(data, correlationId, "PILOT_SKILL_INTERNAL_FAILED", error, session.modelReference);

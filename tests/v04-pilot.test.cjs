@@ -27,11 +27,19 @@ function loadSource(file, db, cache = new Map(), oss = null) {
       if (oss.visionFailure) throw oss.visionFailure;
       if (oss.modelError) throw Error('provider call failed');
       return { object: oss.visionResult ?? { summary: 'A dark blue image with a bright logo', dominantColors: ['deep blue'], visibleText: ['DreamStream'], uncertainty: [] } };
+    }, invoke: async input => {
+      oss.modelCalls.push({ model, ...input, method: 'invokeJson' });
+      const next=oss.skillResponses?.shift();
+      if (next instanceof Error) throw next;
+      if (oss.modelError) throw Error('provider call failed');
+      return { output: next ?? oss.proposalOutput };
     } }; }, invoke: async input => {
       oss.modelCalls.push({ model, ...input });
       if (model.startsWith('fake:vision')) throw Error('Vision must use structured output');
       if (oss.textError) throw Error('text provider failed');
-      return { text: 'I can discuss the observed image in this project.', output: oss.proposalOutput };
+      const next=oss.skillResponses?.shift();
+      if (next instanceof Error) throw next;
+      return { text: 'I can discuss the observed image in this project.', output: next ?? oss.proposalOutput };
     } }) } };
     if (name === '@/utils/getPath') return () => path.join(oss.testDir,'v04-conversation');
     if (name === '@/services/modelPreset') { oss.ModelConfigError ??= class ModelConfigError extends Error {}; return { ModelConfigError: oss.ModelConfigError, requireModel: async (_projectId, slot) => { if (slot === 'vision' && !oss.visionModel || slot === 'text' && oss.textModelUnavailable) throw new oss.ModelConfigError('model unavailable'); return slot === 'vision' ? oss.visionModel : 'fake:local'; }, resolveModels: async () => ({ models: { vision: oss.visionModel } }) }; }
@@ -523,7 +531,7 @@ test('OPT-021 structured Skill repair uses one pinned session and never persists
   assert.equal(oss.modelCalls.length,2,'at most one repair');
   assert.equal(oss.modelCalls[0].model,oss.modelCalls[1].model);
   assert.match(oss.modelCalls[1].messages[1].content,/Missing contract fields/);
-  assert.match(oss.modelCalls[1].messages[1].content,/Repair format and field types only/);
+  assert.match(oss.modelCalls[1].messages[1].content,/Repair references and format only/);
   assert.equal((await db('o_v04Asset').count({n:'canonicalKey'}).first()).n,0);
   oss.skillResponses=[{candidates:[{name:'Still missing'}],mergeSuggestions:[]},{candidates:[{name:'Still missing'}],mergeSuggestions:[]}];
   await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_SCHEMA_FAILED' && /结构/.test(e.message));
@@ -562,7 +570,7 @@ test('OPT-024 compact extraction normalizes safe defaults and name refs without 
   assert.equal(result.sourceVersion,2);
   assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),before);
   assert.equal((await db('o_v04AssetCoverage').where(scope)).length,0);
-  assert.match(oss.modelCalls.at(-1).system,/candidateRefs/);
+  assert.match(oss.modelCalls.at(-1).system,/elementNames/);
   assert.doesNotMatch(oss.modelCalls.at(-1).system,/relatedCandidateIndexes\/sharedVisualSystemCandidateIndex/);
   const diagnostics=[];t.mock.method(console,'error',(...args)=>diagnostics.push(args));
   const schemaInvalids=[
@@ -589,6 +597,73 @@ test('OPT-024 compact extraction normalizes safe defaults and name refs without 
     assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),before);
   }
   assert.equal(oss.modelCalls.length,9,'semantic violations do not trigger blind structured retries');
+});
+
+test('V0.4 semantic JSON compiles pilot-scale entities and coverage without model-owned canonical fields', () => {
+  const {compileAssetExtractionSemantic}=loadSource(path.join(root,'src/v04/assetExtractionSemantic.ts'),null);
+  const names=[
+    ['Boy','HUMAN_CHARACTER'],['Dream Matter','MATERIAL_FX'],['Pirate Ship','VEHICLE'],
+    ['Submarine','VEHICLE'],['Pegasus','CREATURE'],['Whale','CREATURE'],
+    ['Island Night','ENVIRONMENT'],['Sea Night','ENVIRONMENT'],['Whale Dream','ENVIRONMENT'],
+    ['Cloud Moon Night','ENVIRONMENT'],['Moon','CELESTIAL'],['Dream Stream Logo','BRAND_MARK'],
+  ];
+  const visualElements=names.map(([name,type])=>({name,type,description:name,
+    ...(name==='Dream Stream Logo'?{existingCanonicalKey:'BRAND-001'}:{}),
+    ...(['Pirate Ship','Submarine','Pegasus'].includes(name)?{sharedVisualSystemName:'Dream Matter',relatedNames:['Dream Matter',name]}:{}),
+  }));
+  const coverage=[...names.map(([name,type])=>({label:name,type,elementNames:[name]})),
+    ...Array.from({length:6},(_,i)=>({label:`Beat ${i+1}`,type:'COMPOSITION_GOAL',elementNames:[],note:'composition only'}))];
+  const existing=[{canonicalKey:'BRAND-001',name:'Dream Stream Logo',category:'BRAND'}];
+  const result=compileAssetExtractionSemantic({visualElements,coverage},existing);
+  assert.equal(result.candidates.length,12);assert.equal(result.coverage.length,18);
+  assert.equal(result.candidates[4].assetKind,'CREATURE','a mount remains a creature by identity');
+  assert.equal(result.candidates[11].sourcePolicy,'REAL_REQUIRED');
+  assert.equal(result.mergeSuggestions[0].existingCanonicalKey,'BRAND-001');
+  assert.equal(result.candidates[2].sharedVisualSystemCandidateIndex,1);
+  assert.ok(!result.candidates[2].relatedCandidateIndexes.includes(2),'redundant self-link is removed');
+  assert.equal(result.coverage[1].classification,'VISUAL_SYSTEM');
+  assert.equal(result.coverage[12].classification,'COMPOSITION_MOTIF');
+  assert.throws(()=>compileAssetExtractionSemantic({visualElements:[{name:'Unknown',type:'MYSTERY',description:''}],coverage:[]},existing),e=>e.issues?.[0]?.path?.join('.')==='visualElements.0.type');
+  assert.throws(()=>compileAssetExtractionSemantic({visualElements:[{name:'Ship',type:'VEHICLE',description:'',sharedVisualSystemName:'Absent'}],coverage:[]},existing),e=>e.issues?.[0]?.path?.join('.')==='visualElements.0.sharedVisualSystemName');
+  assert.throws(()=>compileAssetExtractionSemantic({visualElements:[{name:'Logo',type:'BRAND_MARK',description:'',existingCanonicalKey:'BRAND-OTHER'}],coverage:[]},existing),e=>e.issues?.[0]?.path?.join('.')==='visualElements.0.existingCanonicalKey');
+  assert.throws(()=>compileAssetExtractionSemantic({visualElements:[{name:'Ship',type:'VEHICLE',description:''}],coverage:[{label:'Ship',type:'CREATURE',elementNames:['Ship']}]},existing),e=>e.issues?.[0]?.path?.join('.')==='coverage.0.type');
+  const mixed=compileAssetExtractionSemantic({visualElements:[{name:'Matter',type:'MATERIAL_FX',description:''},{name:'Ship',type:'VEHICLE',description:''}],coverage:[{label:'Matter forms Ship',type:'VEHICLE',elementNames:['Matter','Ship']}]},existing);
+  assert.equal(mixed.coverage.length,2,'shared visual system gets its own audit row even in a mixed beat');
+  assert.equal(mixed.coverage[1].classification,'VISUAL_SYSTEM');
+});
+
+test('V0.4 two-stage extraction pins one session, compiles exact-name relations, and remains zero-write', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Relations pilot',brief:'Shared glowing material',targetDuration:40,aspectRatio:'16:9'},7);
+  const creative={...scope,brief:'Shared glowing material',treatment:'One glowing material becomes a ship, then a submarine, then a winged creature.',script:'',targetDuration:40,expectedVersion:1};
+  const preview=await s.previewCreative(creative);await s.applyCreative({...creative,previewHash:preview.previewHash});
+  const lean={visualElements:[
+    {name:'Glow',type:'MATERIAL_FX',description:'shared material'},
+    {name:'Ship',type:'VEHICLE',description:'first form'},
+    {name:'Submarine',type:'VEHICLE',description:'second form'},
+    {name:'Winged Creature',type:'CREATURE',description:'third form'},
+  ],coverage:['Glow','Ship','Submarine','Winged Creature'].map(name=>({label:name,elementNames:[name]}))};
+  const relations={sharedSystems:[{systemName:'Glow',memberNames:['Ship','Submarine','Winged Creature']}],
+    continuityGroups:[{memberNames:['Ship','Submarine','Winged Creature']}]};
+  const beforeAssets=await db('o_v04Asset').where({projectId:scope.projectId});
+  const beforeCoverage=await db('o_v04AssetCoverage').where(scope);
+  const skills=loadSource(path.join(root,'src/v04/skills.ts'),db,cache,oss);
+  oss.skillResponses=[lean,relations];
+  const result=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
+  assert.equal(result.applied,false);assert.equal(result.repairAttempts,0);
+  assert.equal(result.output.candidates[1].sharedVisualSystemCandidateIndex,0);
+  assert.deepEqual(result.output.candidates[1].relatedCandidateIndexes,[0,2,3]);
+  assert.equal(oss.sessionCount,1);assert.equal(oss.modelCalls.length,2);
+  assert.equal(oss.modelCalls[0].method,'invokeJson');assert.equal(oss.modelCalls[1].method,'invokeJson');
+  assert.match(oss.modelCalls[1].system,/持续身份\/形态关系/);
+  assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),beforeAssets);
+  assert.deepEqual(await db('o_v04AssetCoverage').where(scope),beforeCoverage);
+  oss.skillResponses=[lean,{sharedSystems:[{systemName:'Ship',memberNames:['Submarine']}],continuityGroups:[]},relations];
+  const repaired=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
+  assert.equal(repaired.repairAttempts,1);assert.equal(oss.modelCalls.length,5,'relation repair is bounded to one additional call');
+  oss.skillResponses=[lean,{sharedSystems:[{systemName:'Other',memberNames:['Ship']}],continuityGroups:[]},{sharedSystems:[{systemName:'Other',memberNames:['Ship']}],continuityGroups:[]}];
+  await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_SCHEMA_FAILED');
+  assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),beforeAssets);
 });
 
 test('OPT-024B provider labels accept common English and Chinese aliases; canonical proposal remains strict', () => {
@@ -775,8 +850,8 @@ test('OPT-021 Skill context and references fail closed; existing identity stays 
   const proposal=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
   assert.equal(proposal.applied,false);
   assert.equal(proposal.output.mergeSuggestions[0].existingCanonicalKey,'BRAND-001');
-  assert.match(oss.modelCalls.at(-1).system,/已有 canonical identity 不得重复创建/);
-  assert.match(oss.modelCalls.at(-1).system,/持续 FX/);
+  assert.match(oss.modelCalls.at(-1).system,/已有 Asset Bible 身份.*existingCanonicalKey 提合并/);
+  assert.match(oss.modelCalls.at(-1).system,/共享视觉系统/);
   assert.deepEqual(await db('o_v04Creative').where(scope).first(),beforeCreative);
   assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),beforeAssets);
   const creativeChange={...scope,brief:'New confirmed brief',treatment:'',script:'',targetDuration:40,expectedVersion:1};
