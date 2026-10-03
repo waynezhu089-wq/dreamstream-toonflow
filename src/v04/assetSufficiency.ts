@@ -104,7 +104,10 @@ export function auditAssetSufficiency(proposal: Proposal, treatment: string, raw
       : !requirements.length ? "尚无 Treatment 视觉覆盖记录"
       : missing.length ? `${missing.length} 项重要视觉内容尚无明确生产归属` : "已列视觉内容均有生产归属或明确标为镜头局部／构图",
     candidateCount: nextProposal.candidates.length - new Set(nextProposal.mergeSuggestions.map(item => item.candidateIndex)).size,
-    existingReferenceCount: new Set(nextProposal.mergeSuggestions.map(item => item.existingCanonicalKey)).size,
+    existingReferenceCount: new Set([
+      ...nextProposal.mergeSuggestions.map(item => item.existingCanonicalKey),
+      ...nextProposal.coverage.flatMap(item => item.existingCanonicalKeys),
+    ]).size,
     excludedUngroundedCoverage: proposal.coverage.length - retainedCoverage.length,
     auditComplete: !!audit && audit.environments.length > 0 && ungrounded === 0,
     requirements,

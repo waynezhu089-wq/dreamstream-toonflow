@@ -108,6 +108,7 @@ const classificationAliases: Record<string, string> = {
 };
 
 function labelKey(value: string) { return value.normalize("NFKC").trim().toUpperCase().replace(/[\s./-]+/g, "_"); }
+const identityKey = (value: string) => value.normalize("NFKC").toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
 type SemanticFailure = "unknown_or_ambiguous" | "conflict";
 function safeLabel(value: string) {
   const trimmed = value.normalize("NFKC").trim();
@@ -245,19 +246,25 @@ export function normalizeAssetExtraction(raw: unknown) {
       const uniqueInferred = [...new Set(inferred)];
       const deterministic = candidateIndexes.length > 0 && inferred.length === candidateIndexes.length && uniqueInferred.length === 1
         ? uniqueInferred[0] : null;
-      const normalizedCoverageType = deterministic ?? (item.coverageType
+      const declaredComposition = item.coverageType && (coverageAliases[labelKey(item.coverageType)] ?? labelKey(item.coverageType)) === "COMPOSITION_GOAL";
+      const normalizedCoverageType = declaredComposition ? "COMPOSITION_GOAL" : deterministic ?? (item.coverageType
         ? canonicalLabel(item.coverageType, coverageType, coverageAliases, ["coverage", i, "coverageType"])
         : invalid(["coverage", i, "coverageType"], "无法从候选资产确定覆盖类别"));
       const linkedCandidates = candidateIndexes.map(candidateIndex => candidates[candidateIndex]);
       const allLinked = linkedCandidates.length > 0 && linkedCandidates.every(Boolean);
       const hasReference = candidateIndexes.length > 0 || (item.existingCanonicalKeys?.length ?? 0) > 0;
+      const mixedCandidateExisting = candidateIndexes.length > 0 && (item.existingCanonicalKeys?.length ?? 0) > 0;
+      const directCandidate = candidateIndexes.length === 1 && !mixedCandidateExisting &&
+        identityKey(item.label) === identityKey(linkedCandidates[0]?.name ?? "");
+      const singleExisting = candidateIndexes.length === 0 && item.existingCanonicalKeys?.length === 1;
       const inferredClassification: z.infer<typeof classification> | null = normalizedCoverageType === "COMPOSITION_GOAL"
         ? "COMPOSITION_MOTIF"
-        : allLinked && linkedCandidates.every(candidate => candidate.assetKind === "MATERIAL_FX")
+        : directCandidate && allLinked && linkedCandidates.every(candidate => candidate.assetKind === "MATERIAL_FX")
           ? "VISUAL_SYSTEM"
-          : allLinked && linkedCandidates.every(candidate => candidate.variantOf !== null)
+          : directCandidate && allLinked && linkedCandidates.every(candidate => candidate.variantOf !== null)
             ? "VARIANT"
-            : hasReference && ["PERSON", "CREATURE", "VEHICLE", "PROP", "BRAND"].includes(normalizedCoverageType)
+            : hasReference && !directCandidate && !singleExisting && !mixedCandidateExisting ? "SHOT_LOCAL"
+            : (directCandidate || singleExisting) && ["PERSON", "CREATURE", "VEHICLE", "PROP", "BRAND"].includes(normalizedCoverageType)
               ? "CANONICAL_ASSET"
               : normalizedCoverageType === "SCENE" && !hasReference ? "SCENE_ANCHOR" : null;
       const classKey = labelKey(item.classification);

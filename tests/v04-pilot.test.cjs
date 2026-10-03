@@ -632,6 +632,43 @@ test('V0.4 semantic JSON compiles pilot-scale entities and coverage without mode
   assert.equal(mixed.coverage[1].classification,'VISUAL_SYSTEM');
 });
 
+test('OPT-026 direct identities stay in Asset Bible while linked story beats and brand composition move to Storyboard', () => {
+  const {compileAssetExtractionSemantic}=loadSource(path.join(root,'src/v04/assetExtractionSemantic.ts'),null);
+  const {auditAssetSufficiency}=loadSource(path.join(root,'src/v04/assetSufficiency.ts'),null);
+  const existing=[{canonicalKey:'BRAND-001',name:'Dream Stream Logo',category:'BRAND'}];
+  const visualElements=[
+    {name:'男孩',type:'HUMAN_CHARACTER'},{name:'鲸鱼',type:'CREATURE'},
+    {name:'潜水艇',type:'VEHICLE'},{name:'飞马',type:'CREATURE'},
+    {name:'鲸腹内景',type:'ENVIRONMENT'},{name:'海面',type:'ENVIRONMENT'},
+    {name:'蓝色荧光物质',type:'MATERIAL_FX'},
+    {name:'Dream Stream Logo',type:'BRAND_MARK',existingCanonicalKey:'BRAND-001'},
+  ];
+  const rows=[
+    {label:'男孩',elementNames:['男孩']},
+    {label:'蓝色荧光物质',elementNames:['蓝色荧光物质']},
+    {label:'鲸腹内景',elementNames:['鲸腹内景']},
+    {label:'男孩第一次主动伸手',elementNames:['男孩','蓝色荧光物质','鲸腹内景']},
+    {label:'鲸鱼喷嚏把男孩和潜水艇喷出',elementNames:['鲸鱼','男孩','潜水艇']},
+    {label:'片尾飞马掠海面与 Dream Stream Logo 对齐',elementNames:['飞马','海面'],existingCanonicalKeys:['BRAND-001']},
+    {label:'Dream Stream Logo',existingCanonicalKeys:['BRAND-001']},
+  ];
+  const proposal=compileAssetExtractionSemantic({visualElements,coverage:rows},existing);
+  assert.deepEqual(proposal.coverage.slice(0,7).map(row=>row.classification),
+    ['CANONICAL_ASSET','VISUAL_SYSTEM','SCENE_ANCHOR','SHOT_LOCAL','SHOT_LOCAL','COMPOSITION_MOTIF','CANONICAL_ASSET']);
+  assert.equal(proposal.coverage[5].coverageType,'COMPOSITION_GOAL');
+  assert.equal(proposal.coverage[5].existingCanonicalKeys[0],'BRAND-001');
+  const treatment=rows.map(row=>row.label).join('，');
+  const audit={environments:[{label:'鲸腹内景',evidenceQuote:'鲸腹内景',coveredByName:'鲸腹内景',reason:''}],missing:[],unsupportedCoverageLabels:[]};
+  const review=auditAssetSufficiency(proposal,treatment,audit,existing);
+  assert.equal(review.existingReferenceCount,1,'merge and Coverage reuse the same BRAND identity once');
+  assert.equal(review.requirements.find(row=>row.label==='男孩第一次主动伸手').status,'DOCUMENTED');
+  assert.equal(review.requirements.find(row=>row.label==='片尾飞马掠海面与 Dream Stream Logo 对齐').status,'DOCUMENTED');
+  const mixed=compileAssetExtractionSemantic({visualElements:[{name:'男孩',type:'HUMAN_CHARACTER'}],
+    coverage:[{label:'男孩',elementNames:['男孩'],existingCanonicalKeys:['LOC-001']}]},
+    [{canonicalKey:'LOC-001',name:'鲸腹内景',category:'LOC'}]);
+  assert.equal(mixed.coverage[0].classification,'SHOT_LOCAL','an additional existing identity makes the row a beat, even when its label names one participant');
+});
+
 test('OPT-025 sufficiency checks ownership, exact Treatment evidence and false requirements without counting assets', () => {
   const {compileAssetExtractionSemantic}=loadSource(path.join(root,'src/v04/assetExtractionSemantic.ts'),null);
   const {auditAssetSufficiency}=loadSource(path.join(root,'src/v04/assetSufficiency.ts'),null);
@@ -801,7 +838,7 @@ test('OPT-024C cross-field category and coverage classification use deterministi
   ],coverage:[
     {label:'Boy',coverageType:'PERSON',classification:'PERSON',candidateRefs:['Boy']},
     {label:'Moon composition',coverageType:'COMPOSITION_GOAL',classification:'COMPOSITION_GOAL',candidateRefs:[]},
-    {label:'Shared material',coverageType:'FX_MATERIAL',classification:'FX_MATERIAL',candidateRefs:['Dream Matter']},
+    {label:'Dream Matter',coverageType:'FX_MATERIAL',classification:'FX_MATERIAL',candidateRefs:['Dream Matter']},
     {label:'Unresolved setting',coverageType:'SCENE',classification:'SCENE',candidateRefs:[]},
     {label:'Variant ship',coverageType:'VEHICLE',classification:'VEHICLE',candidateRefs:['Variant Ship']},
   ]};

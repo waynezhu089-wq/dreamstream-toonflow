@@ -110,7 +110,8 @@ export function compileAssetExtractionSemantic(raw: unknown, existing: ExistingI
     // A beat can mention a scene while linking an entity; its type is not the
     // entity's identity. Reject a true direct-identity contradiction, but do
     // not make the model serialize duplicate category facts for every beat.
-    const directIdentity = candidateRefs.length === 1 && identityKey(item.label) === identityKey(candidateRefs[0]);
+    const linkedNames = [...candidateRefs, ...(item.existingCanonicalKeys ?? []).map(key => existingByKey.get(key)!.name)];
+    const directIdentity = linkedNames.length === 1 && identityKey(item.label) === identityKey(linkedNames[0]);
     if (directIdentity && declaredKind && candidateKinds.length && candidateKinds.every(kind => kindCoverage[kind] === kindCoverage[candidateKinds[0]])
       && kindCoverage[declaredKind] !== kindCoverage[candidateKinds[0]])
       invalid(["coverage", i, "type"], "覆盖类别与绑定视觉元素矛盾");
@@ -118,20 +119,28 @@ export function compileAssetExtractionSemantic(raw: unknown, existing: ExistingI
       const category = existingByKey.get(key)!.category;
       return category === "BRAND" ? "BRAND" : category === "LOC" ? "SCENE" : null;
     });
+    const multiBrandComposition = linkedNames.length > 1 &&
+      (candidateKinds.includes("BRAND_MARK") || (item.existingCanonicalKeys ?? []).some(key => existingByKey.get(key)?.category === "BRAND"));
     let coverageType: string;
-    if (isComposition) coverageType = "COMPOSITION_GOAL";
+    if (isComposition || multiBrandComposition) coverageType = "COMPOSITION_GOAL";
     else if (candidateKinds.length && candidateKinds.every(kind => kindCoverage[kind] === kindCoverage[candidateKinds[0]]))
       coverageType = kindCoverage[candidateKinds[0]];
     else if (type && kindByMeaning[type]) coverageType = kindCoverage[kindByMeaning[type]];
     else if (existingTypes.length && existingTypes.every(value => value && value === existingTypes[0])) coverageType = existingTypes[0]!;
-    else if (type === "OTHER" || type === "其他") coverageType = "OTHER";
+    else if (type === "OTHER" || type === "其他" || linkedNames.length > 1) coverageType = "OTHER";
     else invalid(["coverage", i, "type"], "无关联元素时必须给出可确定的视觉类型");
-    const hasReference = candidateRefs.length > 0 || (item.existingCanonicalKeys?.length ?? 0) > 0;
-    const classification = isComposition ? "COMPOSITION_MOTIF"
-      : candidateKinds.length && candidateKinds.every(kind => kind === "MATERIAL_FX") ? "VISUAL_SYSTEM"
-      : candidateRefs.length && candidateRefs.every(name => candidates[nameIndex.get(identityKey(name))!].variantOf) ? "VARIANT"
+    const hasReference = linkedNames.length > 0;
+    // Linkage describes what a beat uses, not what the beat *is*. Only a
+    // direct name match establishes identity coverage; mixed links remain a
+    // shot-local beat (or a composition when brand placement is involved).
+    const classification = isComposition || multiBrandComposition ? "COMPOSITION_MOTIF"
+      : directIdentity && candidateKinds[0] === "MATERIAL_FX" ? "VISUAL_SYSTEM"
+      : directIdentity && candidateRefs.length === 1 && candidates[nameIndex.get(identityKey(candidateRefs[0]))!].variantOf ? "VARIANT"
+      : directIdentity && coverageType === "SCENE" ? "SCENE_ANCHOR"
+      : directIdentity ? "CANONICAL_ASSET"
+      : hasReference ? "SHOT_LOCAL"
       : coverageType === "SCENE" ? "SCENE_ANCHOR"
-      : hasReference ? "CANONICAL_ASSET" : "SHOT_LOCAL";
+      : coverageType === "FX_MATERIAL" ? "VISUAL_SYSTEM" : "CANONICAL_ASSET";
     return { label: item.label, coverageType, classification, candidateRefs,
       existingCanonicalKeys: item.existingCanonicalKeys ?? [], note: item.note ?? "" };
   });
