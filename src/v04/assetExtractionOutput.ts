@@ -179,18 +179,26 @@ export function normalizeAssetExtraction(raw: unknown) {
   const candidates = model.candidates.map((item, i) => {
     const categoryKey = labelKey(item.category);
     const categoryResult = category.safeParse(categoryAliases[categoryKey] ?? categoryKey);
-    const semanticKind = categoryResult.success ? null : assetKind.safeParse(kindAliases[categoryKey] ?? categoryKey);
-    if (!categoryResult.success && !semanticKind?.success)
+    const categoryKindResult = categoryResult.success ? null : assetKind.safeParse(kindAliases[categoryKey] ?? categoryKey);
+    const kindKey = item.assetKind ? labelKey(item.assetKind) : null;
+    const explicitKindResult = kindKey ? assetKind.safeParse(kindAliases[kindKey] ?? kindKey) : null;
+    if (!categoryResult.success && !categoryKindResult?.success && !explicitKindResult?.success)
       invalidLabel(["candidates", i, "category"], item.category, "unknown_or_ambiguous");
     const hint = categoryKindHints[categoryKey];
-    const kind = item.assetKind
-      ? canonicalLabel(item.assetKind, assetKind, kindAliases, ["candidates", i, "assetKind"])
-      : semanticKind?.success ? semanticKind.data : hint ?? (categoryResult.success ? kindDefaults[categoryResult.data] : null);
+    const categoryDefault = categoryResult.success ? kindDefaults[categoryResult.data] : null;
+    // An explicitly unknown kind is advisory only when the category has one safe interpretation.
+    // A broad LOC/CHAR/PROP label cannot overwrite such an unknown with a guessed subtype.
+    const determinedKind = categoryKindResult?.success ? categoryKindResult.data
+      : specificCategoryKinds.has(categoryKey) ? hint
+        : categoryResult.success && ["BRAND", "UI", "FX"].includes(categoryResult.data) ? categoryDefault : null;
+    const kind = explicitKindResult?.success ? explicitKindResult.data
+      : item.assetKind ? determinedKind ?? invalidLabel(["candidates", i, "assetKind"], item.assetKind, "unknown_or_ambiguous")
+        : categoryKindResult?.success ? categoryKindResult.data : hint ?? categoryDefault;
     if (!kind) invalid(["candidates", i, "assetKind"], "此类别需要明确资产子类型");
     const derivedCategory = categoryByKind[kind];
     const normalizedCategory = categoryResult.success ? categoryResult.data : derivedCategory;
     if (!normalizedCategory) invalidLabel(["candidates", i, "category"], item.category, "unknown_or_ambiguous");
-    if (semanticKind?.success && semanticKind.data !== kind)
+    if (categoryKindResult?.success && categoryKindResult.data !== kind)
       invalidLabel(["candidates", i, "category"], item.category, "conflict");
     if (derivedCategory && normalizedCategory !== derivedCategory)
       invalidLabel(["candidates", i, "category"], item.category, "conflict");

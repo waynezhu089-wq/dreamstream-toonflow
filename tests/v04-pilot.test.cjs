@@ -616,7 +616,7 @@ test('OPT-024B provider labels accept common English and Chinese aliases; canoni
   celestial.candidates[3].assetKind='CELESTIAL';
   assert.equal(normalizeAssetExtraction(celestial).candidates[3].assetKind,'CELESTIAL','a broad environment label can still describe a celestial asset');
   for(const [mutate,expectedPath] of [
-    [x=>x.candidates[0].category='UNKNOWN_CREATURE','candidates.0.category'],
+    [x=>{x.candidates[0].category='UNKNOWN_CREATURE';x.candidates[0].assetKind='UNKNOWN_KIND'},'candidates.0.category'],
     [x=>{x.candidates[0].category='CHARACTER';delete x.candidates[0].assetKind},'candidates.0.assetKind'],
     [x=>x.candidates[0].assetKind='UNKNOWN_KIND','candidates.0.assetKind'],
     [x=>{x.coverage[0].candidateRefs=[];x.coverage[0].coverageType='UNKNOWN_TYPE'},'coverage.0.coverageType'],
@@ -663,7 +663,7 @@ test('OPT-024C cross-field category and coverage classification use deterministi
   });
   for(const [mutate,path,failureType] of [
     [x=>x.candidates[0].category='VEHICLE','candidates.0.category','conflict'],
-    [x=>x.candidates[1].category='MYSTERY','candidates.1.category','unknown_or_ambiguous'],
+    [x=>{x.candidates[1].category='MYSTERY';x.candidates[1].assetKind='UNKNOWN_KIND'},'candidates.1.category','unknown_or_ambiguous'],
     [x=>{x.coverage[3].classification='PERSON'},'coverage.3.classification','conflict'],
     [x=>{x.coverage[3].candidateRefs=['Moon']},'coverage.3.classification','conflict'],
   ]) {
@@ -673,11 +673,38 @@ test('OPT-024C cross-field category and coverage classification use deterministi
       return detail?.path===path && detail.failureType===failureType;
     });
   }
-  const secret=structuredClone(input);secret.candidates[1].category='Authorization: Bearer sample-token';
+  const secret=structuredClone(input);secret.candidates[1].category='Authorization: Bearer sample-token';secret.candidates[1].assetKind='UNKNOWN_KIND';
   assert.throws(()=>normalizeAssetExtraction(secret),error=>{
     const detail=semanticLabelDiagnostics(error)[0];
     return detail.path==='candidates.1.category' && detail.receivedLabel===null && detail.normalizedLabelKey===null;
   });
+});
+
+test('OPT-024E resolves category and kind independently while rejecting ambiguity and real contradictions', () => {
+  const {normalizeAssetExtraction,assetExtractionProposalSchema,semanticLabelDiagnostics}=loadSource(path.join(root,'src/v04/assetExtractionOutput.ts'),null);
+  const input={candidates:[
+    {name:'Matter',category:'FX',assetKind:'FX_SYSTEM',description:'shared material',sourcePolicy:'AI_ALLOWED'},
+    {name:'Sea',category:'ENV',assetKind:'ENVIRONMENT',description:'night sea',sourcePolicy:'AI_ALLOWED'},
+    {name:'Moon',category:'UNKNOWN_SKY_LABEL',assetKind:'CELESTIAL',description:'moon',sourcePolicy:'AI_ALLOWED'},
+    {name:'Logo',category:'BRAND',assetKind:'UNRECOGNIZED_LOGO_KIND',description:'real logo',sourcePolicy:'REAL_REQUIRED'},
+  ]};
+  const output=normalizeAssetExtraction(input);
+  assert.deepEqual(output.candidates.map(row=>[row.category,row.assetKind]),[
+    ['FX','MATERIAL_FX'],['LOC','ENVIRONMENT'],['LOC','CELESTIAL'],['BRAND','BRAND_MARK'],
+  ]);
+  assert.equal(assetExtractionProposalSchema.safeParse(output).success,true);
+  for(const [mutate,expectedPath,expectedType] of [
+    [x=>{x.candidates[0].category='VEHICLE';x.candidates[0].assetKind='HUMAN_CHARACTER'},'candidates.0.category','conflict'],
+    [x=>{x.candidates[1].category='UNKNOWN_CATEGORY';x.candidates[1].assetKind='UNKNOWN_KIND'},'candidates.1.category','unknown_or_ambiguous'],
+    [x=>{x.candidates[0].category='CHAR';x.candidates[0].assetKind='UNKNOWN_KIND'},'candidates.0.assetKind','unknown_or_ambiguous'],
+    [x=>{x.candidates[1].category='LOC';x.candidates[1].assetKind='UNKNOWN_KIND'},'candidates.1.assetKind','unknown_or_ambiguous'],
+  ]) {
+    const invalid=structuredClone(input);mutate(invalid);
+    assert.throws(()=>normalizeAssetExtraction(invalid),error=>{
+      const detail=semanticLabelDiagnostics(error)[0];
+      return detail?.path===expectedPath && detail.failureType===expectedType;
+    });
+  }
 });
 
 test('OPT-024B pilot-scale 11 candidates and 18 coverage rows remain proposal-only with existing BRAND merge', async t => {
@@ -692,6 +719,8 @@ test('OPT-024B pilot-scale 11 candidates and 18 coverage rows remain proposal-on
     ['Dream Matter','VISUAL_SYSTEM','MATERIAL'],['Island','ENVIRONMENT','ENVIRONMENT'],['Night Sea','场景','ENVIRONMENT'],['Whale Interior','LOCATION','ENVIRONMENT'],['Moon','CELESTIAL','CELESTIAL'],['Dream Stream Logo','LOGO','LOGO'],
   ].map(([name,category,assetKind],i)=>({name,category,assetKind,description:'Pilot semantic alias',sourcePolicy:i===10?'REAL_REQUIRED':'AI_ALLOWED',importance:i<5?'CORE':undefined,
     relatedCandidateRefs:i===5?['Ship','Submarine','Pegasus']:[],sharedVisualSystemRef:[2,3,4].includes(i)?'Dream Matter':undefined}));
+  candidates[5].assetKind='FX_SYSTEM';
+  candidates[6].category='ENV';
   const coverage=candidates.map((candidate,i)=>({label:candidate.name,coverageType:i===9?'COMPOSITION_GOAL':i===10?'LOGO':'CHARACTER',classification:i===5?'SHARED_VISUAL_SYSTEM':i===9?'COMPOSITION_GOAL':i===10?'BRAND':'CANONICAL_ASSET',
     candidateRefs:i===10?[]:[candidate.name],existingCanonicalKeys:i===10?['BRAND-001']:[]}));
   for(let i=0;i<7;i++) coverage.push({label:`Additional scene beat ${i}`,coverageType:i%2?'SCENE':'COMPOSITION_GOAL',classification:i%2?'SCENE':'COMPOSITION_GOAL',candidateRefs:[],existingCanonicalKeys:[],note:'Human review required'});
@@ -710,6 +739,8 @@ test('OPT-024B pilot-scale 11 candidates and 18 coverage rows remain proposal-on
   assert.equal(preview.output.candidates[10].sourcePolicy,'REAL_REQUIRED');
   assert.equal(preview.output.coverage[1].coverageType,'CREATURE');
   assert.equal(preview.output.candidates[9].category,'LOC');
+  assert.equal(preview.output.candidates[5].assetKind,'MATERIAL_FX');
+  assert.equal(preview.output.candidates[6].category,'LOC');
   assert.equal(preview.output.coverage[5].classification,'VISUAL_SYSTEM');
   assert.equal(preview.output.coverage[16].classification,'SCENE_ANCHOR');
   assert.equal(preview.output.coverage[17].classification,'COMPOSITION_MOTIF');
