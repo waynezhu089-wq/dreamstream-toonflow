@@ -1,8 +1,19 @@
 import type { VisualSpec } from "./visualSpecContract";
 
 export const PROMPT_COMPILER_VERSION = "v04.prompt-ir.1";
+const CHARACTER_TURNAROUND_COMPILER_VERSION = "v04.prompt-ir.2";
 export const generationIntents = ["CHARACTER_TURNAROUND", "CREATURE_TURNAROUND", "VEHICLE_TURNAROUND", "OBJECT_REFERENCE", "ENVIRONMENT_ESTABLISHING", "MATERIAL_STATE_BOARD", "CELESTIAL_REFERENCE"] as const;
 export type GenerationIntent = typeof generationIntents[number];
+
+export function compilerVersionForIntent(intent: GenerationIntent): string {
+  return intent === "CHARACTER_TURNAROUND" ? CHARACTER_TURNAROUND_COMPILER_VERSION : PROMPT_COMPILER_VERSION;
+}
+
+const characterIdentityLock = ["same character identity", "same face", "same hairstyle", "same clothing",
+  "same footwear", "same body proportions", "same color palette"];
+const characterForbiddenChanges = ["no redesign between views", "no clothing changes", "no hairstyle changes",
+  "no age changes", "no body proportion changes", "no extra accessories"];
+const characterAllowedVariation = ["camera orientation", "body orientation"];
 
 export function intentFromReviewPlan(asset: { sourcePolicy: string; assetKind: string }, plan: { previewKind: string }): GenerationIntent | null {
   if (asset.sourcePolicy === "REAL_REQUIRED" || plan.previewKind === "REFERENCE_ONLY") return null;
@@ -27,7 +38,7 @@ export function compilePromptIR(asset: { canonicalKey: string; name: string; des
   const empty = spec.assetKind === "ENVIRONMENT" && details.emptyEnvironmentPolicy === "EMPTY_CANONICAL_REFERENCE";
   const states = spec.assetKind === "MATERIAL_FX" ? details.states : [];
   return {
-    schemaVersion: 1, compilerVersion: PROMPT_COMPILER_VERSION, generationIntent,
+    schemaVersion: 1, compilerVersion: compilerVersionForIntent(generationIntent), generationIntent,
     identityBlock: { canonicalKey: asset.canonicalKey, name: asset.name, description: asset.description,
       visualIdentitySummary: spec.visualIdentitySummary, identityAnchors: spec.identityAnchors,
       ownerKey: asset.ownerKey ?? null, variantOf: asset.variantOf ?? null,
@@ -41,6 +52,9 @@ export function compilePromptIR(asset: { canonicalKey: string; name: string; des
         visualDescription: element.visualDescription, placement: element.placement })) },
     environmentBlock: spec.assetKind === "ENVIRONMENT" ? { ...details, emptyCanonicalReference: empty } : null,
     viewIntent: views.map(orientation => ({ orientation, identityInvariant: asset.canonicalKey })),
+    ...(generationIntent === "CHARACTER_TURNAROUND" ? { characterTurnaround: {
+      identityLock: characterIdentityLock, forbiddenChanges: characterForbiddenChanges,
+      allowedVariation: characterAllowedVariation } } : {}),
     compositionIntent: generationIntent === "MATERIAL_STATE_BOARD" ? { states,
       sharedPalette: spec.primaryPalette, sharedMaterialLogic: spec.surfaceLanguage } : { emptyEnvironment: empty },
     positiveConstraints: [...spec.identityAnchors, ...spec.mustPreserve],
@@ -61,9 +75,18 @@ export function renderGenericPrompt(ir: ReturnType<typeof compilePromptIR>) {
   const base = [ir.identityBlock.name, ir.identityBlock.visualIdentitySummary,
     ir.appearanceBlock.silhouette, ir.materialBlock.surfaceLanguage,
     ...ir.materialBlock.primaryPalette, ...detailLines, ...ir.positiveConstraints].filter(Boolean).join("; ");
-  const negative = ir.negativeConstraints.join("; ");
-  return { adapter: "generic.text.v1", text: base, negative,
-    views: ir.viewIntent.map(view => ({ orientation: view.orientation, text: `${base}; ${view.orientation} view; same identity and details across views` })),
+  const turnaround = "characterTurnaround" in ir ? ir.characterTurnaround : null;
+  const lock = turnaround ? `Shared Identity Lock across all views: ${turnaround.identityLock.join(", ")}` : "";
+  const variation = turnaround ? `Only ${turnaround.allowedVariation.join(" and ")} may vary between views` : "";
+  const exclusions = turnaround ? `Forbidden: ${turnaround.forbiddenChanges.join(", ")}` : "";
+  const text = turnaround
+    ? `${base}; Create a four-view character turnaround: ${ir.viewIntent.map(view => view.orientation).join(", ")}; ${lock}; ${variation}; ${exclusions}`
+    : base;
+  const negative = [...ir.negativeConstraints, ...(turnaround?.forbiddenChanges ?? [])].join("; ");
+  return { adapter: "generic.text.v1", text, negative,
+    views: ir.viewIntent.map(view => ({ orientation: view.orientation, text: turnaround
+      ? `${base}; ${view.orientation} view; ${lock}; ${variation}; ${exclusions}`
+      : `${base}; ${view.orientation} view; same identity and details across views` })),
     stateSlots: ir.generationIntent === "MATERIAL_STATE_BOARD" ? ir.compositionIntent.states : [],
     note: "Derived review text only; no image execution" };
 }

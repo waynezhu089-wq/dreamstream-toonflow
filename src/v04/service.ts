@@ -5,7 +5,7 @@ import { db } from "@/utils/db";
 import { assertAssetPlanBinding, readAssetPlanInTransaction } from "@/services/advertisementAssetPlan";
 import { ASSET_PLAN_TABLE } from "@/lib/advertisementAssetPlanSchema";
 import { assetKinds, reviewPlanFor } from "./assetWorkflow";
-import { PROMPT_COMPILER_VERSION } from "./promptCompiler";
+import { compilerVersionForIntent, type GenerationIntent } from "./promptCompiler";
 
 export class PilotError extends Error {
   constructor(public code: string, message: string, public status = 400) { super(message); }
@@ -106,7 +106,7 @@ export async function readPilot(input: unknown, allowProjectCreativeFallback = f
       effectiveStatus: assetRevision.get(row.canonicalKey)?.status !== "ACTIVE" || assetRevision.get(row.canonicalKey)?.revision !== row.sourceAssetRevision ? "STALE" : "CONFIRMED" }));
     const currentSpecRevision = new Map(visualSpecs.map(row => [row.canonicalKey, row.effectiveStatus === "CONFIRMED" ? row.revision : null]));
     const promptBuilds = promptRows.map(row => ({ ...row, promptIr: JSON.parse(row.promptIrJson), renderedPrompt: JSON.parse(row.renderedPromptJson),
-      effectiveStatus: row.status === "READY" && row.compilerVersion === PROMPT_COMPILER_VERSION && currentSpecRevision.get(row.canonicalKey) === row.visualSpecRevision ? "READY" : "STALE" }));
+      effectiveStatus: row.status === "READY" && row.compilerVersion === compilerVersionForIntent(row.generationIntent as GenerationIntent) && currentSpecRevision.get(row.canonicalKey) === row.visualSpecRevision ? "READY" : "STALE" }));
     return { project: { id: project.id, name: project.name }, creative, storyboards, assets: assets.map(a => ({ ...a, identityAnchors: JSON.parse(a.identityAnchors), mustPreserve: JSON.parse(a.mustPreserve), forbiddenChanges: JSON.parse(a.forbiddenChanges), relatedKeys: JSON.parse(a.relatedKeys) })), bindings, assetPlan, visualSpecs, promptBuilds, libraryBindings, reviewPlans: reviewPlans.map(p => ({ ...p, turnaroundFilePaths: JSON.parse(p.turnaroundFilePaths), previewSpec: JSON.parse(p.previewSpec), turnaroundSpec: JSON.parse(p.turnaroundSpec) })), coverage: { sourceCreativeVersion: coverageRows[0]?.creativeVersion ?? null, items: coverage, stale: coverageRows.length > 0 && coverageRows[0].creativeVersion !== creative.version }, agentReferences, decisions: decisions.map(d => ({ ...d, sourceMessageIds: JSON.parse(d.sourceMessageIds) })) };
   });
 }

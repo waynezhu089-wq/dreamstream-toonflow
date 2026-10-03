@@ -8,7 +8,7 @@ import { requireModel } from "@/services/modelPreset";
 import { PilotError } from "./service";
 import { reviewPlanFor, type AssetKind } from "./assetWorkflow";
 import { compileVisualSemantic, visualDetailTemplate, visualSpecSchema, type VisualSpec } from "./visualSpecContract";
-import { compilePromptIR, generationIntents, intentFromReviewPlan, PROMPT_COMPILER_VERSION, renderGenericPrompt } from "./promptCompiler";
+import { compilePromptIR, compilerVersionForIntent, generationIntents, intentFromReviewPlan, renderGenericPrompt } from "./promptCompiler";
 
 const q = db as Knex;
 const id = z.number().int().positive();
@@ -178,7 +178,7 @@ async function savePromptBuild(trx: Knex.Transaction, projectId: number, canonic
   if (!generationIntent) return null;
   const ir = compilePromptIR(asset, spec, generationIntent, refs.map(ref => ({ attachmentId: ref.attachmentId, name: ref.originalName })));
   const rendered = renderGenericPrompt(ir);
-  const row = { projectId, canonicalKey, visualSpecRevision: specRevision, compilerVersion: PROMPT_COMPILER_VERSION,
+  const row = { projectId, canonicalKey, visualSpecRevision: specRevision, compilerVersion: compilerVersionForIntent(generationIntent),
     generationIntent, targetProfile: "generic.text.v1", promptIrJson: JSON.stringify(ir), renderedPromptJson: JSON.stringify(rendered),
     status: "READY", createdAt: Date.now(), updatedAt: Date.now() };
   await trx("o_v04AssetPromptBuild").insert(row).onConflict(["projectId", "canonicalKey", "visualSpecRevision", "compilerVersion", "generationIntent", "targetProfile"]).merge(row);

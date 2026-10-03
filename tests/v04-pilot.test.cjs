@@ -1307,6 +1307,18 @@ test('OPT-027A Visual Spec proposal/preview are zero-write; confirm versions, pr
   assert.deepEqual(confirmed.assets[0].identityAnchors,['crescent pendant']);
   assert.deepEqual(confirmed.assets[0].mustPreserve,['blue coat']);
   assert.equal(confirmed.promptBuilds[0].generationIntent,'CHARACTER_TURNAROUND');
+  assert.equal(confirmed.promptBuilds[0].compilerVersion,'v04.prompt-ir.2');
+  const turnaround=confirmed.promptBuilds[0];
+  assert.deepEqual(turnaround.promptIr.characterTurnaround.identityLock,
+    ['same character identity','same face','same hairstyle','same clothing','same footwear','same body proportions','same color palette']);
+  assert.deepEqual(turnaround.promptIr.characterTurnaround.allowedVariation,['camera orientation','body orientation']);
+  assert.deepEqual(turnaround.promptIr.characterTurnaround.forbiddenChanges,
+    ['no redesign between views','no clothing changes','no hairstyle changes','no age changes','no body proportion changes','no extra accessories']);
+  for(const view of ['FRONT','LEFT_PROFILE','BACK','THREE_QUARTER']) assert.ok(turnaround.renderedPrompt.text.includes(view));
+  for(const rule of [...turnaround.promptIr.characterTurnaround.identityLock,...turnaround.promptIr.characterTurnaround.forbiddenChanges,
+    'Only camera orientation and body orientation may vary between views']) assert.ok(turnaround.renderedPrompt.text.includes(rule),rule);
+  assert.deepEqual(turnaround.renderedPrompt.views.map(view=>view.orientation),['FRONT','LEFT_PROFILE','BACK','THREE_QUARTER']);
+  assert.ok(turnaround.renderedPrompt.views.every(view=>view.text.includes('Shared Identity Lock across all views')));
   const agentContext=loadSource(path.join(root,'src/v04/agentContext.ts'),db,cache,oss);
   const context=await agentContext.buildProjectAgentContext({...scope,currentStage:'creative',currentRoute:'pilot/creative',selectedObject:null},'Boy visual appearance');
   assert.equal(context.assetBibleIndex[0].visualSpecRevision,1);
@@ -1315,6 +1327,11 @@ test('OPT-027A Visual Spec proposal/preview are zero-write; confirm versions, pr
   assert.equal(context.relevantAssets[0].visualSpec.visualIdentitySummary,'Young dreamer with a blue coat');
   assert.deepEqual(confirmed.promptBuilds[0].promptIr.viewIntent.map(v=>v.orientation),['FRONT','LEFT_PROFILE','BACK','THREE_QUARTER']);
   assert.ok(confirmed.promptBuilds[0].promptIr.viewIntent.every(v=>v.identityInvariant==='CHAR-001'));
+  await db('o_v04AssetPromptBuild').where({projectId:scope.projectId,canonicalKey:'CHAR-001'}).update({compilerVersion:'v04.prompt-ir.1'});
+  assert.equal((await s.readPilot(scope)).promptBuilds[0].effectiveStatus,'STALE','pre-hotfix character Prompt must be rebuilt');
+  const rebuilt=await visual.rebuildVisualPrompt({...scope,canonicalKey:'CHAR-001'});
+  assert.equal(rebuilt.promptBuild.compilerVersion,'v04.prompt-ir.2');
+  assert.equal((await s.readPilot(scope)).promptBuilds.find(row=>row.compilerVersion==='v04.prompt-ir.2').effectiveStatus,'READY');
   assert.equal((await s.readPilot(other)).visualSpecs.length,0);
   await assert.rejects(visual.previewVisualSpec({...other,canonicalKey:'CHAR-001',sourceAssetRevision:applied.sourceAssetRevision,spec:body.spec}),e=>e.code==='PILOT_VISUAL_SCOPE_INVALID');
   await assert.rejects(visual.applyVisualSpec({...scope,canonicalKey:'CHAR-001',sourceAssetRevision:body.sourceAssetRevision,spec:body.spec,previewHash:preview.previewHash}),e=>e.code==='PILOT_VISUAL_SOURCE_STALE');
@@ -1342,7 +1359,11 @@ test('OPT-027A kind-specific compiler preserves Material states, empty environme
     assert.equal(spec.embeddedElements[0].promotionRecommendation,'HIGH');
     const intent=compiler.intentFromReviewPlan({assetKind:kind,sourcePolicy:'AI_ALLOWED'},{previewKind:'ESTABLISHING'});
     const ir=compiler.compilePromptIR({canonicalKey:'CHAR-001',name:'Example',description:'',ownerKey:'CHAR-999'},spec,intent);
-    assert.equal(ir.compilerVersion,compiler.PROMPT_COMPILER_VERSION);
+    assert.equal(ir.compilerVersion,compiler.compilerVersionForIntent(intent));
+    if(kind!=='HUMAN_CHARACTER'){
+      assert.equal(ir.compilerVersion,compiler.PROMPT_COMPILER_VERSION);
+      assert.equal('characterTurnaround' in ir,false,'other generation intents keep their original IR');
+    }
     assert.equal(ir.identityBlock.ownerKey,'CHAR-999');
     assert.ok(!JSON.stringify(ir).includes('CHAR-999 prompt'), 'parent is never recursively expanded');
     assert.equal(compiler.renderGenericPrompt(ir).adapter,'generic.text.v1');
