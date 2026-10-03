@@ -6,7 +6,7 @@ import { requireModel } from "@/services/modelPreset";
 import { PilotError } from "./service";
 import { buildProjectAgentContext, renderProjectAgentSystem } from "./agentContext";
 import { safeStructuredStatus, structuredFailure, structuredRepairContext, structuredValidationSummary } from "./structuredOutputError";
-import { assetExtractionModelSchema, normalizeAssetExtraction } from "./assetExtractionOutput";
+import { assetExtractionModelSchema, normalizeAssetExtraction, semanticLabelDiagnostics } from "./assetExtractionOutput";
 
 const id = z.number().int().positive();
 const request = z.object({ projectId: id, scriptId: id, method: z.enum(["ASSET_EXTRACTION", "ASSET_PROMPTS", "STORYBOARD_BATCH"]) }).strict();
@@ -36,6 +36,7 @@ function logSkillFailure(data: z.infer<typeof request>, correlationId: string, e
     providerId: reference?.includes(":") ? reference.split(":", 1)[0] : null,
     status: safeStructuredStatus(error), repairAttempt,
     validation: structuredValidationSummary(error),
+    semanticLabels: data.method === "ASSET_EXTRACTION" ? semanticLabelDiagnostics(error) : [],
   });
 }
 

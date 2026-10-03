@@ -108,12 +108,41 @@ const classificationAliases: Record<string, string> = {
 };
 
 function labelKey(value: string) { return value.normalize("NFKC").trim().toUpperCase().replace(/[\s./-]+/g, "_"); }
+type SemanticFailure = "unknown_or_ambiguous" | "conflict";
+function safeLabel(value: string) {
+  const trimmed = value.normalize("NFKC").trim();
+  return trimmed.length <= 32 && /^[A-Za-z0-9_\u3400-\u9fff]+$/.test(trimmed) && !/(?:SECRET|TOKEN|PASSWORD|AUTHORIZATION|API_KEY|SK_)/i.test(trimmed)
+    ? trimmed : null;
+}
+function invalidLabel(path: (string | number)[], value: string, failureType: SemanticFailure): never {
+  const key = labelKey(value);
+  throw new z.ZodError([{ code: "custom", path, message: "未知、歧义或冲突的语义标签", params: {
+    semanticLabel: { failureType, receivedLabel: safeLabel(value), normalizedLabelKey: safeLabel(key) },
+  } }]);
+}
+export function semanticLabelDiagnostics(error: unknown) {
+  if (!(error instanceof z.ZodError)) return [];
+  return error.issues.flatMap(issue => {
+    const label = issue.code === "custom" && issue.params?.semanticLabel;
+    return label ? [{ path: issue.path.join("."), failureType: label.failureType,
+      receivedLabel: label.receivedLabel, normalizedLabelKey: label.normalizedLabelKey }] : [];
+  });
+}
 function canonicalLabel<T extends z.ZodTypeAny>(value: string, schema: T, aliases: Record<string, string>, path: (string | number)[]): z.infer<T> {
   const key = labelKey(value);
   const parsed = schema.safeParse(aliases[key] ?? key);
-  if (!parsed.success) invalid(path, "未知或歧义的语义标签");
+  if (!parsed.success) invalidLabel(path, value, "unknown_or_ambiguous");
   return parsed.data;
 }
+
+const categoryByKind: Partial<Record<z.infer<typeof assetKind>, z.infer<typeof category>>> = {
+  HUMAN_CHARACTER: "CHAR", CREATURE: "CHAR", VEHICLE: "PROP", PROP: "PROP", ENVIRONMENT: "LOC", CELESTIAL: "LOC",
+  MATERIAL_FX: "FX", BRAND_MARK: "BRAND", UI_REFERENCE: "UI",
+};
+const canonicalClassificationByCoverage: Partial<Record<z.infer<typeof coverageType>, z.infer<typeof classification>>> = {
+  COMPOSITION_GOAL: "COMPOSITION_MOTIF", FX_MATERIAL: "VISUAL_SYSTEM", SCENE: "SCENE_ANCHOR",
+  PERSON: "CANONICAL_ASSET", CREATURE: "CANONICAL_ASSET", VEHICLE: "CANONICAL_ASSET", PROP: "CANONICAL_ASSET", BRAND: "CANONICAL_ASSET",
+};
 
 function inferredCoverageType(item: { category: z.infer<typeof category>; assetKind: z.infer<typeof assetKind> }) {
   if (item.category === "BRAND") return "BRAND";
@@ -149,14 +178,24 @@ export function normalizeAssetExtraction(raw: unknown) {
   };
   const candidates = model.candidates.map((item, i) => {
     const categoryKey = labelKey(item.category);
-    const normalizedCategory = canonicalLabel(item.category, category, categoryAliases, ["candidates", i, "category"]);
+    const categoryResult = category.safeParse(categoryAliases[categoryKey] ?? categoryKey);
+    const semanticKind = categoryResult.success ? null : assetKind.safeParse(kindAliases[categoryKey] ?? categoryKey);
+    if (!categoryResult.success && !semanticKind?.success)
+      invalidLabel(["candidates", i, "category"], item.category, "unknown_or_ambiguous");
     const hint = categoryKindHints[categoryKey];
     const kind = item.assetKind
       ? canonicalLabel(item.assetKind, assetKind, kindAliases, ["candidates", i, "assetKind"])
-      : hint ?? kindDefaults[normalizedCategory];
+      : semanticKind?.success ? semanticKind.data : hint ?? (categoryResult.success ? kindDefaults[categoryResult.data] : null);
     if (!kind) invalid(["candidates", i, "assetKind"], "此类别需要明确资产子类型");
+    const derivedCategory = categoryByKind[kind];
+    const normalizedCategory = categoryResult.success ? categoryResult.data : derivedCategory;
+    if (!normalizedCategory) invalidLabel(["candidates", i, "category"], item.category, "unknown_or_ambiguous");
+    if (semanticKind?.success && semanticKind.data !== kind)
+      invalidLabel(["candidates", i, "category"], item.category, "conflict");
+    if (derivedCategory && normalizedCategory !== derivedCategory)
+      invalidLabel(["candidates", i, "category"], item.category, "conflict");
     if (hint && specificCategoryKinds.has(categoryKey) && kind !== hint)
-      invalid(["candidates", i, "assetKind"], "类别与资产子类型冲突");
+      invalidLabel(["candidates", i, "assetKind"], item.assetKind ?? item.category, "conflict");
       const inferredImportance = ["ENVIRONMENT", "MATERIAL_FX", "CELESTIAL", "BRAND_MARK", "UI_REFERENCE"].includes(kind) ? "SUPPORTING" : null;
       const resolvedImportance = item.importance
         ? canonicalLabel(item.importance, importance, importanceAliases, ["candidates", i, "importance"])
@@ -198,12 +237,35 @@ export function normalizeAssetExtraction(raw: unknown) {
       const uniqueInferred = [...new Set(inferred)];
       const deterministic = candidateIndexes.length > 0 && inferred.length === candidateIndexes.length && uniqueInferred.length === 1
         ? uniqueInferred[0] : null;
+      const normalizedCoverageType = deterministic ?? (item.coverageType
+        ? canonicalLabel(item.coverageType, coverageType, coverageAliases, ["coverage", i, "coverageType"])
+        : invalid(["coverage", i, "coverageType"], "无法从候选资产确定覆盖类别"));
+      const linkedCandidates = candidateIndexes.map(candidateIndex => candidates[candidateIndex]);
+      const allLinked = linkedCandidates.length > 0 && linkedCandidates.every(Boolean);
+      const hasReference = candidateIndexes.length > 0 || (item.existingCanonicalKeys?.length ?? 0) > 0;
+      const inferredClassification: z.infer<typeof classification> | null = normalizedCoverageType === "COMPOSITION_GOAL"
+        ? "COMPOSITION_MOTIF"
+        : allLinked && linkedCandidates.every(candidate => candidate.assetKind === "MATERIAL_FX")
+          ? "VISUAL_SYSTEM"
+          : allLinked && linkedCandidates.every(candidate => candidate.variantOf !== null)
+            ? "VARIANT"
+            : hasReference && ["PERSON", "CREATURE", "VEHICLE", "PROP", "BRAND"].includes(normalizedCoverageType)
+              ? "CANONICAL_ASSET"
+              : normalizedCoverageType === "SCENE" && !hasReference ? "SCENE_ANCHOR" : null;
+      const classKey = labelKey(item.classification);
+      const classResult = classification.safeParse(classificationAliases[classKey] ?? classKey);
+      const confusedType = coverageType.safeParse(coverageAliases[classKey] ?? classKey);
+      if (!classResult.success && !confusedType.success)
+        invalidLabel(["coverage", i, "classification"], item.classification, "unknown_or_ambiguous");
+      if (confusedType.success && !classResult.success &&
+        (!inferredClassification || (canonicalClassificationByCoverage[confusedType.data] !== inferredClassification &&
+          !(inferredClassification === "VARIANT" && confusedType.data === normalizedCoverageType))))
+        invalidLabel(["coverage", i, "classification"], item.classification, "conflict");
       return {
         label: item.label,
-        coverageType: deterministic ?? (item.coverageType
-          ? canonicalLabel(item.coverageType, coverageType, coverageAliases, ["coverage", i, "coverageType"])
-          : invalid(["coverage", i, "coverageType"], "无法从候选资产确定覆盖类别")),
-        classification: canonicalLabel(item.classification, classification, classificationAliases, ["coverage", i, "classification"]),
+        coverageType: normalizedCoverageType,
+        classification: inferredClassification ?? (classResult.success ? classResult.data
+          : invalidLabel(["coverage", i, "classification"], item.classification, "unknown_or_ambiguous")),
         candidateIndexes, existingCanonicalKeys: item.existingCanonicalKeys ?? [], note: item.note ?? "",
       };
     }),
