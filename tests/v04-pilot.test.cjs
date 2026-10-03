@@ -1390,6 +1390,34 @@ test('OPT-027A kind-specific compiler preserves Material states, empty environme
   assert.equal((await db('o_v04Asset').where({projectId:scope.projectId}).count({n:'canonicalKey'}).first()).n,1,'embedded elements do not auto-promote');
 });
 
+test('OPT-027A-HOTFIX-02 MATERIAL_FX semantic states compile into one strict ordered four-state spec', async t => {
+  const {db,oss,cache}=await fixture(t);
+  const contract=loadSource(path.join(root,'src/v04/visualSpecContract.ts'),db,cache,oss);
+  const asset={assetKind:'MATERIAL_FX',name:'Dream Matter',description:'Blue fluorescent matter moves from mist to particles, contour and solid form',identityAnchors:[],mustPreserve:[],forbiddenChanges:[]};
+  const base={visualIdentitySummary:'One continuous dream material',silhouette:'A changing blue luminous form',primaryPalette:['blue'],
+    details:{baseColor:'blue',emissionColor:'cyan',particleLanguage:'fine glowing grains',edgeLanguage:'soft luminous outline'}};
+  const cases=[
+    {name:'four out of order',states:[{key:'SOLID',appearance:'solid A'},{key:'MIST',appearance:'mist A'},{key:'SILHOUETTE',appearance:'contour A'},{key:'PARTICLE',appearance:'particle A'}],expected:['mist A','particle A','contour A','solid A']},
+    {name:'three states',states:[{key:'mist',appearance:'mist B'},{key:'particle',appearance:'particle B'},{key:'solid',appearance:'solid B'}],expected:['mist B','particle B',null,'solid B']},
+    {name:'natural language labels',states:[{key:'final form',description:'solid C'},{key:'fog',description:'mist C'},{key:'emerging form',description:'contour C'},{key:'condensation',description:'particle C'}],expected:['mist C','particle C','contour C','solid C']},
+    {name:'appearance without keys and out of order',states:[{description:'solid D'},{appearance:'particle D'},{description:'mist D'},{appearance:'contour D'}],expected:['mist D','particle D','contour D','solid D']},
+    {name:'extra unknown state',states:[{key:'fog',appearance:'mist E'},{key:'particles',appearance:'particle E'},{key:'outline',appearance:'contour E'},{key:'manifested',appearance:'solid E'},{key:'liquid',appearance:'unrelated E'}],expected:['mist E','particle E','contour E','solid E']},
+  ];
+  for(const scenario of cases){
+    const spec=contract.compileVisualSemantic(asset,{...base,details:{...base.details,states:scenario.states}});
+    assert.equal(contract.visualSpecSchema.parse(spec).assetKind,'MATERIAL_FX',scenario.name);
+    assert.deepEqual(spec.details.states.map(state=>state.key),['MIST','PARTICLE','SILHOUETTE','SOLID'],scenario.name);
+    scenario.expected.forEach((appearance,index)=>appearance===null
+      ? assert.match(spec.details.states[index].appearance,/Dream Matter.*Blue fluorescent matter/,scenario.name)
+      : assert.equal(spec.details.states[index].appearance,appearance,scenario.name));
+    assert.equal(spec.details.transitionRules.length,1,scenario.name);
+    assert.equal(spec.details.interactionRules.length,1,scenario.name);
+    assert.equal(spec.details.manifestationRules.length,1,scenario.name);
+  }
+  const strict=contract.compileVisualSemantic(asset,{...base,details:{...base.details,states:[]}});
+  assert.throws(()=>contract.visualSpecSchema.parse({...strict,details:{...strict.details,states:[...strict.details.states,strict.details.states[0]]}}),'canonical validation still rejects extra states');
+});
+
 test('OPT-027A future library binding pins version without allocating a global identity or changing project key', async t => {
   const {db,oss,cache,service:s}=await fixture(t);
   const visual=loadSource(path.join(root,'src/v04/visualSpec.ts'),db,cache,oss);
@@ -1417,10 +1445,12 @@ test('OPT-027A authenticated HTTP proposal and preview remain read-only until hu
   const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
   t.after(()=>new Promise(resolve=>server.close(resolve)));
   const post=async(route,body)=>{const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v04${route}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});return {status:response.status,payload:await response.json()};};
-  oss.proposalOutput={visualIdentitySummary:'One blue glowing material',silhouette:'fine moving cloud',primaryPalette:['blue'],details:{baseColor:'blue',emissionColor:'violet',particleLanguage:'fine grains',edgeLanguage:'soft luminous edge',states:[{key:'MIST',appearance:'thin mist'},{key:'PARTICLE',appearance:'dense particles'},{key:'SILHOUETTE',appearance:'emerging shape'},{key:'SOLID',appearance:'solid form'}]}};
+  oss.proposalOutput={visualIdentitySummary:'One blue glowing material',silhouette:'fine moving cloud',primaryPalette:['blue'],details:{baseColor:'blue',emissionColor:'violet',particleLanguage:'fine grains',edgeLanguage:'soft luminous edge',states:[{key:'Solid Form',appearance:'solid form'},{key:'Mist',appearance:'thin mist'},{key:'Particles',appearance:'dense particles'}]}};
   const proposed=await post('/visual-spec/propose',{...scope,canonicalKeys:['FX-001']});
   assert.equal(proposed.status,200);
   const candidate=proposed.payload.data.candidates[0];
+  assert.deepEqual(candidate.spec.details.states.map(state=>state.key),['MIST','PARTICLE','SILHOUETTE','SOLID']);
+  assert.match(candidate.spec.details.states[2].appearance,/Dream material/);
   const input={...scope,canonicalKey:'FX-001',sourceAssetRevision:candidate.sourceAssetRevision,spec:candidate.spec};
   const preview=await post('/visual-spec/preview',input);
   assert.equal(preview.status,200);assert.deepEqual(preview.payload.data.issues,[]);

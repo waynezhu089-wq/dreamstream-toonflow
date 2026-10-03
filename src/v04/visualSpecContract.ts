@@ -90,6 +90,72 @@ const detailDefaults: Record<AssetKind, unknown> = {
   OTHER: { objectType: "", structure: "", use: "" },
 };
 
+const materialStateOrder = ["MIST", "PARTICLE", "SILHOUETTE", "SOLID"] as const;
+type MaterialState = typeof materialStateOrder[number];
+const materialStateAliases: Record<string, MaterialState> = {
+  MIST: "MIST", FOG: "MIST", VAPOR: "MIST", VAPOUR: "MIST", 雾: "MIST", 雾态: "MIST",
+  PARTICLE: "PARTICLE", PARTICLES: "PARTICLE", CONDENSATION: "PARTICLE", 颗粒: "PARTICLE", 粒子: "PARTICLE", 凝聚: "PARTICLE",
+  SILHOUETTE: "SILHOUETTE", CONTOUR: "SILHOUETTE", OUTLINE: "SILHOUETTE", EMERGING_FORM: "SILHOUETTE", 轮廓: "SILHOUETTE", 成形轮廓: "SILHOUETTE",
+  SOLID: "SOLID", SOLID_FORM: "SOLID", MANIFESTED: "SOLID", ENTITY: "SOLID", FINAL_FORM: "SOLID", 实体: "SOLID", 实体态: "SOLID",
+};
+
+function materialStateKey(value: unknown): MaterialState | null {
+  if (typeof value !== "string") return null;
+  return materialStateAliases[value.trim().toUpperCase().replace(/[\s-]+/g, "_")] ?? null;
+}
+
+function materialStateFromAppearance(appearance: string): MaterialState | null {
+  const cues: [MaterialState, RegExp][] = [
+    ["MIST", /\b(mist|fog|vapor|vapour)\b|雾/iu],
+    ["PARTICLE", /\b(particles?|grains?|condensation)\b|颗粒|粒子|凝聚/iu],
+    ["SILHOUETTE", /\b(silhouette|contour|outline)\b|轮廓/iu],
+    ["SOLID", /\b(solid|manifested|entity|final form)\b|实体/iu],
+  ];
+  const matched = cues.filter(([, pattern]) => pattern.test(appearance));
+  return matched.length === 1 ? matched[0][0] : null;
+}
+
+function compileMaterialFxDetails(asset: { name: string; description: string }, semantic: z.infer<typeof visualSemanticDto>) {
+  const incoming = semantic.details ?? {};
+  const details = fillShape(detailDefaults.MATERIAL_FX, incoming) as Record<string, unknown>;
+  const rawStates = incoming.states;
+  const states = Array.isArray(rawStates) ? rawStates : rawStates && typeof rawStates === "object"
+    ? Object.entries(rawStates).map(([key, value]) => typeof value === "string" ? { key, appearance: value } : { key, ...(value && typeof value === "object" ? value : {}) })
+    : [];
+  const keyed = new Map<MaterialState, string>();
+  const unkeyed: string[] = [];
+  for (const raw of states) {
+    const row: Record<string, unknown> = raw && typeof raw === "object" ? raw as Record<string, unknown> : { appearance: raw };
+    const appearance = [row.appearance, row.description].find(value => typeof value === "string" && value.trim()) as string | undefined;
+    if (!appearance) continue;
+    const label = row.key ?? row.name ?? row.state ?? row.phase ?? row.label;
+    const key = materialStateKey(label);
+    if (key && !keyed.has(key)) keyed.set(key, appearance);
+    else if (label == null) {
+      const inferred = materialStateFromAppearance(appearance);
+      if (inferred && !keyed.has(inferred)) keyed.set(inferred, appearance);
+      else if (!inferred) unkeyed.push(appearance);
+    }
+  }
+  const identity = [asset.name, asset.description, semantic.visualIdentitySummary].filter(value => typeof value === "string" && value.trim()).join(" — ").slice(0, 320);
+  const color = [details.baseColor, details.emissionColor, ...(semantic.primaryPalette ?? [])].filter(value => typeof value === "string" && value.trim()).join(", ").slice(0, 120);
+  const cues = `${identity}${color ? `; color and glow: ${color}` : ""}`;
+  const fallback: Record<MaterialState, string> = {
+    MIST: `Diffuse mist phase of ${cues}`,
+    PARTICLE: `Condensed particle phase of ${cues}; ${details.particleLanguage || "visible particles"}`,
+    SILHOUETTE: `Particles gather into a recognizable silhouette of ${cues}; ${details.edgeLanguage || "continuous contour"}`,
+    SOLID: `Coherent solid manifestation of ${cues}`,
+  };
+  details.states = materialStateOrder.map(key => ({ key, appearance: keyed.get(key) ?? unkeyed.shift() ?? fallback[key].slice(0, 600) }));
+  const rules: Record<string, string> = {
+    transitionRules: "Preserve one material identity and palette through MIST → PARTICLE → SILHOUETTE → SOLID.",
+    interactionRules: "Interactions preserve the same material identity and confirmed visual cues.",
+    manifestationRules: "Manifestation follows MIST → PARTICLE → SILHOUETTE → SOLID without introducing a new identity.",
+  };
+  for (const [field, rule] of Object.entries(rules)) if (Array.isArray(details[field]) && details[field].length === 0) details[field] = [rule];
+  return details;
+}
+
 export function visualDetailTemplate(kind: AssetKind): unknown {
   return JSON.parse(JSON.stringify(detailDefaults[kind]));
 }
@@ -99,6 +165,7 @@ export function compileVisualSemantic(asset: { assetKind: AssetKind; name: strin
   const referenceOnly = asset.assetKind === "BRAND_MARK" || asset.assetKind === "UI_REFERENCE";
   const details = referenceOnly ? { referenceDerived: true, aiRedrawAllowed: false,
     referenceAttachmentIds: confirmedReferenceIds, referenceConstraints: [...asset.mustPreserve, ...asset.forbiddenChanges], observedReferenceNotes }
+    : asset.assetKind === "MATERIAL_FX" ? compileMaterialFxDetails(asset, semantic)
     : fillShape(detailDefaults[asset.assetKind], semantic.details);
   const elements = (semantic.embeddedElements ?? []).map((element, index) => ({
     embeddedElementId: `embedded-${index + 1}`, name: element.name, visualDescription: element.visualDescription ?? "",
