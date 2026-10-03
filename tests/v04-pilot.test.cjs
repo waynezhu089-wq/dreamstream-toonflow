@@ -516,7 +516,7 @@ test('OPT-021 structured Skill repair uses one pinned session and never persists
   const result=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
   assert.equal(result.applied,false);
   assert.equal(result.output.candidates[0].name,valid.candidates[0].name);
-  assert.equal(result.output.candidates[0].assetKind,'OTHER','old provider-shaped candidate remains compatible');
+  assert.equal(result.output.candidates[0].assetKind,'MATERIAL_FX','unambiguous FX kind is derived server-side');
   assert.deepEqual(result.output.coverage,[]);
   assert.equal(result.sourceVersion,1);
   assert.equal(oss.sessionCount,1,'repair pins one model session');
@@ -529,6 +529,65 @@ test('OPT-021 structured Skill repair uses one pinned session and never persists
   await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_SCHEMA_FAILED' && /结构/.test(e.message));
   assert.equal(oss.modelCalls.length,4,'failed repair does not start a third attempt');
   assert.equal((await db('o_v04Asset').count({n:'canonicalKey'}).first()).n,0);
+});
+
+test('OPT-024 compact extraction normalizes safe defaults and name refs without weakening final proposal', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Compact extraction',brief:'Dream Stream logo and blue matter',targetDuration:40,aspectRatio:'16:9'},7);
+  const brand=[{operation:'ADD',clientRef:'brand',asset:asset('Dream Stream Logo','BRAND','REAL_REQUIRED')}];
+  const brandPreview=await s.previewAssets({...scope,changes:brand});await s.applyAssets({...scope,changes:brand,previewHash:brandPreview.previewHash});
+  const creative={...scope,brief:'Dream Stream logo and blue matter',treatment:'Dream Stream Logo appears over blue dream matter and a ship.',script:'',targetDuration:40,expectedVersion:1};
+  const creativePreview=await s.previewCreative(creative);await s.applyCreative({...creative,previewHash:creativePreview.previewHash});
+  const compact={candidates:[
+    {name:'Dream Stream Logo',category:'BRAND',description:'Existing real logo',sourcePolicy:'REAL_REQUIRED'},
+    {name:'Blue Dream Matter',category:'FX',description:'Shared blue luminous material',sourcePolicy:'AI_ALLOWED',identityAnchors:null,prompt:null},
+    {name:'Ship',category:'PROP',assetKind:'VEHICLE',importance:'CORE',description:'A ship with dream matter',sourcePolicy:'AI_ALLOWED',sharedVisualSystemRef:'Blue Dream Matter'},
+  ],mergeSuggestions:[{candidateRef:'Dream Stream Logo',existingCanonicalKey:'BRAND-001',reason:'Use confirmed identity'}],coverage:[
+    {label:'Dream Stream Logo',coverageType:'BRAND',classification:'CANONICAL_ASSET',existingCanonicalKeys:['BRAND-001']},
+    {label:'Blue Dream Matter',coverageType:'FX_MATERIAL',classification:'VISUAL_SYSTEM',candidateRefs:['Blue Dream Matter']},
+    {label:'Ship',coverageType:'VEHICLE',classification:'CANONICAL_ASSET',candidateRefs:['Ship']},
+  ]};
+  oss.proposalOutput=compact;
+  const skills=loadSource(path.join(root,'src/v04/skills.ts'),db,cache,oss);
+  const before=await db('o_v04Asset').where({projectId:scope.projectId});
+  const result=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
+  assert.equal(result.applied,false);
+  assert.equal(result.output.candidates[1].assetKind,'MATERIAL_FX');
+  assert.equal(result.output.candidates[1].extractionPass,'VISUAL_SYSTEM');
+  assert.deepEqual(result.output.candidates[1].identityAnchors,[]);
+  assert.equal(result.output.candidates[1].prompt,'');
+  assert.equal(result.output.candidates[2].sharedVisualSystemCandidateIndex,1);
+  assert.deepEqual(result.output.coverage[2].candidateIndexes,[2]);
+  assert.equal(result.output.mergeSuggestions[0].candidateIndex,0);
+  assert.equal(result.sourceVersion,2);
+  assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),before);
+  assert.equal((await db('o_v04AssetCoverage').where(scope)).length,0);
+  assert.match(oss.modelCalls.at(-1).system,/candidateRefs/);
+  assert.doesNotMatch(oss.modelCalls.at(-1).system,/relatedCandidateIndexes\/sharedVisualSystemCandidateIndex/);
+  const diagnostics=[];t.mock.method(console,'error',(...args)=>diagnostics.push(args));
+  const schemaInvalids=[
+    {...compact,candidates:[{...compact.candidates[1],sourcePolicy:'UNSAFE'}]},
+    {...compact,candidates:[compact.candidates[1],{...compact.candidates[2],sharedVisualSystemRef:'Missing'}],mergeSuggestions:[],coverage:compact.coverage.slice(1)},
+    {...compact,coverage:[]},
+  ];
+  for(const invalid of schemaInvalids){
+    oss.skillResponses=[invalid,invalid];
+    await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_SCHEMA_FAILED');
+    assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),before,'failed output is zero-write');
+  }
+  assert.equal(oss.modelCalls.length,7,'three malformed shapes each receive exactly one repair');
+  assert.deepEqual(diagnostics.slice(0,2).map(entry=>entry[1].repairAttempt),[0,1]);
+  assert.deepEqual(diagnostics[0][1].validation,[{path:'candidates.0.sourcePolicy',failureType:'invalid_value'}]);
+  assert.doesNotMatch(JSON.stringify(diagnostics),/Shared blue luminous material|Dream Stream Logo|Bearer|Authorization/,'diagnostics contain paths and types, not model content');
+  for(const invalid of [
+    {...compact,candidates:[{...compact.candidates[1],relatedCandidateIndexes:[99]}],mergeSuggestions:[],coverage:[compact.coverage[1]]},
+    {...compact,candidates:[{...compact.candidates[0],sourcePolicy:'AI_ALLOWED'}],mergeSuggestions:[],coverage:[{...compact.coverage[0],candidateRefs:['Dream Stream Logo']}]},
+  ]) {
+    oss.proposalOutput=invalid;
+    await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_REFERENCE_INVALID');
+    assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),before);
+  }
+  assert.equal(oss.modelCalls.length,9,'semantic violations do not trigger blind structured retries');
 });
 
 test('OPT-021 Skill context and references fail closed; existing identity stays a merge suggestion', async t => {

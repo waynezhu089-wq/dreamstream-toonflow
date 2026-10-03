@@ -5,20 +5,18 @@ import u from "@/utils";
 import { requireModel } from "@/services/modelPreset";
 import { PilotError } from "./service";
 import { buildProjectAgentContext, renderProjectAgentSystem } from "./agentContext";
-import { safeStructuredStatus, structuredFailure, structuredRepairContext } from "./structuredOutputError";
-import { assetKinds } from "./assetWorkflow";
+import { safeStructuredStatus, structuredFailure, structuredRepairContext, structuredValidationSummary } from "./structuredOutputError";
+import { assetExtractionModelSchema, normalizeAssetExtraction } from "./assetExtractionOutput";
 
 const id = z.number().int().positive();
 const request = z.object({ projectId: id, scriptId: id, method: z.enum(["ASSET_EXTRACTION", "ASSET_PROMPTS", "STORYBOARD_BATCH"]) }).strict();
-const candidate = z.object({ name: z.string().trim().min(1).max(256), category: z.enum(["CHAR", "ACC", "PROP", "PRODUCT", "LOC", "BRAND", "UI", "FX"]), description: z.string().max(4000), identityAnchors: z.array(z.string().max(300)).max(30), mustPreserve: z.array(z.string().max(300)).max(30), forbiddenChanges: z.array(z.string().max(300)).max(30), ownerKey: z.string().max(128).nullable(), variantOf: z.string().max(128).nullable(), sourcePolicy: z.enum(["REAL_REQUIRED", "AI_ALLOWED"]), prompt: z.string().max(8000), assetKind: z.enum(assetKinds).default("OTHER"), importance: z.enum(["CORE", "SUPPORTING"]).default("SUPPORTING"), relatedExistingKeys: z.array(z.string()).max(30).default([]), relatedCandidateIndexes: z.array(z.number().int().nonnegative()).max(30).default([]), sharedVisualSystemKey: z.string().nullable().default(null), sharedVisualSystemCandidateIndex: z.number().int().nonnegative().nullable().default(null), extractionPass: z.enum(["ENTITY", "ENVIRONMENT", "VISUAL_SYSTEM"]).default("ENTITY") }).strict();
-const coverage = z.object({ label: z.string().trim().min(1).max(200), coverageType: z.enum(["PERSON", "CREATURE", "VEHICLE", "SCENE", "FX_MATERIAL", "BRAND", "COMPOSITION_GOAL", "PROP", "OTHER"]), classification: z.enum(["CANONICAL_ASSET", "VARIANT", "SCENE_ANCHOR", "VISUAL_SYSTEM", "SHOT_LOCAL", "COMPOSITION_MOTIF"]), candidateIndexes: z.array(z.number().int().nonnegative()).max(20), existingCanonicalKeys: z.array(z.string()).max(20), note: z.string().max(600) }).strict();
 const outputSchemas = {
-  ASSET_EXTRACTION: z.object({ candidates: z.array(candidate).max(80), mergeSuggestions: z.array(z.object({ candidateIndex: z.number().int().nonnegative(), existingCanonicalKey: z.string(), reason: z.string() }).strict()).max(80), coverage: z.array(coverage).max(100).default([]) }).strict(),
+  ASSET_EXTRACTION: assetExtractionModelSchema,
   ASSET_PROMPTS: z.object({ prompts: z.array(z.object({ canonicalKey: z.string(), prompt: z.string().min(1).max(8000), reason: z.string().max(1000) }).strict()).max(100) }).strict(),
   STORYBOARD_BATCH: z.object({ shots: z.array(z.object({ duration: z.number().positive().max(600), prompt: z.string().min(1).max(20000), videoDesc: z.string().max(20000), productionMode: z.enum(["REAL_ASSET_DIRECT", "AI_TEXT_TO_IMAGE", "REAL_AI_COMPOSITE"]), primaryKey: z.string().nullable(), canonicalKeys: z.array(z.string()).max(50) }).strict()).min(1).max(100) }).strict(),
 };
 const instructions = {
-  ASSET_EXTRACTION: "方法 v04.asset-extraction.v2：以已确认 Creative Truth（尤其 Treatment）为来源，按五个逻辑 pass 逐项检查：1 Entity 人物/生物/载具/道具/品牌；2 Environment 主/子/重复空间、环境锚点和时间氛围；3 Visual System 持续 FX、材质、能量、光与色彩；4 Continuity Relationship 共享视觉系统、变体、canonical 与 shot-local；5 Coverage Audit 列出 Treatment 每个重要视觉元素，包括尚未覆盖者，并给出分类。Treatment 非空时 coverage 不能是空数组。不要只提取主体，也不要凭空补 Treatment 没有的项目专属元素。核心人物、生物、载具、道具 importance=CORE，场景/FX/品牌不默认三视图。已有 canonical identity 不得重复创建；已存在的 Logo 只给 mergeSuggestions/reference usage。新候选彼此关联只用 relatedCandidateIndexes/sharedVisualSystemCandidateIndex；已存在身份只用 relatedExistingKeys/sharedVisualSystemKey/ownerKey/variantOf。真实 UI/Logo/产品文字必须 REAL_REQUIRED，不能 AI 重画。coverage 每项用 candidateIndexes 或 existingCanonicalKeys 指明覆盖；未覆盖项留空并说明，shot-local/构图母题可分类记录而不伪造资产。prompt 可为空，详细 Prompt 留给 ASSET_PROMPTS。",
+  ASSET_EXTRACTION: "方法 v04.asset-extraction.v2：以已确认 Creative Truth（尤其 Treatment）为来源，按五个逻辑 pass 逐项检查：1 Entity 人物/生物/载具/道具/品牌；2 Environment 主/子/重复空间、环境锚点和时间氛围；3 Visual System 持续 FX、材质、能量、光与色彩；4 Continuity Relationship 共享视觉系统、变体、canonical 与 shot-local；5 Coverage Audit 列出 Treatment 每个重要视觉元素，包括尚未覆盖者，并给出分类。Treatment 非空时 coverage 不能是空数组。不要只提取主体，也不要凭空补 Treatment 没有的项目专属元素。核心人物、生物、载具、道具 importance=CORE，场景/FX/品牌不默认三视图。已有 canonical identity 不得重复创建；已存在的 Logo 只给 mergeSuggestions/reference usage。新候选彼此关联只用 relatedCandidateRefs/sharedVisualSystemRef；已存在身份只用 relatedExistingKeys/sharedVisualSystemKey/ownerKey/variantOf。真实 UI/Logo/产品文字必须 REAL_REQUIRED，不能 AI 重画。coverage 每项用 candidateRefs 或 existingCanonicalKeys 指明覆盖；未覆盖项留空并说明，shot-local/构图母题可分类记录而不伪造资产。prompt 可为空，详细 Prompt 留给 ASSET_PROMPTS。",
   ASSET_PROMPTS: "方法 v04.asset-prompt.v1：为每个已有 Canonical Asset 生成独立且一致的素材 Prompt 草案。维持 identityAnchors 和 mustPreserve，遵守 forbiddenChanges。真实 UI、Logo、文字不能由 AI 重画。只返回现有 canonicalKey。",
   STORYBOARD_BATCH: "方法 v04.storyboard-batch.v1：根据已确认 Creative 和 Asset Bible 提出约目标时长的分镜方案。引用只用给定 canonicalKey。真实 UI/Logo 必须 REAL_ASSET_DIRECT 或 REAL_AI_COMPOSITE，不要用 AI_TEXT_TO_IMAGE 伪造真实界面。此结果只是提案，不是生产数据库。",
 } as const;
@@ -29,14 +27,15 @@ function requestsDurationChange(instruction: string) {
   if (/(?:不要|不需|无需|保持|别|勿).{0,12}(?:目标时长|片长|总时长|duration)|(?:目标时长|片长|总时长|duration).{0,8}(?:保持|不改|不变)/i.test(instruction)) return false;
   return /(?:目标时长|片长|总时长|duration).{0,16}(?:先按|按|改|调整|修改|设|定|变成)|(?:请|想|建议|希望).{0,16}(?:目标时长|片长|总时长|duration)|(?:延长|缩短).{0,24}\d{1,3}\s*(?:秒|s\b|seconds?)/i.test(instruction);
 }
-function logSkillFailure(data: z.infer<typeof request>, correlationId: string, errorCode: string, error: unknown, modelReference?: string) {
+function logSkillFailure(data: z.infer<typeof request>, correlationId: string, errorCode: string, error: unknown, modelReference?: string, repairAttempt?: number) {
   const reference = modelReference && /^[A-Za-z0-9._:/-]{1,128}$/.test(modelReference) && !/(?:secret|token|key|authorization|sk-)/i.test(modelReference) ? modelReference : null;
   console.error("[V04 Skill][Failure]", {
     method: data.method, projectId: data.projectId, scriptId: data.scriptId,
     errorCode, errorName: error instanceof Error ? error.name : "Error",
     correlationId, modelReference: reference,
     providerId: reference?.includes(":") ? reference.split(":", 1)[0] : null,
-    status: safeStructuredStatus(error),
+    status: safeStructuredStatus(error), repairAttempt,
+    validation: structuredValidationSummary(error),
   });
 }
 
@@ -90,9 +89,9 @@ export async function previewSkill(input: unknown) {
     throw new PilotError("PILOT_SKILL_MODEL_FAILED", "文本模型调用失败，请检查供应商配置", 502);
   }
   const schema = outputSchemas[data.method];
-  const skeleton = data.method === "ASSET_EXTRACTION" ? { candidates: [{ name: "", category: "CHAR", description: "", identityAnchors: [], mustPreserve: [], forbiddenChanges: [], ownerKey: null, variantOf: null, sourcePolicy: "AI_ALLOWED", prompt: "", assetKind: "HUMAN_CHARACTER", importance: "CORE", relatedExistingKeys: [], relatedCandidateIndexes: [], sharedVisualSystemKey: null, sharedVisualSystemCandidateIndex: null, extractionPass: "ENTITY" }], mergeSuggestions: [], coverage: [{ label: "", coverageType: "PERSON", classification: "CANONICAL_ASSET", candidateIndexes: [0], existingCanonicalKeys: [], note: "" }] } :
+  const skeleton = data.method === "ASSET_EXTRACTION" ? { candidates: [{ name: "", category: "CHAR", assetKind: "HUMAN_CHARACTER", importance: "CORE", description: "", sourcePolicy: "AI_ALLOWED", extractionPass: "ENTITY" }], coverage: [{ label: "", coverageType: "PERSON", classification: "CANONICAL_ASSET", candidateRefs: ["candidate name"] }] } :
     data.method === "ASSET_PROMPTS" ? { prompts: [{ canonicalKey: "", prompt: "", reason: "" }] } : { shots: [{ duration: 3, prompt: "", videoDesc: "", productionMode: "AI_TEXT_TO_IMAGE", primaryKey: null, canonicalKeys: [] }] };
-  const system = `${renderProjectAgentSystem(context)}\n${instructions[data.method]}\nReturn one valid JSON object only. Use this JSON structure: ${JSON.stringify(skeleton)}. No markdown or extra fields. Do not claim changes were applied.`;
+  const system = `${renderProjectAgentSystem(context)}\n${instructions[data.method]}\n${data.method === "ASSET_EXTRACTION" ? "候选关系、合并建议和 coverage 用候选名称或唯一 localRef（relatedCandidateRefs / sharedVisualSystemRef / candidateRef / candidateRefs），不要维护数字下标。已有身份用真实 canonicalKey。只有真实存在的关系才输出可选字段；identityAnchors、mustPreserve、forbiddenChanges、prompt、ownerKey、variantOf 等无内容时可省略，服务器会补安全默认值。Coverage 必须如实列出未覆盖项。" : ""}\nReturn one valid JSON object only. Use this JSON structure: ${JSON.stringify(skeleton)}. No markdown or extra fields. Do not claim changes were applied.`;
   const user = JSON.stringify({ method: data.method });
   let output: any;
   let repairContext = "";
@@ -104,11 +103,9 @@ export async function previewSkill(input: unknown) {
       if (attempt) messages.push({ role: "user", content: `The previous structured result failed validation. Repair format and field types only; do not reconsider creative decisions or add new assets. Return one complete JSON object matching ${JSON.stringify(skeleton)}. Previous result or SDK repair context: ${repairContext}` });
       const result = await session.invokeObject({ system, messages, schema: schema as any });
       candidate = result.object;
-      output = schema.parse(candidate);
+      output = data.method === "ASSET_EXTRACTION" ? normalizeAssetExtraction(candidate) : schema.parse(candidate);
       if (data.method === "ASSET_EXTRACTION" && context.creative.treatment.trim() && !output.coverage.length)
         throw new z.ZodError([{ code: "custom", path: ["coverage"], message: "已确认 Treatment 必须有覆盖审计" }]);
-      if (data.method === "ASSET_EXTRACTION" && context.creative.treatment.trim() && (candidate as any).candidates.some((item: any) => !item.assetKind || !item.importance || !item.extractionPass))
-        throw new z.ZodError([{ code: "custom", path: ["candidates"], message: "Treatment 候选必须明确子类型、重要性与提取阶段" }]);
       if (data.method === "ASSET_EXTRACTION" && context.creative.treatment.trim()) {
         const accounted = new Set<number>([...output.coverage.flatMap((item: any) => item.candidateIndexes), ...output.mergeSuggestions.map((item: any) => item.candidateIndex)]);
         if (output.candidates.some((_: any, index: number) => !accounted.has(index)))
@@ -117,10 +114,10 @@ export async function previewSkill(input: unknown) {
       break;
     } catch (error) {
       if (!structuredFailure(error)) {
-        logSkillFailure(data, correlationId, "PILOT_SKILL_MODEL_FAILED", error, session.modelReference);
+        logSkillFailure(data, correlationId, "PILOT_SKILL_MODEL_FAILED", error, session.modelReference, attempt);
         throw new PilotError("PILOT_SKILL_MODEL_FAILED", "文本模型调用失败，请检查供应商配置", 502);
       }
-      logSkillFailure(data, correlationId, "PILOT_SKILL_SCHEMA_FAILED", error, session.modelReference);
+      logSkillFailure(data, correlationId, "PILOT_SKILL_SCHEMA_FAILED", error, session.modelReference, attempt);
       if (attempt) throw new PilotError("PILOT_SKILL_SCHEMA_FAILED", "模型已返回内容，但提案结构不符合要求或输出不完整，请重试", 502);
       repairContext = structuredRepairContext(error, candidate);
     }
@@ -132,6 +129,10 @@ export async function previewSkill(input: unknown) {
     if (data.method === "ASSET_EXTRACTION") {
       if (output.mergeSuggestions.some((s: any) => s.candidateIndex >= output.candidates.length || !keys.has(s.existingCanonicalKey))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "AI 合并建议引用无效", 422);
       if (output.candidates.some((asset: any, index: number) => [asset.ownerKey, asset.variantOf, asset.sharedVisualSystemKey, ...asset.relatedExistingKeys].some(key => key && !keys.has(key)) || asset.relatedCandidateIndexes.some((i: number) => i >= output.candidates.length || i === index) || asset.sharedVisualSystemCandidateIndex !== null && (asset.sharedVisualSystemCandidateIndex >= output.candidates.length || asset.sharedVisualSystemCandidateIndex === index))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "候选关系只能引用当前项目身份或本次有效候选", 422);
+      if (output.candidates.some((asset: any) => (["BRAND", "UI"].includes(asset.category) && asset.sourcePolicy !== "REAL_REQUIRED") ||
+        (asset.sharedVisualSystemCandidateIndex !== null && !["FX", "MATERIAL_FX"].includes(output.candidates[asset.sharedVisualSystemCandidateIndex]?.category) && output.candidates[asset.sharedVisualSystemCandidateIndex]?.assetKind !== "MATERIAL_FX") ||
+        (asset.sharedVisualSystemKey && !context.assetBibleIndex.some(existing => existing.canonicalKey === asset.sharedVisualSystemKey && (existing.category === "FX" || existing.assetKind === "MATERIAL_FX")))))
+        throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "真实品牌与界面来源或共享视觉系统关系无效", 422);
       if (output.coverage.some((item: any) => item.candidateIndexes.some((i: number) => i >= output.candidates.length) || item.existingCanonicalKeys.some((key: string) => !keys.has(key)))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "覆盖清单引用无效", 422);
       if (output.candidates.some((asset: any, index: number) => context.assetBibleIndex.some(existing => existing.category === asset.category && existing.name.trim().toLocaleLowerCase() === asset.name.trim().toLocaleLowerCase() && !output.mergeSuggestions.some((s: any) => s.candidateIndex === index && s.existingCanonicalKey === existing.canonicalKey)))) throw new PilotError("PILOT_SKILL_REFERENCE_INVALID", "已有素材身份只能提出合并建议，不能作为新候选创建", 422);
     }

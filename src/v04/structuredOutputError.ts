@@ -40,3 +40,9 @@ export function safeStructuredStatus(error: unknown): number | null {
   }
   return null;
 }
+
+// Paths and issue types only: never include the model response, prompt or provider headers in logs.
+export function structuredValidationSummary(error: unknown) {
+  return errorChain(error).flatMap(item => item instanceof ZodError
+    ? item.issues.slice(0, 20).map(issue => ({ path: issue.path.join("."), failureType: issue.code })) : []);
+}
