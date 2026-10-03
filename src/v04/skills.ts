@@ -142,6 +142,8 @@ export async function previewSkill(input: unknown) {
       repairContext = structuredRepairContext(error, candidate);
     }
   }
+  let relationStatus: "READY" | "NEEDS_REVIEW" = "READY";
+  let relationIssue: { code: string; message: string } | null = null;
   if (data.method === "ASSET_EXTRACTION" && semanticExtraction && context.creative.treatment.trim() && output.candidates.length > 1) {
     // A second small model call decides only relationships between the already
     // compiled exact names. It cannot create entities, coverage or project truth.
@@ -160,11 +162,17 @@ export async function previewSkill(input: unknown) {
         break;
       } catch (error) {
         if (!structuredFailure(error)) {
-          logSkillFailure(data, correlationId, "PILOT_SKILL_MODEL_FAILED", error, session.modelReference, attempt);
-          throw new PilotError("PILOT_SKILL_MODEL_FAILED", "文本模型调用失败，请检查供应商配置", 502);
+          logSkillFailure(data, correlationId, "PILOT_RELATION_MODEL_FAILED", error, session.modelReference, attempt);
+          relationStatus = "NEEDS_REVIEW";
+          relationIssue = { code: "PILOT_RELATION_MODEL_FAILED", message: "关系分析未完成，请人工核对共享视觉系统和连续形态" };
+          break;
         }
-        logSkillFailure(data, correlationId, "PILOT_SKILL_SCHEMA_FAILED", error, session.modelReference, attempt);
-        if (attempt) throw new PilotError("PILOT_SKILL_SCHEMA_FAILED", "模型已返回内容，但元素关系不符合要求，请重试", 502);
+        logSkillFailure(data, correlationId, "PILOT_RELATION_SCHEMA_FAILED", error, session.modelReference, attempt);
+        if (attempt) {
+          relationStatus = "NEEDS_REVIEW";
+          relationIssue = { code: "PILOT_RELATION_SCHEMA_FAILED", message: "关系分析未完成，请人工核对共享视觉系统和连续形态" };
+          break;
+        }
         relationRepair = structuredRepairContext(error, relationCandidate);
       }
     }
@@ -212,6 +220,7 @@ export async function previewSkill(input: unknown) {
     }
     const { proposal: _proposal, ...review } = sufficiency ?? { proposal: null };
     return { method: data.method, skillId: `v04.${data.method.toLowerCase().replaceAll('_','-')}.${data.method === "ASSET_EXTRACTION" ? "v2" : "v1"}`, output, applied: false, sourceVersion: context.creative.version, repairAttempts,
+      ...(data.method === "ASSET_EXTRACTION" ? { relationStatus, relationIssue } : {}),
       ...(sufficiency ? { sufficiency: review } : {}) };
   } catch (error) {
     if (error instanceof PilotError) { logSkillFailure(data, correlationId, error.code, error, session.modelReference); throw error; }

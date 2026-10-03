@@ -655,6 +655,13 @@ test('OPT-025 sufficiency checks ownership, exact Treatment evidence and false r
   const review=auditAssetSufficiency(proposal,treatment,audit);
   assert.equal(review.status,'NEEDS_REVIEW');
   assert.deepEqual(review.requirements.filter(row=>row.status==='MISSING').map(row=>row.label),['Final Sky']);
+  assert.equal(new Set(review.requirements.map(row=>row.requirementKey)).size,review.requirements.length);
+  assert.deepEqual(auditAssetSufficiency(proposal,treatment,audit).requirements.map(row=>row.requirementKey),review.requirements.map(row=>row.requirementKey),'same proposal snapshot yields stable requirement identity');
+  assert.equal(review.requirements.at(-1).sourceCoverageIndex,null,'audit missing is not identified by a coverage array position');
+  const twoMissingAudit={...audit,environments:[...audit.environments,{label:'Moonlit cloud bank',evidenceQuote:'final sky',coveredByName:null,reason:'Second distinct space'}]};
+  const twoMissing=auditAssetSufficiency(proposal,treatment,twoMissingAudit).requirements.filter(row=>row.sourceCoverageIndex===null);
+  assert.equal(twoMissing.length,2);assert.equal(new Set(twoMissing.map(row=>row.requirementKey)).size,2);
+  assert.deepEqual(twoMissing.map(row=>row.requirementKey),auditAssetSufficiency(proposal,treatment,twoMissingAudit).requirements.filter(row=>row.sourceCoverageIndex===null).map(row=>row.requirementKey));
   assert.equal(review.requirements.find(row=>row.label==='Boy reaches').status,'DOCUMENTED','a beat does not become a required asset');
   assert.equal(review.proposal.coverage.some(row=>row.label==='Software UI screen'),false,'policy-only UI cannot become a missing requirement');
   assert.equal(review.excludedUngroundedCoverage,1);
@@ -695,14 +702,18 @@ test('OPT-025 human review cannot bypass REAL_REQUIRED for BRAND or UI', async t
 test('V0.4 two-stage extraction pins one session, compiles exact-name relations, and remains zero-write', async t => {
   const {db,oss,cache,service:s}=await fixture(t);
   const scope=await s.createPilotProject({name:'Relations pilot',brief:'Shared glowing material',targetDuration:40,aspectRatio:'16:9'},7);
-  const creative={...scope,brief:'Shared glowing material',treatment:'One glowing material becomes a ship, then a submarine, then a winged creature. It rises into the high night sky.',script:'',targetDuration:40,expectedVersion:1};
+  const brand={operation:'ADD',clientRef:'brand',asset:asset('Brand Mark','BRAND','REAL_REQUIRED')};
+  const brandPreview=await s.previewAssets({...scope,changes:[brand]});
+  await s.applyAssets({...scope,changes:[brand],previewHash:brandPreview.previewHash});
+  const creative={...scope,brief:'Shared glowing material',treatment:'One glowing material becomes a ship, then a submarine, then a winged creature. It rises into the high night sky. A Brand Mark appears at the end.',script:'',targetDuration:40,expectedVersion:1};
   const preview=await s.previewCreative(creative);await s.applyCreative({...creative,previewHash:preview.previewHash});
   const lean={visualElements:[
     {name:'Glow',type:'MATERIAL_FX',description:'shared material'},
     {name:'Ship',type:'VEHICLE',description:'first form'},
     {name:'Submarine',type:'VEHICLE',description:'second form'},
     {name:'Winged Creature',type:'CREATURE',description:'third form'},
-  ],coverage:[...['Glow','Ship','Submarine','Winged Creature'].map(name=>({label:name,elementNames:[name]})),{label:'Software UI screen',type:'UI_REFERENCE',elementNames:[]}]};
+    {name:'Brand Mark',type:'BRAND_MARK',description:'existing mark',existingCanonicalKey:'BRAND-001'},
+  ],coverage:[...['Glow','Ship','Submarine','Winged Creature','Brand Mark'].map(name=>({label:name,elementNames:[name]})),{label:'Software UI screen',type:'UI_REFERENCE',elementNames:[]}]};
   const relations={sharedSystems:[{systemName:'Glow',memberNames:['Ship','Submarine','Winged Creature']}],
     continuityGroups:[{memberNames:['Ship','Submarine','Winged Creature']}]};
   const audit={missing:[{label:'High night sky',type:'SCENE',evidenceQuote:'high night sky',reason:'Distinct final environment'}],unsupportedCoverageLabels:['Software UI screen']};
@@ -712,6 +723,7 @@ test('V0.4 two-stage extraction pins one session, compiles exact-name relations,
   oss.skillResponses=[lean,relations,audit];
   const result=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
   assert.equal(result.applied,false);assert.equal(result.repairAttempts,0);
+  assert.equal(result.relationStatus,'READY');assert.equal(result.relationIssue,null);
   assert.equal(result.output.candidates[1].sharedVisualSystemCandidateIndex,0);
   assert.deepEqual(result.output.candidates[1].relatedCandidateIndexes,[0,2,3]);
   assert.equal(oss.sessionCount,1);assert.equal(oss.modelCalls.length,3);
@@ -724,10 +736,24 @@ test('V0.4 two-stage extraction pins one session, compiles exact-name relations,
   assert.deepEqual(await db('o_v04AssetCoverage').where(scope),beforeCoverage);
   oss.skillResponses=[lean,{sharedSystems:[{systemName:'Ship',memberNames:['Submarine']}],continuityGroups:[]},relations,audit];
   const repaired=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
-  assert.equal(repaired.repairAttempts,1);assert.equal(oss.modelCalls.length,7,'relation repair is bounded to one additional call');
-  oss.skillResponses=[lean,{sharedSystems:[{systemName:'Other',memberNames:['Ship']}],continuityGroups:[]},{sharedSystems:[{systemName:'Other',memberNames:['Ship']}],continuityGroups:[]}];
-  await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_SCHEMA_FAILED');
+  assert.equal(repaired.repairAttempts,1);assert.equal(repaired.relationStatus,'READY');assert.equal(oss.modelCalls.length,7,'relation repair is bounded to one additional call');
+  oss.skillResponses=[lean,{sharedSystems:[{systemName:'Other',memberNames:['Ship']}],continuityGroups:[]},{sharedSystems:[{systemName:'Other',memberNames:['Ship']}],continuityGroups:[]},audit];
+  const unresolved=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
+  assert.equal(unresolved.applied,false);assert.equal(unresolved.repairAttempts,1);
+  assert.equal(unresolved.relationStatus,'NEEDS_REVIEW');assert.equal(unresolved.relationIssue.code,'PILOT_RELATION_SCHEMA_FAILED');
+  assert.equal(unresolved.output.candidates.length,lean.visualElements.length);
+  assert.equal(unresolved.output.mergeSuggestions.some(item=>item.existingCanonicalKey==='BRAND-001'),true,'fail-soft preserves confirmed identity merge');
+  assert.equal(unresolved.output.candidates.every(item=>item.relatedCandidateIndexes.length===0 && item.sharedVisualSystemCandidateIndex===null),true,'invalid relations are never retained');
+  assert.ok(unresolved.output.coverage.length>0);assert.equal(unresolved.sufficiency.status,'NEEDS_REVIEW');
+  const beforeProviderCalls=oss.modelCalls.length;
+  oss.skillResponses=[lean,Error('Authorization: Bearer private-token'),audit];
+  const providerUnresolved=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
+  assert.equal(providerUnresolved.relationStatus,'NEEDS_REVIEW');
+  assert.equal(providerUnresolved.relationIssue.code,'PILOT_RELATION_MODEL_FAILED');
+  assert.doesNotMatch(JSON.stringify(providerUnresolved.relationIssue),/private-token/);
+  assert.equal(oss.modelCalls.length-beforeProviderCalls,3,'provider failure does not add a blind relation retry');
   assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),beforeAssets);
+  assert.deepEqual(await db('o_v04AssetCoverage').where(scope),beforeCoverage);
 });
 
 test('OPT-024B provider labels accept common English and Chinese aliases; canonical proposal remains strict', () => {

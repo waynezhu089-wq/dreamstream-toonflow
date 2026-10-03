@@ -10,6 +10,11 @@ const auditResponse = z.object({
   unsupportedCoverageLabels: z.array(z.string().trim().min(1).max(200)).max(30),
 }).passthrough();
 const key = (value: string) => value.normalize("NFKC").toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+type Requirement = {
+  requirementKey: string; sourceCoverageIndex: number | null; label: string; coverageType: string; classification: string;
+  status: string; candidateNames: string[]; existingCanonicalKeys: string[]; note: string;
+  suggestedAsset: { name: string; category: string; assetKind: string; importance: string; sourcePolicy: string } | null;
+};
 
 // A review aid, never a Gate or an automatic Asset Bible mutation. Coverage
 // ownership is evidence; a fixed candidate count is not.
@@ -26,13 +31,21 @@ export function auditAssetSufficiency(proposal: Proposal, treatment: string, raw
   });
   const nextProposal = retainedCoverage.length === proposal.coverage.length ? proposal
     : assetExtractionProposalSchema.parse({ ...proposal, coverage: retainedCoverage });
-  const requirements = nextProposal.coverage.map((item, index) => {
+  const occurrences = new Map<string, number>();
+  const requirementKey = (source: string, type: string, label: string) => {
+    const base = `${source}:${type}:${key(label)}`;
+    const occurrence = (occurrences.get(base) ?? 0) + 1;
+    occurrences.set(base, occurrence);
+    return `${base}:${occurrence}`;
+  };
+  const requirements: Requirement[] = nextProposal.coverage.map((item, index) => {
     const candidateNames = item.candidateIndexes.map(i => nextProposal.candidates[i].name);
     const hasOwner = candidateNames.length > 0 || item.existingCanonicalKeys.length > 0;
     const documented = item.classification === "SHOT_LOCAL" || item.classification === "COMPOSITION_MOTIF";
     const status = documented ? "DOCUMENTED" : hasOwner ? "COVERED" : "MISSING";
     return {
-      index, label: item.label, coverageType: item.coverageType, classification: item.classification,
+      requirementKey: requirementKey("coverage", item.coverageType, item.label), sourceCoverageIndex: index,
+      label: item.label, coverageType: item.coverageType, classification: item.classification,
       status, candidateNames, existingCanonicalKeys: item.existingCanonicalKeys,
       note: item.note,
       suggestedAsset: status === "MISSING" && item.coverageType === "SCENE"
@@ -48,7 +61,8 @@ export function auditAssetSufficiency(proposal: Proposal, treatment: string, raw
     if (quote.length < 3 || !key(treatment).includes(quote)) { ungrounded++; continue; }
     if (environment.coveredByName && candidateEnvironmentNames.has(key(environment.coveredByName))) continue;
     if (requirements.some(row => key(row.label) === key(environment.label))) continue;
-    requirements.push({ index: requirements.length, label: environment.label, coverageType: "SCENE", classification: "SCENE_ANCHOR",
+    requirements.push({ requirementKey: requirementKey("audit", "SCENE", environment.label), sourceCoverageIndex: null,
+      label: environment.label, coverageType: "SCENE", classification: "SCENE_ANCHOR",
       status: "MISSING", candidateNames: [], existingCanonicalKeys: [], note: environment.reason,
       suggestedAsset: { name: environment.label, category: "LOC", assetKind: "ENVIRONMENT", importance: "SUPPORTING", sourcePolicy: "AI_ALLOWED" } });
   }
@@ -56,7 +70,8 @@ export function auditAssetSufficiency(proposal: Proposal, treatment: string, raw
     const quote = key(item.evidenceQuote);
     if (quote.length < 3 || !key(treatment).includes(quote)) { ungrounded++; continue; }
     if (requirements.some(row => key(row.label) === key(item.label))) continue;
-    requirements.push({ index: requirements.length, label: item.label, coverageType: item.type,
+    requirements.push({ requirementKey: requirementKey("audit", item.type, item.label), sourceCoverageIndex: null,
+      label: item.label, coverageType: item.type,
       classification: item.type === "SCENE" ? "SCENE_ANCHOR" : "CANONICAL_ASSET",
       status: "MISSING", candidateNames: [], existingCanonicalKeys: [], note: item.reason,
       suggestedAsset: item.type === "SCENE"
@@ -73,7 +88,8 @@ export function auditAssetSufficiency(proposal: Proposal, treatment: string, raw
   if (ascentEvidence && !hasSkyEnvironment && !requirements.some(row =>
     row.status === "MISSING" && row.coverageType === "SCENE" && /高空|天空|空中|云端|云层|云海|月夜|星空/u.test(row.label))) {
     const destinationLabel = /月亮|月球/u.test(ascentEvidence) ? "高空月夜／目的地环境" : "天空目的地环境";
-    requirements.push({ index: requirements.length, label: destinationLabel, coverageType: "SCENE", classification: "SCENE_ANCHOR",
+    requirements.push({ requirementKey: requirementKey("deterministic", "SCENE", destinationLabel), sourceCoverageIndex: null,
+      label: destinationLabel, coverageType: "SCENE", classification: "SCENE_ANCHOR",
       status: "MISSING", candidateNames: [], existingCanonicalKeys: [], note: `Treatment 写到“${ascentEvidence}”，但尚无明确的目的地环境；请确认是否需要独立场景资产或现有环境变体`,
       suggestedAsset: { name: destinationLabel, category: "LOC", assetKind: "ENVIRONMENT", importance: "SUPPORTING", sourcePolicy: "AI_ALLOWED" } });
   }
