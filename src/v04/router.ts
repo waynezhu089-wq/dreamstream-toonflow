@@ -8,6 +8,7 @@ import { PilotError, applyAssets, applyCreative, createPilotProject, decide, lis
 import { previewSkill, previewCreativeProposal } from "./skills";
 import { applyAttachmentPromotion, attachmentsForMessage, getAgentAttachmentBytes, previewAttachmentPromotion, uploadAgentImage } from "./agentAttachments";
 import { answerProjectAgent } from "./agentOrchestrator";
+import { proposeAgentAction } from "./agentActionProposal";
 import { buildProjectAgentContext, projectAgentMemoryKey, renderProjectAgentSystem } from "./agentContext";
 import { applyVisualSpec, previewVisualSpec, proposeVisualSpecs, rebuildVisualPrompt, setLibraryBinding } from "./visualSpec";
 
@@ -58,6 +59,7 @@ endpoint("/visual-spec/prompt/rebuild", rebuildVisualPrompt);
 endpoint("/assets/library-binding/set", setLibraryBinding);
 endpoint("/skills/preview", previewSkill);
 endpoint("/agent/creative-proposal", previewCreativeProposal);
+endpoint("/agent/action-proposal", proposeAgentAction);
 endpoint("/agent/image/upload", uploadAgentImage);
 endpoint("/agent/reference/preview", previewAttachmentPromotion);
 endpoint("/agent/reference/apply", applyAttachmentPromotion);

@@ -123,6 +123,49 @@ test('Project Agent keeps a project-level memory identity and reads selected sho
   assert.doesNotMatch(source,/trx\("o_storyboard"\)\.insert|trx\("o_storyboard"\)\.update/);
 });
 
+test('OPT-030 Agent action proposals are scoped, machine-readable and zero-write for Visual Spec and Shot', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const action=loadSource(path.join(root,'src/v04/agentActionProposal.ts'),db,cache,oss);
+  const visual=loadSource(path.join(root,'src/v04/visualSpec.ts'),db,cache,oss);
+  const scope=await s.createPilotProject({name:'Studio',brief:'A quiet night journey',targetDuration:30,aspectRatio:'16:9'},7);
+  const other=await s.createPilotProject({name:'Other',brief:'',targetDuration:30,aspectRatio:'16:9'},7);
+  const changes=[{operation:'ADD',clientRef:'boy',asset:{...asset('Boy'),assetKind:'HUMAN_CHARACTER',importance:'CORE'}},
+    {operation:'ADD',clientRef:'night',asset:{...asset('Night Island','LOC'),assetKind:'ENVIRONMENT',importance:'CORE'}}];
+  const ap=await s.previewAssets({...scope,changes});await s.applyAssets({...scope,changes,previewHash:ap.previewHash});
+  oss.proposalOutput={visualIdentitySummary:'Young boy in a blue coat',silhouette:'small child',primaryPalette:['blue'],details:{ageRange:'8–10',footwear:'shoes',hair:{color:'black',silhouette:'short fringe'},body:{build:'slim'},wardrobe:{upper:'blue coat'}}};
+  const candidate=(await visual.proposeVisualSpecs({...scope,canonicalKeys:['CHAR-001']})).candidates[0];
+  const vp=await visual.previewVisualSpec({...scope,canonicalKey:'CHAR-001',sourceAssetRevision:candidate.sourceAssetRevision,spec:candidate.spec});
+  await visual.applyVisualSpec({...scope,canonicalKey:'CHAR-001',sourceAssetRevision:candidate.sourceAssetRevision,spec:candidate.spec,previewHash:vp.previewHash});
+  const [shotId]=await db('o_storyboard').insert({...scope,index:1,prompt:'Boy walks through the island',videoDesc:'Slow tracking',duration:5,state:'未生成',productionSpec:'{}'});
+  const beforeAsset=await db('o_v04Asset').where({projectId:scope.projectId,canonicalKey:'CHAR-001'}).first();
+  const beforeSpec=await db('o_v04AssetVisualSpec').where({projectId:scope.projectId,canonicalKey:'CHAR-001'}).orderBy('revision','desc').first();
+  const beforeShot=await db('o_storyboard').where({id:shotId}).first();
+  const callsBefore=oss.modelCalls.length;
+  const ambiguous=await action.proposeAgentAction({...scope,instruction:'再瘦一点',scope:{type:'PROJECT'}});
+  assert.equal(ambiguous.status,'NEEDS_TARGET_CONFIRMATION');assert.equal(ambiguous.applied,false);assert.equal(oss.modelCalls.length,callsBefore);
+  oss.proposalOutput={summary:'让男孩更瘦',rationale:'保留儿童比例',patch:{silhouette:'slim child in blue coat',details:{body:{build:'slender child'}}}};
+  const proposed=await action.proposeAgentAction({...scope,instruction:'再瘦一点',scope:{type:'ASSET',key:'CHAR-001'}});
+  assert.equal(proposed.targetType,'VISUAL_SPEC');assert.equal(proposed.applied,false);
+  assert.equal(proposed.proposal.spec.details.body.build,'slender child');
+  assert.equal(proposed.proposal.spec.assetKind,'HUMAN_CHARACTER');
+  assert.equal(proposed.sourceRevision,candidate.sourceAssetRevision);
+  oss.proposalOutput={visualIdentitySummary:'Night island under blue stars',silhouette:'low island',primaryPalette:['blue'],details:{spaceType:'island',foreground:'shore',midground:'trees',background:'night sky',lighting:'moonlight',atmosphere:'quiet'}};
+  const environment=(await visual.proposeVisualSpecs({...scope,canonicalKeys:['LOC-001']})).candidates[0];
+  oss.proposalOutput={summary:'夜空更深',rationale:'保持岛屿布局',patch:{details:{lighting:'deeper blue moonlight'}}};
+  const environmental=await action.proposeAgentAction({...scope,instruction:'更像夜空',scope:{type:'ASSET',key:'LOC-001'},optionalDraft:{sourceAssetRevision:environment.sourceAssetRevision,spec:environment.spec}});
+  assert.equal(environmental.targetType,'VISUAL_SPEC');assert.equal(environmental.proposal.spec.details.lighting,'deeper blue moonlight');
+  assert.equal((await db('o_v04AssetVisualSpec').where({projectId:scope.projectId,canonicalKey:'LOC-001'})).length,0,'unconfirmed Studio draft remains zero-write');
+  const identity=await action.proposeAgentAction({...scope,instruction:'把这个名字改成小梦',scope:{type:'ASSET',key:'CHAR-001'}});
+  assert.equal(identity.status,'NEEDS_TARGET_CONFIRMATION');assert.equal(identity.suggestedTargetType,'ASSET_IDENTITY');
+  oss.proposalOutput={summary:'缩短镜头',rationale:'节奏更紧',patch:{duration:3}};
+  const shot=await action.proposeAgentAction({...scope,instruction:'缩短到3秒',scope:{type:'SHOT',key:String(shotId)}});
+  assert.equal(shot.targetType,'STORYBOARD_SHOT');assert.deepEqual(shot.proposal,{type:'EDIT',storyboardId:shotId,patch:{duration:3}});
+  await assert.rejects(action.proposeAgentAction({...other,instruction:'缩短到3秒',scope:{type:'SHOT',key:String(shotId)}}),e=>e.code==='PILOT_ACTION_TARGET_INVALID');
+  assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId,canonicalKey:'CHAR-001'}).first(),beforeAsset);
+  assert.deepEqual(await db('o_v04AssetVisualSpec').where({projectId:scope.projectId,canonicalKey:'CHAR-001'}).orderBy('revision','desc').first(),beforeSpec);
+  assert.deepEqual(await db('o_storyboard').where({id:shotId}).first(),beforeShot);
+});
+
 test('confirmed Asset Bible truth follows Project Agent from Assets to Creative without leaking into another project', async t => {
   const {db,oss,cache,service:s}=await fixture(t);
   const scope=await s.createPilotProject({name:'Brand pilot',brief:'Brand ending',targetDuration:30,aspectRatio:'16:9'},7);

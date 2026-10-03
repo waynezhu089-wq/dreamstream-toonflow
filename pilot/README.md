@@ -4,7 +4,9 @@ Status: **EXPERIMENTAL / NOT ACCEPTED**. This checkout and its `userdata/pilot/d
 
 Run `start-v04-pilot.ps1` from this directory to start backend `10589` and frontend `50189` in hidden local processes. The launcher reads the sole account ID from the existing disposable database and enables Revision Confirm for that account. On a brand-new database it boots without Revision Confirm; after the first account exists, stop those pilot processes and run the launcher again. The exact data path and process IDs are printed, and logs stay in `v04-experiment/logs`.
 
-Open <http://127.0.0.1:50189/#/pilot> and sign in to the disposable experimental environment. Create a new advertisement project there. Keep any real brand pilot project separate from development smoke projects already in this disposable database.
+Open <http://127.0.0.1:50189/#/studio> and sign in to the disposable experimental environment. Studio and <http://127.0.0.1:50189/#/professional> read the same project truth. The older `/#/pilot` bookmark redirects to Professional. Keep any real brand pilot project separate from development smoke projects already in this disposable database.
+
+OPT-030 first version: Studio shows visual asset groups, confirmed reference images, storyboard cards, Project Agent, and the shared browser-session Review Center. A draft in sessionStorage is recoverable UI state, never authoritative truth. “确认所有正常项” runs the existing Visual Spec Preview and Apply sequentially, excluding warnings, stale revisions and incomplete items. The separate `/v04/agent/action-proposal` endpoint returns zero-write Visual Spec or Storyboard proposals. Shot acceptance uses the existing controlled Semantic Revision flow. Asset identity changes remain in Professional; the Studio Agent action returns a target-confirmation boundary for them. No image generation is added by this workspace.
 
 Persistent Project Agent check (do this before continuing the broader pilot):
 

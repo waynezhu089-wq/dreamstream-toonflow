@@ -41,6 +41,7 @@ $env:DS_REVISION_CONFIRM_ENABLED = if ($OwnerUserId -gt 0) { 'true' } else { 'fa
 $backend = if (-not $backendRunning) { Start-Process -FilePath 'cmd.exe' -ArgumentList '/d','/c','node_modules\.bin\tsx.cmd src\app.ts' -WorkingDirectory $backendRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir 'backend.out.log') -RedirectStandardError (Join-Path $logDir 'backend.err.log') -PassThru } else { $null }
 $frontend = if (-not $frontendRunning) { Start-Process -FilePath 'cmd.exe' -ArgumentList '/d','/c','node_modules\.bin\vite.cmd --host 127.0.0.1 --port 50189 --strictPort' -WorkingDirectory $frontendRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir 'frontend.out.log') -RedirectStandardError (Join-Path $logDir 'frontend.err.log') -PassThru } else { $null }
 Write-Output "Backend: $(if($backend){'started PID '+$backend.Id}else{'already running'}); Frontend: $(if($frontend){'started PID '+$frontend.Id}else{'already running'})"
-Write-Output "Pilot: http://127.0.0.1:50189/#/pilot"
+Write-Output "Studio: http://127.0.0.1:50189/#/studio"
+Write-Output "Professional: http://127.0.0.1:50189/#/professional"
 Write-Output "Data: $dataDir"
 if ($OwnerUserId -eq 0) { Write-Warning 'No unique existing owner account was found. Revision Confirm stays disabled until an owner account exists and this launcher is restarted.' }
