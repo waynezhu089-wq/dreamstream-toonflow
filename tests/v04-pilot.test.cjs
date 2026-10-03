@@ -619,12 +619,12 @@ test('V0.4 semantic JSON compiles pilot-scale entities and coverage without mode
   assert.equal(result.candidates[4].assetKind,'CREATURE','a mount remains a creature by identity');
   assert.equal(result.candidates[11].sourcePolicy,'REAL_REQUIRED');
   assert.equal(result.mergeSuggestions[0].existingCanonicalKey,'BRAND-001');
-  assert.equal(result.candidates[2].sharedVisualSystemCandidateIndex,1);
-  assert.ok(!result.candidates[2].relatedCandidateIndexes.includes(2),'redundant self-link is removed');
+  assert.equal(result.candidates[2].sharedVisualSystemCandidateIndex,null,'entity phase cannot author relationships');
+  assert.deepEqual(result.candidates[2].relatedCandidateIndexes,[]);
   assert.equal(result.coverage[1].classification,'VISUAL_SYSTEM');
   assert.equal(result.coverage[12].classification,'COMPOSITION_MOTIF');
   assert.throws(()=>compileAssetExtractionSemantic({visualElements:[{name:'Unknown',type:'MYSTERY',description:''}],coverage:[]},existing),e=>e.issues?.[0]?.path?.join('.')==='visualElements.0.type');
-  assert.throws(()=>compileAssetExtractionSemantic({visualElements:[{name:'Ship',type:'VEHICLE',description:'',sharedVisualSystemName:'Absent'}],coverage:[]},existing),e=>e.issues?.[0]?.path?.join('.')==='visualElements.0.sharedVisualSystemName');
+  assert.equal(compileAssetExtractionSemantic({visualElements:[{name:'Ship',type:'VEHICLE',description:'',sharedVisualSystemName:'Absent'}],coverage:[{label:'Ship',elementNames:['Ship']}]},existing).candidates[0].sharedVisualSystemCandidateIndex,null,'incidental relationship hints are ignored until relation phase');
   assert.throws(()=>compileAssetExtractionSemantic({visualElements:[{name:'Logo',type:'BRAND_MARK',description:'',existingCanonicalKey:'BRAND-OTHER'}],coverage:[]},existing),e=>e.issues?.[0]?.path?.join('.')==='visualElements.0.existingCanonicalKey');
   assert.throws(()=>compileAssetExtractionSemantic({visualElements:[{name:'Ship',type:'VEHICLE',description:''}],coverage:[{label:'Ship',type:'CREATURE',elementNames:['Ship']}]},existing),e=>e.issues?.[0]?.path?.join('.')==='coverage.0.type');
   const mixed=compileAssetExtractionSemantic({visualElements:[{name:'Matter',type:'MATERIAL_FX',description:''},{name:'Ship',type:'VEHICLE',description:''}],coverage:[{label:'Matter forms Ship',type:'VEHICLE',elementNames:['Matter','Ship']}]},existing);
@@ -632,35 +632,99 @@ test('V0.4 semantic JSON compiles pilot-scale entities and coverage without mode
   assert.equal(mixed.coverage[1].classification,'VISUAL_SYSTEM');
 });
 
+test('OPT-025 sufficiency checks ownership, exact Treatment evidence and false requirements without counting assets', () => {
+  const {compileAssetExtractionSemantic}=loadSource(path.join(root,'src/v04/assetExtractionSemantic.ts'),null);
+  const {auditAssetSufficiency}=loadSource(path.join(root,'src/v04/assetSufficiency.ts'),null);
+  const treatment='A boy leaves the island at night, enters the whale interior, then rises toward the moon in the final sky.';
+  const proposal=compileAssetExtractionSemantic({visualElements:[
+    {name:'Boy',type:'HUMAN_CHARACTER',description:''},
+    {name:'Island Night',type:'ENVIRONMENT',description:''},
+    {name:'Whale Interior',type:'ENVIRONMENT',description:''},
+  ],coverage:[
+    {label:'Boy',type:'HUMAN_CHARACTER',elementNames:['Boy']},
+    {label:'Island Night',type:'ENVIRONMENT',elementNames:['Island Night']},
+    {label:'Whale Interior',type:'ENVIRONMENT',elementNames:['Whale Interior']},
+    {label:'Software UI screen',type:'UI_REFERENCE',elementNames:[]},
+    {label:'Boy reaches',type:'COMPOSITION_GOAL',elementNames:[]},
+  ]},[]);
+  const audit={environments:[
+    {label:'Island Night',evidenceQuote:'island at night',coveredByName:'Island Night',reason:'Opening'},
+    {label:'Whale Interior',evidenceQuote:'whale interior',coveredByName:'Whale Interior',reason:'Interior'},
+    {label:'Final Sky',evidenceQuote:'rises toward the moon',coveredByName:null,reason:'Distinct destination environment'},
+  ],missing:[],unsupportedCoverageLabels:['Software UI screen']};
+  const review=auditAssetSufficiency(proposal,treatment,audit);
+  assert.equal(review.status,'NEEDS_REVIEW');
+  assert.deepEqual(review.requirements.filter(row=>row.status==='MISSING').map(row=>row.label),['Final Sky']);
+  assert.equal(review.requirements.find(row=>row.label==='Boy reaches').status,'DOCUMENTED','a beat does not become a required asset');
+  assert.equal(review.proposal.coverage.some(row=>row.label==='Software UI screen'),false,'policy-only UI cannot become a missing requirement');
+  assert.equal(review.excludedUngroundedCoverage,1);
+  const noAuditRejection=auditAssetSufficiency(proposal,treatment,{...audit,unsupportedCoverageLabels:[]});
+  assert.equal(noAuditRejection.proposal.coverage.some(row=>row.label==='Software UI screen'),false,'an unlinked UI requirement absent from Treatment is excluded without depending on model judgement');
+  assert.equal(review.candidateCount,3,'no fixed target asset count');
+  const invented=auditAssetSufficiency(proposal,treatment,{...audit,environments:[{label:'Invented',evidenceQuote:'not in Treatment',coveredByName:null,reason:''}]});
+  assert.equal(invented.status,'NEEDS_REVIEW');assert.equal(invented.requirements.some(row=>row.label==='Invented'),false,'ungrounded model warning is ignored');
+  const incomplete=auditAssetSufficiency(proposal,treatment);
+  assert.equal(incomplete.status,'NEEDS_REVIEW','model audit failure cannot be reported as READY');
+  const ascent='飞船从海面起飞，转向月亮，向上。';
+  const ascentProposal=compileAssetExtractionSemantic({visualElements:[
+    {name:'飞船',type:'VEHICLE',description:''},{name:'海面',type:'ENVIRONMENT',description:''},
+  ],coverage:[{label:'飞船',elementNames:['飞船']},{label:'海面',elementNames:['海面']}]},[]);
+  const ascentAudit={environments:[{label:'海面',evidenceQuote:'海面起飞',coveredByName:'海面',reason:'出发地'}],missing:[],unsupportedCoverageLabels:[]};
+  const ascentReview=auditAssetSufficiency(ascentProposal,ascent,ascentAudit);
+  assert.equal(ascentReview.status,'NEEDS_REVIEW','a final skyward transition cannot be hidden by a complete-looking environment list');
+  assert.match(ascentReview.requirements.find(row=>row.status==='MISSING').label,/目的地环境/);
+  const skyProposal=compileAssetExtractionSemantic({visualElements:[
+    {name:'飞船',type:'VEHICLE',description:''},{name:'云端夜空',type:'ENVIRONMENT',description:''},
+  ],coverage:[{label:'飞船',elementNames:['飞船']},{label:'云端夜空',elementNames:['云端夜空']}]},[]);
+  const skyReview=auditAssetSufficiency(skyProposal,ascent,{...ascentAudit,environments:[{label:'云端夜空',evidenceQuote:'转向月亮，向上',coveredByName:'云端夜空',reason:'目的地'}]});
+  assert.equal(skyReview.status,'READY','an explicitly proposed destination environment satisfies the grounded review cue');
+});
+
+test('OPT-025 human review cannot bypass REAL_REQUIRED for BRAND or UI', async t => {
+  const {db,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Real source boundary',brief:'A real logo',targetDuration:30,aspectRatio:'16:9'},7);
+  const invalid={operation:'ADD',clientRef:'bad-logo',asset:asset('Logo','BRAND','AI_ALLOWED')};
+  await assert.rejects(s.previewAssets({...scope,changes:[invalid]}),e=>e.code==='PILOT_REAL_SOURCE_REQUIRED');
+  const good={operation:'ADD',clientRef:'logo',asset:asset('Logo','BRAND','REAL_REQUIRED')};
+  const preview=await s.previewAssets({...scope,changes:[good]});
+  await s.applyAssets({...scope,changes:[good],previewHash:preview.previewHash});
+  await assert.rejects(s.previewAssets({...scope,changes:[{operation:'EDIT',canonicalKey:'BRAND-001',expectedRevision:1,patch:{sourcePolicy:'AI_ALLOWED'}}]}),e=>e.code==='PILOT_REAL_SOURCE_REQUIRED');
+  assert.equal((await db('o_v04Asset').where({projectId:scope.projectId,canonicalKey:'BRAND-001'}).first()).sourcePolicy,'REAL_REQUIRED');
+});
+
 test('V0.4 two-stage extraction pins one session, compiles exact-name relations, and remains zero-write', async t => {
   const {db,oss,cache,service:s}=await fixture(t);
   const scope=await s.createPilotProject({name:'Relations pilot',brief:'Shared glowing material',targetDuration:40,aspectRatio:'16:9'},7);
-  const creative={...scope,brief:'Shared glowing material',treatment:'One glowing material becomes a ship, then a submarine, then a winged creature.',script:'',targetDuration:40,expectedVersion:1};
+  const creative={...scope,brief:'Shared glowing material',treatment:'One glowing material becomes a ship, then a submarine, then a winged creature. It rises into the high night sky.',script:'',targetDuration:40,expectedVersion:1};
   const preview=await s.previewCreative(creative);await s.applyCreative({...creative,previewHash:preview.previewHash});
   const lean={visualElements:[
     {name:'Glow',type:'MATERIAL_FX',description:'shared material'},
     {name:'Ship',type:'VEHICLE',description:'first form'},
     {name:'Submarine',type:'VEHICLE',description:'second form'},
     {name:'Winged Creature',type:'CREATURE',description:'third form'},
-  ],coverage:['Glow','Ship','Submarine','Winged Creature'].map(name=>({label:name,elementNames:[name]}))};
+  ],coverage:[...['Glow','Ship','Submarine','Winged Creature'].map(name=>({label:name,elementNames:[name]})),{label:'Software UI screen',type:'UI_REFERENCE',elementNames:[]}]};
   const relations={sharedSystems:[{systemName:'Glow',memberNames:['Ship','Submarine','Winged Creature']}],
     continuityGroups:[{memberNames:['Ship','Submarine','Winged Creature']}]};
+  const audit={missing:[{label:'High night sky',type:'SCENE',evidenceQuote:'high night sky',reason:'Distinct final environment'}],unsupportedCoverageLabels:['Software UI screen']};
   const beforeAssets=await db('o_v04Asset').where({projectId:scope.projectId});
   const beforeCoverage=await db('o_v04AssetCoverage').where(scope);
   const skills=loadSource(path.join(root,'src/v04/skills.ts'),db,cache,oss);
-  oss.skillResponses=[lean,relations];
+  oss.skillResponses=[lean,relations,audit];
   const result=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
   assert.equal(result.applied,false);assert.equal(result.repairAttempts,0);
   assert.equal(result.output.candidates[1].sharedVisualSystemCandidateIndex,0);
   assert.deepEqual(result.output.candidates[1].relatedCandidateIndexes,[0,2,3]);
-  assert.equal(oss.sessionCount,1);assert.equal(oss.modelCalls.length,2);
+  assert.equal(oss.sessionCount,1);assert.equal(oss.modelCalls.length,3);
   assert.equal(oss.modelCalls[0].method,'invokeJson');assert.equal(oss.modelCalls[1].method,'invokeJson');
   assert.match(oss.modelCalls[1].system,/持续身份\/形态关系/);
+  assert.equal(result.sufficiency.status,'NEEDS_REVIEW');
+  assert.equal(result.sufficiency.requirements.at(-1).label,'High night sky');
+  assert.equal(result.output.coverage.some(item=>item.label==='Software UI screen'),false);
   assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),beforeAssets);
   assert.deepEqual(await db('o_v04AssetCoverage').where(scope),beforeCoverage);
-  oss.skillResponses=[lean,{sharedSystems:[{systemName:'Ship',memberNames:['Submarine']}],continuityGroups:[]},relations];
+  oss.skillResponses=[lean,{sharedSystems:[{systemName:'Ship',memberNames:['Submarine']}],continuityGroups:[]},relations,audit];
   const repaired=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
-  assert.equal(repaired.repairAttempts,1);assert.equal(oss.modelCalls.length,5,'relation repair is bounded to one additional call');
+  assert.equal(repaired.repairAttempts,1);assert.equal(oss.modelCalls.length,7,'relation repair is bounded to one additional call');
   oss.skillResponses=[lean,{sharedSystems:[{systemName:'Other',memberNames:['Ship']}],continuityGroups:[]},{sharedSystems:[{systemName:'Other',memberNames:['Ship']}],continuityGroups:[]}];
   await assert.rejects(skills.previewSkill({...scope,method:'ASSET_EXTRACTION'}),e=>e.code==='PILOT_SKILL_SCHEMA_FAILED');
   assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),beforeAssets);
@@ -850,7 +914,7 @@ test('OPT-021 Skill context and references fail closed; existing identity stays 
   const proposal=await skills.previewSkill({...scope,method:'ASSET_EXTRACTION'});
   assert.equal(proposal.applied,false);
   assert.equal(proposal.output.mergeSuggestions[0].existingCanonicalKey,'BRAND-001');
-  assert.match(oss.modelCalls.at(-1).system,/已有 Asset Bible 身份.*existingCanonicalKey 提合并/);
+  assert.match(oss.modelCalls.at(-1).system,/已有 canonical identity 不得重复创建.*existingCanonicalKey 建议合并/);
   assert.match(oss.modelCalls.at(-1).system,/共享视觉系统/);
   assert.deepEqual(await db('o_v04Creative').where(scope).first(),beforeCreative);
   assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}),beforeAssets);
@@ -1021,7 +1085,8 @@ test('OPT-018 Proposal uses shared project truth and cached Vision text, never a
   oss.proposalOutput={candidates:[],mergeSuggestions:[]};
   const skill=await post('/skills/preview',{...scope,method:'ASSET_EXTRACTION'});
   assert.equal(skill.status,200);
-  assert.match(oss.modelCalls.at(-1).system,/CONFIRMED_ASSET_BIBLE_REFERENCE/,'V0.4 Skills use the same authoritative context');
+  assert.match(oss.modelCalls.at(-1).system,/"canonicalKey":"BRAND-001"/,'Extraction retains the authoritative Asset Bible identity');
+  assert.doesNotMatch(oss.modelCalls.at(-1).system,/CONFIRMED_ASSET_BIBLE_REFERENCE|最近对话|历史摘要/,'Extraction must not turn Agent policies or memory into Treatment requirements');
 
   oss.proposalOutput={proposedText:'Other project treatment.',reason:'Separate truth.',proposedTargetDuration:null};
   assert.equal((await post('/agent/creative-proposal',{...other,target:'treatment',instruction:'继续。'})).status,200);

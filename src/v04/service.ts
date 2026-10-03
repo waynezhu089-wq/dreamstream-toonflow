@@ -140,6 +140,8 @@ async function planAssets(trx: Knex.Transaction, data: z.infer<typeof assetReque
   const suggestions: any[] = [];
   const changes = data.changes.map(change => {
     if (change.operation === "ADD") {
+      if (["BRAND", "UI"].includes(change.asset.category) && change.asset.sourcePolicy !== "REAL_REQUIRED")
+        throw new PilotError("PILOT_REAL_SOURCE_REQUIRED", "真实品牌与界面必须使用真实素材来源", 422);
       if (refs.has(change.clientRef)) throw new PilotError("PILOT_DUPLICATE_REF", "候选引用重复");
       refs.add(change.clientRef);
       for (const key of [change.asset.ownerKey, change.asset.variantOf, change.asset.sharedVisualSystemKey, ...change.asset.relatedKeys]) if (key && (!byKey.has(key) || byKey.get(key)?.status !== "ACTIVE")) throw new PilotError("PILOT_RELATION_INVALID", "关系必须指向当前项目现有的有效身份");
@@ -152,6 +154,9 @@ async function planAssets(trx: Knex.Transaction, data: z.infer<typeof assetReque
     const row = byKey.get(change.canonicalKey);
     if (!row || row.status !== "ACTIVE") throw new PilotError("PILOT_ASSET_NOT_FOUND", "资产身份不存在或已退休", 404);
     if (row.revision !== change.expectedRevision) throw new PilotError("PILOT_PREVIEW_STALE", "资产身份已变化", 409);
+    if (change.operation === "EDIT" && ["BRAND", "UI"].includes(change.patch.category ?? row.category)
+      && (change.patch.sourcePolicy ?? row.sourcePolicy) !== "REAL_REQUIRED")
+      throw new PilotError("PILOT_REAL_SOURCE_REQUIRED", "真实品牌与界面必须使用真实素材来源", 422);
     if (change.operation === "EDIT") for (const key of [change.patch.ownerKey, change.patch.variantOf, change.patch.sharedVisualSystemKey, ...(change.patch.relatedKeys ?? [])]) if (key && (key === change.canonicalKey || !byKey.has(key) || byKey.get(key)?.status !== "ACTIVE")) throw new PilotError("PILOT_RELATION_INVALID", "关系来源无效");
     if (change.operation === "EDIT" && change.patch.sharedVisualSystemKey && !isVisualSystem(byKey.get(change.patch.sharedVisualSystemKey))) throw new PilotError("PILOT_RELATION_INVALID", "共享视觉系统必须指向 FX / 材质身份");
     if (refs.has(change.canonicalKey)) throw new PilotError("PILOT_CONFLICT", "同一资产存在冲突操作");

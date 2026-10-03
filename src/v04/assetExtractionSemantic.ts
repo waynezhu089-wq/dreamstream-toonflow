@@ -88,18 +88,14 @@ export function compileAssetExtractionSemantic(raw: unknown, existing: ExistingI
     if (existingKey && existing.find(asset => asset.canonicalKey === existingKey)?.category !== category)
       invalid(["visualElements", i, "existingCanonicalKey"], "合并目标类别不一致");
     if (existingKey) mergeSuggestions.push({ candidateRef: item.name, existingCanonicalKey: existingKey, reason: "已存在的 canonical identity，仅建议合并" });
-    const relatedCandidateRefs = (item.relatedNames ?? []).map((name, j) => resolveName(name, ["visualElements", i, "relatedNames", j]))
-      .filter(name => identityKey(name) !== identityKey(item.name)); // Self-link carries no relation.
-    const sharedVisualSystemRef = item.sharedVisualSystemName
-      ? resolveName(item.sharedVisualSystemName, ["visualElements", i, "sharedVisualSystemName"]) : null;
-    if (sharedVisualSystemRef && identityKey(sharedVisualSystemRef) === identityKey(item.name))
-      invalid(["visualElements", i, "sharedVisualSystemName"], "视觉系统不能引用自身");
+    // Relationship judgement belongs to the separate exact-name phase. Any
+    // incidental fields from the entity phase are advisory, never authority.
     return {
       name: item.name, localRef: item.name, category, assetKind: kind, description: item.description,
       sourcePolicy: category === "BRAND" || category === "UI" || item.realSourceRequired ? "REAL_REQUIRED" : "AI_ALLOWED",
       importance: (item.core ?? ["HUMAN_CHARACTER", "CREATURE", "VEHICLE", "PROP"].includes(kind)) ? "CORE" : "SUPPORTING",
-      relatedCandidateRefs, relatedExistingKeys: [],
-      sharedVisualSystemRef, sharedVisualSystemKey: null,
+      relatedCandidateRefs: [], relatedExistingKeys: [],
+      sharedVisualSystemRef: null, sharedVisualSystemKey: null,
       ownerKey: null, variantOf: null,
     };
   });
@@ -111,7 +107,11 @@ export function compileAssetExtractionSemantic(raw: unknown, existing: ExistingI
     const type = item.type ? labelKey(item.type) : null;
     const isComposition = type !== null && composition.has(type);
     const declaredKind = type ? kindByMeaning[type] : null;
-    if (declaredKind && candidateKinds.length && candidateKinds.every(kind => kindCoverage[kind] === kindCoverage[candidateKinds[0]])
+    // A beat can mention a scene while linking an entity; its type is not the
+    // entity's identity. Reject a true direct-identity contradiction, but do
+    // not make the model serialize duplicate category facts for every beat.
+    const directIdentity = candidateRefs.length === 1 && identityKey(item.label) === identityKey(candidateRefs[0]);
+    if (directIdentity && declaredKind && candidateKinds.length && candidateKinds.every(kind => kindCoverage[kind] === kindCoverage[candidateKinds[0]])
       && kindCoverage[declaredKind] !== kindCoverage[candidateKinds[0]])
       invalid(["coverage", i, "type"], "覆盖类别与绑定视觉元素矛盾");
     const existingTypes = (item.existingCanonicalKeys ?? []).map(key => {

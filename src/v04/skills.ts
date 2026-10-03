@@ -9,6 +9,7 @@ import { safeStructuredStatus, structuredFailure, structuredRepairContext, struc
 import { assetExtractionModelSchema, normalizeAssetExtraction, semanticLabelDiagnostics } from "./assetExtractionOutput";
 import { compileAssetExtractionSemantic } from "./assetExtractionSemantic";
 import { compileAssetExtractionRelations } from "./assetExtractionRelations";
+import { auditAssetSufficiency } from "./assetSufficiency";
 
 const id = z.number().int().positive();
 const request = z.object({ projectId: id, scriptId: id, method: z.enum(["ASSET_EXTRACTION", "ASSET_PROMPTS", "STORYBOARD_BATCH"]) }).strict();
@@ -77,7 +78,7 @@ export async function previewSkill(input: unknown) {
   const correlationId = randomUUID();
   let context: Awaited<ReturnType<typeof buildProjectAgentContext>>;
   try {
-    context = await buildProjectAgentContext({ projectId: data.projectId, scriptId: data.scriptId, currentStage: data.method === "STORYBOARD_BATCH" ? "storyboard" : "creative", currentRoute: "pilot/skills", selectedObject: null }, instructions[data.method]);
+    context = await buildProjectAgentContext({ projectId: data.projectId, scriptId: data.scriptId, currentStage: data.method === "STORYBOARD_BATCH" ? "storyboard" : "creative", currentRoute: "pilot/skills", selectedObject: null }, data.method === "ASSET_EXTRACTION" ? "Treatment visual coverage" : instructions[data.method]);
   } catch (error) {
     if (error instanceof PilotError) throw error;
     logSkillFailure(data, correlationId, "PILOT_SKILL_CONTEXT_FAILED", error);
@@ -94,7 +95,10 @@ export async function previewSkill(input: unknown) {
   const schema = outputSchemas[data.method];
   const skeleton = data.method === "ASSET_EXTRACTION" ? { visualElements: [{ name: "主体", type: "HUMAN_CHARACTER", description: "简短视觉描述" }], coverage: [{ label: "主体首次出现", type: "HUMAN_CHARACTER", elementNames: ["主体"] }] } :
     data.method === "ASSET_PROMPTS" ? { prompts: [{ canonicalKey: "", prompt: "", reason: "" }] } : { shots: [{ duration: 3, prompt: "", videoDesc: "", productionMode: "AI_TEXT_TO_IMAGE", primaryKey: null, canonicalKeys: [] }] };
-  const system = `${renderProjectAgentSystem(context)}\n${instructions[data.method]}\n${data.method === "ASSET_EXTRACTION" ? "JSON 只含 visualElements 与 coverage 两个数组。每个元素给 name/type/description；可选 core、realSourceRequired、existingCanonicalKey、relatedNames、sharedVisualSystemName。不要输出 ownerKey、variantOf、relatedExistingKeys、sharedVisualSystemKey 等数据库关系字段。每个 coverage 给 label/type/elementNames/existingCanonicalKeys/note；没有关联时给空数组和未覆盖原因。保持名称引用完全一致，不输出候选数字下标。" : ""}\nReturn one valid JSON object only. Use this JSON structure: ${JSON.stringify(skeleton)}. No markdown or extra fields. Do not claim changes were applied.`;
+  // Extraction has a narrow grounding boundary: operational policies, prior
+  // conversations and Agent memories are not Treatment visual requirements.
+  const extractionSystem = `你只审计下方已确认 Treatment 的视觉内容。项目规则、历史聊天、模型建议都不是视觉需求；Treatment 没有软件 UI 或产品界面，就不能凭来源规则虚构 UI 缺口。已有 Asset Bible 身份仅用于合并/引用，不能据此编造 Treatment 画面。\n已确认 Treatment: ${JSON.stringify(context.creative.treatment)}\n已有 ACTIVE 身份: ${JSON.stringify(context.assetBibleIndex.map(asset => ({ canonicalKey: asset.canonicalKey, name: asset.name, category: asset.category, assetKind: asset.assetKind })))}\n按视觉实体、环境、共享视觉系统、持续关系、画面覆盖逐项检查。Treatment 中重要且明显不同的空间环境即使尚无候选资产，也必须在 coverage 留下未绑定的 SCENE 行；同一主环境的局部变化可由一个 Master Environment 覆盖，不要机械增加身份。动作、镜头构图及瞬时效果只写入 coverage，不建独立 visualElement。visualElements 的 type 使用 HUMAN_CHARACTER/CREATURE/VEHICLE/PROP/ENVIRONMENT/CELESTIAL/MATERIAL_FX/BRAND_MARK/UI_REFERENCE；有生命的坐骑是 CREATURE。已有 canonical identity 不得重复创建；已存在品牌标识用 existingCanonicalKey 建议合并。不要生成数据库 key、category、assetKind、sourcePolicy 或数字索引。coverage 只能列 Treatment 真实出现的视觉对象和画面事件，必须用 elementNames 或 existingCanonicalKeys 指向生产归属；缺失时留空并说明，不能为了覆盖率伪造资产。JSON 只含 visualElements 与 coverage。`;
+  const system = `${data.method === "ASSET_EXTRACTION" ? extractionSystem : `${renderProjectAgentSystem(context)}\n${instructions[data.method]}`}\n${data.method === "ASSET_EXTRACTION" ? "每个 visualElement 给 name/type/description，可选 core、realSourceRequired、existingCanonicalKey。关系判断留给下一次小范围调用，本次不要输出 relatedNames 或 sharedVisualSystemName。每个 coverage 给 label/type/elementNames/existingCanonicalKeys/note。名称引用须完全一致。" : ""}\nReturn one valid JSON object only. Use this JSON structure: ${JSON.stringify(skeleton)}. No markdown or extra fields. Do not claim changes were applied.`;
   const user = JSON.stringify({ method: data.method });
   let output: any;
   let repairContext = "";
@@ -185,7 +189,30 @@ export async function previewSkill(input: unknown) {
       if (output.coverage.some((item: any) => item.candidateIndexes.some((i: number) => i >= output.candidates.length) || item.existingCanonicalKeys.some((key: string) => !keys.has(key)))) referenceError("COVERAGE_REFERENCE", "覆盖清单引用无效");
       if (output.candidates.some((asset: any, index: number) => context.assetBibleIndex.some(existing => existing.category === asset.category && existing.name.trim().toLocaleLowerCase() === asset.name.trim().toLocaleLowerCase() && !output.mergeSuggestions.some((s: any) => s.candidateIndex === index && s.existingCanonicalKey === existing.canonicalKey)))) referenceError("DUPLICATE_IDENTITY", "已有素材身份只能提出合并建议，不能作为新候选创建");
     }
-    return { method: data.method, skillId: `v04.${data.method.toLowerCase().replaceAll('_','-')}.${data.method === "ASSET_EXTRACTION" ? "v2" : "v1"}`, output, applied: false, sourceVersion: context.creative.version, repairAttempts };
+    let sufficiency: ReturnType<typeof auditAssetSufficiency> | null = null;
+    if (data.method === "ASSET_EXTRACTION") {
+      if (semanticExtraction && context.creative.treatment.trim()) {
+        // The first pass cannot discover an omission it never listed. This
+        // small, independent read-only check sees only Treatment and the
+        // proposed ownership map; every new warning needs a Treatment quote.
+        const auditSystem = "只根据已确认 Treatment 与候选清单审计视觉生产归属。只返回 JSON：environments=[{label,evidenceQuote,coveredByName,reason}]、missing=[{label,type,evidenceQuote,reason}]、unsupportedCoverageLabels=[]。先按叙事顺序列出 Treatment 中每个重要且视觉上不同的空间环境，包括最后一段空间；不要只列实体。coveredByName 只能使用给定的 ENVIRONMENT 候选/现有环境原样名称；若目的地空间与出发地显著不同，旧环境、人物、飞行生物或月亮本体不能冒充目的地背景，此时填 null。允许同一个 Master Environment 承担同一主空间的局部变化，不强制拆分岸边与海面。missing 只列环境以外尚无归属的重要持续视觉对象；镜头动作和瞬时效果不要求建资产。每个 evidenceQuote 必须是 Treatment 中连续出现的原文片段，不能编造。unsupportedCoverageLabels 只列 Coverage 中不来自 Treatment、仅由系统规则或外部假设推导出的未绑定项目。只提出审查提示，不增删候选或声称已 Apply。";
+        const auditInput = JSON.stringify({ treatment: context.creative.treatment,
+          candidates: output.candidates.map((item: any) => ({ name: item.name, kind: item.assetKind })),
+          existing: context.assetBibleIndex.map(item => ({ key: item.canonicalKey, name: item.name, category: item.category })),
+          coverage: output.coverage.map((item: any) => ({ label: item.label, classification: item.classification, candidateNames: item.candidateIndexes.map((index: number) => output.candidates[index].name), existingKeys: item.existingCanonicalKeys })) });
+        try {
+          const auditResult = await session.invoke({ system: auditSystem, messages: [{ role: "user", content: auditInput }], output: Output.json() });
+          sufficiency = auditAssetSufficiency(output, context.creative.treatment, auditResult.output, context.assetBibleIndex);
+        } catch (error) {
+          logSkillFailure(data, correlationId, "PILOT_SUFFICIENCY_AUDIT_INCOMPLETE", error, session.modelReference);
+        }
+      }
+      sufficiency ??= auditAssetSufficiency(output, context.creative.treatment, undefined, context.assetBibleIndex);
+      output = sufficiency.proposal;
+    }
+    const { proposal: _proposal, ...review } = sufficiency ?? { proposal: null };
+    return { method: data.method, skillId: `v04.${data.method.toLowerCase().replaceAll('_','-')}.${data.method === "ASSET_EXTRACTION" ? "v2" : "v1"}`, output, applied: false, sourceVersion: context.creative.version, repairAttempts,
+      ...(sufficiency ? { sufficiency: review } : {}) };
   } catch (error) {
     if (error instanceof PilotError) { logSkillFailure(data, correlationId, error.code, error, session.modelReference); throw error; }
     logSkillFailure(data, correlationId, "PILOT_SKILL_INTERNAL_FAILED", error, session.modelReference);

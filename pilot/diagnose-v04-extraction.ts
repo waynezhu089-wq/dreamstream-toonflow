@@ -29,6 +29,9 @@ async function main() {
       try {
         const result = await previewSkill({ projectId, scriptId, method: "ASSET_EXTRACTION" });
         const output = result.output;
+        const sufficiency = ("sufficiency" in result ? result.sufficiency : null) as {
+          status: string; requirements: { status: string; label: string }[]; excludedUngroundedCoverage: number;
+        } | null;
         results.push({ attempt: i + 1, success: true, elapsedMs: Date.now() - start,
           candidates: output.candidates.length, coverage: output.coverage.length,
           repairAttempts: result.repairAttempts,
@@ -42,6 +45,10 @@ async function main() {
           coverageTypes: Object.fromEntries([...new Set(output.coverage.map((item: { classification: string }) => item.classification))].map(classification => [classification, output.coverage.filter((item: { classification: string }) => item.classification === classification).length])),
           coverageLabels: output.coverage.map((item: { label: string }) => item.label),
           unlinkedCoverage: output.coverage.filter((item: { candidateIndexes: number[]; existingCanonicalKeys: string[] }) => !item.candidateIndexes.length && !item.existingCanonicalKeys.length).length,
+          sufficiencyStatus: sufficiency?.status,
+          missingRequirements: sufficiency?.requirements.filter((item: { status: string }) => item.status === "MISSING").map((item: { label: string }) => item.label),
+          excludedUngroundedCoverage: sufficiency?.excludedUngroundedCoverage,
+          falseUiRequirement: output.coverage.some((item: { label: string }) => /软件\s*UI|软件界面|产品界面/i.test(item.label)),
           applied: result.applied });
       } catch (error) {
         results.push({ attempt: i + 1, success: false, elapsedMs: Date.now() - start,
