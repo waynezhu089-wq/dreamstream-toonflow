@@ -9,6 +9,7 @@ import { previewSkill, previewCreativeProposal } from "./skills";
 import { applyAttachmentPromotion, attachmentsForMessage, getAgentAttachmentBytes, previewAttachmentPromotion, uploadAgentImage } from "./agentAttachments";
 import { answerProjectAgent } from "./agentOrchestrator";
 import { proposeAgentAction } from "./agentActionProposal";
+import { answerStudioTurn, studioTurnRequest } from "./studioTurn";
 import { buildProjectAgentContext, projectAgentMemoryKey, renderProjectAgentSystem } from "./agentContext";
 import { applyVisualSpec, previewVisualSpec, proposeVisualSpecs, rebuildVisualPrompt, setLibraryBinding } from "./visualSpec";
 
@@ -60,6 +61,22 @@ endpoint("/assets/library-binding/set", setLibraryBinding);
 endpoint("/skills/preview", previewSkill);
 endpoint("/agent/creative-proposal", previewCreativeProposal);
 endpoint("/agent/action-proposal", proposeAgentAction);
+endpoint("/agent/studio-turn", async input => {
+  const data = studioTurnRequest.parse(input);
+  await readPilot({ projectId: data.context.projectId, scriptId: data.context.scriptId });
+  const key = memoryKey(data.context.projectId);
+  const userMessageId = randomUUID();
+  let embedding: number[] | null = null;
+  try { embedding = await getEmbedding(data.message); }
+  catch (error) { if (!missingLocalEmbedding(error)) throw error; }
+  await db("memories").insert({ id: userMessageId, isolationKey: key, type: "message", role: "user", content: data.message,
+    embedding: embedding ? JSON.stringify(embedding) : null, summarized: 0, createTime: Date.now() });
+  const result = await answerStudioTurn(data);
+  const assistantMessageId = randomUUID();
+  await db("memories").insert({ id: assistantMessageId, isolationKey: key, type: "message", role: "assistant", content: result.reply,
+    embedding: null, summarized: 0, createTime: Date.now() });
+  return { ...result, isolationKey: key, userMessageId, assistantMessageId };
+});
 endpoint("/agent/image/upload", uploadAgentImage);
 endpoint("/agent/reference/preview", previewAttachmentPromotion);
 endpoint("/agent/reference/apply", applyAttachmentPromotion);
