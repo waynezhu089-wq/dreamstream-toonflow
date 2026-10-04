@@ -4,7 +4,7 @@ import u from "@/utils";
 import { ModelConfigError, requireModel } from "@/services/modelPreset";
 import { PilotError, readPilot } from "./service";
 import { buildProjectAgentContext, renderProjectAgentSystem } from "./agentContext";
-import { agentActionRequest, finalizeAgentAction, prepareAgentAction, targetConfirmation } from "./agentActionProposal";
+import { agentActionRequest, explicitAssetCreateRequest, finalizeAgentAction, finalizeStudioAssetCreate, prepareAgentAction, targetConfirmation } from "./agentActionProposal";
 import { parseStudioTurnSemantic, StudioSemanticError, studioModeHint, studioTurnFormat } from "./studioTurnSemantic";
 
 const contextSchema = z.object({
@@ -53,15 +53,21 @@ export async function answerStudioTurn(input: unknown) {
   const actionData = agentActionRequest.parse({ projectId: ctx.projectId, scriptId: ctx.scriptId,
     instruction: data.message, scope: selected ? { type: selected.type, key: selected.key } : { type: "PROJECT" },
     ...(data.optionalDraft ? { optionalDraft: data.optionalDraft } : {}) });
-  const prepared = prepareAgentAction(state, actionData);
+  const createIntent = explicitAssetCreateRequest(data.message);
+  const prepared = createIntent ? null : prepareAgentAction(state, actionData);
   const agentContext = await buildProjectAgentContext(ctx, data.message);
-  const source = "early" in prepared ? null : prepared.source;
+  const source = createIntent ? { selectedAsset: ctx.selectedObject?.type === "ASSET"
+    ? state.assets.find((asset: any) => asset.status === "ACTIVE" && asset.canonicalKey === ctx.selectedObject?.key) ?? null : null,
+    activeAssets: state.assets.filter((asset: any) => asset.status === "ACTIVE").map((asset: any) => ({ canonicalKey: asset.canonicalKey, name: asset.name, category: asset.category, assetKind: asset.assetKind })) }
+    : prepared && "early" in prepared ? null : prepared?.source;
   const system = `${renderProjectAgentSystem(agentContext)}\n你是同一个 Project Agent 的 Studio 对话模式。${studioTurnFormat}` +
-    `mode 必须是 DISCUSS、PROPOSE_CHANGE 或 NEEDS_TARGET_CONFIRMATION；reply 是自然、简洁的中文回答。` +
+    `mode 必须是 DISCUSS、PROPOSE_CHANGE、ASSET_CREATE 或 NEEDS_TARGET_CONFIRMATION；reply 是自然、简洁的中文回答。` +
     `疑问、解释、对比和建议用 DISCUSS；只有用户明确要求改变当前对象，才用 PROPOSE_CHANGE，并填写 summary、rationale、patch。` +
     `目标含糊或涉及素材身份的改名、归属、退休等身份级修改时用 NEEDS_TARGET_CONFIRMATION。` +
-    `提案尚未应用，绝不可声称已经改动正式项目。` +
-    ("early" in prepared ? "当前没有可直接修改的视觉规格或明确目标。不要虚构视觉规格。" : `\n${prepared.system}`);
+    `只有用户明确请求新建独立素材时才用 ASSET_CREATE；普通外观细节继续留在现有 Visual Spec。` +
+    `ASSET_CREATE 的 asset 使用当前项目真实类别和类型，挂件可用 ACC/PROP；ownerKey 和 relatedKeys 只能引用当前项目已有 canonicalKey。` +
+    `新身份只是候选，必须人工预览并确认后才能应用；提案尚未应用，绝不可声称已经改动正式项目。` +
+    (createIntent ? "当前请求明确涉及新增独立素材，不要求先有已确认 Visual Spec。" : prepared && "early" in prepared ? "当前没有可直接修改的视觉规格或明确目标。不要虚构视觉规格。" : `\n${prepared?.system}`);
   let model: Awaited<ReturnType<typeof requireModel>>;
   try { model = await requireModel(ctx.projectId, "text"); }
   catch (error) {
@@ -95,11 +101,18 @@ export async function answerStudioTurn(input: unknown) {
     }
   }
   if (turn.mode === "DISCUSS") return { mode: turn.mode, reply: turn.reply, applied: false };
-  if (turn.mode === "NEEDS_TARGET_CONFIRMATION" || "early" in prepared) {
+  if (turn.mode === "NEEDS_TARGET_CONFIRMATION" || prepared && "early" in prepared) {
     const target = targetConfirmation(state);
-    return { mode: "NEEDS_TARGET_CONFIRMATION", reply: "early" in prepared && prepared.early && "message" in prepared.early
+    return { mode: "NEEDS_TARGET_CONFIRMATION", reply: prepared && "early" in prepared && prepared.early && "message" in prepared.early
       ? String(prepared.early.message) : turn.reply, candidates: target.candidates, applied: false };
   }
+  if (turn.mode === "ASSET_CREATE") {
+    if (!createIntent) studioFailure(ctx, "ACTION_FINALIZATION_FAILED", new Error("ASSET_CREATE_WITHOUT_EXPLICIT_INTENT"));
+    try { return { mode: "ASSET_CREATE", reply: turn.reply,
+      actionProposal: await finalizeStudioAssetCreate(state, actionData, turn), applied: false }; }
+    catch (error) { studioFailure(ctx, "ACTION_FINALIZATION_FAILED", error); }
+  }
+  if (createIntent || !prepared || "early" in prepared) studioFailure(ctx, "ACTION_FINALIZATION_FAILED", new Error("ASSET_CREATE_OUTPUT_REQUIRED"));
   // The existing action compiler validates permitted fields, ownership and the
   // Visual Spec preview. The model never writes authoritative state.
   let actionProposal: Awaited<ReturnType<typeof finalizeAgentAction>>;

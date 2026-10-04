@@ -16,7 +16,7 @@ const text = z.string().max(30000);
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const q = db as Knex;
 const category = z.enum(["CHAR", "ACC", "PROP", "PRODUCT", "LOC", "BRAND", "UI", "FX"]);
-const newAsset = z.object({
+export const newAsset = z.object({
   name: z.string().trim().min(1).max(256), category,
   description: z.string().max(4000).default(""),
   identityAnchors: z.array(z.string().max(300)).max(30).default([]),

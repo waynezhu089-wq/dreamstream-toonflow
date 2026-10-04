@@ -3,7 +3,7 @@ import { Output } from "ai";
 import { z } from "zod";
 import u from "@/utils";
 import { requireModel } from "@/services/modelPreset";
-import { PilotError, readPilot } from "./service";
+import { PilotError, newAsset, previewAssets, readPilot } from "./service";
 import { buildProjectAgentContext, renderProjectAgentSystem } from "./agentContext";
 import { visualSpecSchema } from "./visualSpecContract";
 import { previewVisualSpec } from "./visualSpec";
@@ -46,6 +46,47 @@ export function targetConfirmation(state: Awaited<ReturnType<typeof readPilot>>)
     ...state.assets.filter((asset: any) => asset.status === "ACTIVE").slice(0, 2).map((asset: any) => ({ type: "ASSET", key: asset.canonicalKey, label: asset.name })),
     ...state.storyboards.slice(0, 1).map((shot: any) => ({ type: "SHOT", key: String(shot.id), label: `镜头 ${shot.index ?? shot.id}` })),
   ].slice(0, 3) };
+}
+
+export function explicitAssetCreateRequest(instruction: string): boolean {
+  return /(?:独立(?:资产|素材)|单独(?:资产|素材)|(?:新建|创建|新增|添加|增加).{0,36}(?:资产|素材)|再增加一(?:个|件|项))/i.test(instruction);
+}
+
+const kindByCategory: Record<string, string> = { CHAR: "HUMAN_CHARACTER", ACC: "PROP", PROP: "PROP",
+  PRODUCT: "PROP", LOC: "ENVIRONMENT", FX: "MATERIAL_FX", BRAND: "BRAND_MARK", UI: "UI_REFERENCE" };
+const categoriesByKind: Record<string, string[]> = { HUMAN_CHARACTER: ["CHAR"], CREATURE: ["CHAR"], VEHICLE: ["PROP", "PRODUCT"],
+  PROP: ["ACC", "PROP", "PRODUCT"], ENVIRONMENT: ["LOC"], CELESTIAL: ["LOC"], MATERIAL_FX: ["FX"],
+  BRAND_MARK: ["BRAND"], UI_REFERENCE: ["UI"], OTHER: ["ACC", "PROP", "PRODUCT"] };
+
+// A Studio action is an Asset ADD candidate, not an identity write. The
+// existing Asset preview validates scope and relationships before UI review.
+export async function finalizeStudioAssetCreate(state: Awaited<ReturnType<typeof readPilot>>,
+  data: z.infer<typeof agentActionRequest>, output: { summary: string; rationale: string; asset: Record<string, unknown> }) {
+  if (!explicitAssetCreateRequest(data.instruction)) throw new PilotError("PILOT_ACTION_INTENT_INVALID", "只有明确要求独立资产时才能新增身份", 422);
+  const raw = output.asset;
+  const category = raw.category;
+  const assetKind = raw.assetKind ?? (typeof category === "string" ? kindByCategory[category] : undefined);
+  const selected = data.scope.type === "ASSET" && data.scope.key
+    ? state.assets.find((asset: any) => asset.status === "ACTIVE" && asset.canonicalKey === data.scope.key) : null;
+  if (data.scope.type === "ASSET" && !selected) throw new PilotError("PILOT_ACTION_TARGET_INVALID", "当前关注的素材不存在", 404);
+  const selectedOwner = selected && category === "ACC" ? selected.canonicalKey : null;
+  if (selectedOwner && raw.ownerKey && raw.ownerKey !== selectedOwner)
+    throw new PilotError("PILOT_ACTION_RELATION_INVALID", "新挂件的归属与当前所选素材冲突", 422);
+  const candidate = newAsset.safeParse({ ...raw, assetKind,
+    ownerKey: selectedOwner ?? raw.ownerKey ?? null,
+    sourcePolicy: raw.sourcePolicy ?? (["BRAND", "UI"].includes(String(category)) ? "REAL_REQUIRED" : "AI_ALLOWED") });
+  if (!candidate.success) throw new PilotError("PILOT_ACTION_SCHEMA_FAILED", "新增素材提案结构不完整，请重试", 422);
+  if (!categoriesByKind[candidate.data.assetKind]?.includes(candidate.data.category))
+    throw new PilotError("PILOT_ACTION_KIND_CONFLICT", "素材类别与视觉类型不一致", 422);
+  const change = { operation: "ADD" as const, clientRef: `studio-${randomUUID()}`, asset: candidate.data,
+    relatedClientRefs: [], sharedVisualSystemClientRef: null };
+  const sourceCreativeVersion = Number(state.creative.version);
+  const preview = await previewAssets({ projectId: data.projectId, scriptId: data.scriptId,
+    sourceCreativeVersion, changes: [change] });
+  return { status: "PROPOSED", targetType: "ASSET_CREATE", targetKey: null, sourceRevision: sourceCreativeVersion,
+    sourceCreativeVersion, summary: output.summary, rationale: output.rationale, proposal: change,
+    previewSummary: { possibleMatches: preview.suggestions?.[0]?.possibleMatches ?? [] },
+    affectedObjects: [{ type: "ASSET", key: change.clientRef }], applied: false };
 }
 export function prepareAgentAction(state: Awaited<ReturnType<typeof readPilot>>, data: z.infer<typeof agentActionRequest>) {
   const selected = data.scope;

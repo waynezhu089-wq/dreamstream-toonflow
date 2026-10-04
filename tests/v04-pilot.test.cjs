@@ -1720,3 +1720,44 @@ test('OPT-031 Studio draft Prompt compiles against unconfirmed Visual Spec witho
   assert.equal(stale.failures[0].code,'PILOT_VISUAL_SOURCE_STALE');
   assert.equal(oss.modelCalls.length,0,'draft compilation never calls the provider');
 });
+
+test('OPT-031 explicit Studio ASSET_CREATE stays proposal-only until existing Asset Preview and Apply', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const studio=loadSource(path.join(root,'src/v04/studioTurn.ts'),db,cache,oss);
+  const scope=await s.createPilotProject({name:'Asset create',brief:'Boy with pendant',targetDuration:30,aspectRatio:'16:9'},7);
+  const foreign=await s.createPilotProject({name:'Other scope',brief:'',targetDuration:30,aspectRatio:'16:9'},7);
+  const changes=[{operation:'ADD',clientRef:'boy',asset:{...asset('Boy'),assetKind:'HUMAN_CHARACTER'}}];
+  const first=await s.previewAssets({...scope,changes});await s.applyAssets({...scope,changes,previewHash:first.previewHash});
+  const before=await db('o_v04Asset').where({projectId:scope.projectId}).orderBy('canonicalKey');
+  oss.studioResponses=[JSON.stringify({mode:'ASSET_CREATE',reply:'可以讨论挂件造型。',
+    summary:'未经请求新增素材',rationale:'模型误判',asset:{name:'月牙挂件',category:'ACC'}})];
+  const unrelated=await studio.answerStudioTurn({context:{...scope,currentStage:'studio',currentRoute:'studio',selectedObject:{type:'ASSET',key:'CHAR-001'}},
+    message:'月牙挂件的造型适合这个角色吗？'});
+  assert.equal(unrelated.applied,false);
+  assert.equal(unrelated.actionProposal,undefined,'generic discussion cannot produce an independent asset proposal');
+  assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}).orderBy('canonicalKey'),before);
+  oss.studioResponses=[JSON.stringify({mode:'ASSET_CREATE',reply:'可以把月牙挂件作为独立素材，先请你预览确认。',
+    summary:'新增月牙挂件',rationale:'作为男孩的可识别随身物',asset:{name:'月牙挂件',category:'ACC',assetKind:'PROP',description:'Small crescent pendant',sourcePolicy:'AI_ALLOWED',relatedKeys:['CHAR-001']}})];
+  const turn=await studio.answerStudioTurn({context:{...scope,currentStage:'studio',currentRoute:'studio',selectedObject:{type:'ASSET',key:'CHAR-001'}},
+    message:'给这个男孩增加一个具有识别性的月牙挂件，作为独立资产。'});
+  assert.equal(turn.mode,'ASSET_CREATE');assert.equal(turn.applied,false);
+  assert.equal(turn.actionProposal.targetType,'ASSET_CREATE');
+  assert.equal(turn.actionProposal.proposal.operation,'ADD');
+  assert.equal(turn.actionProposal.proposal.asset.ownerKey,'CHAR-001');
+  assert.deepEqual(turn.actionProposal.proposal.asset.relatedKeys,['CHAR-001']);
+  assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}).orderBy('canonicalKey'),before,'agent proposal/preview are zero-write');
+  const body={...scope,sourceCreativeVersion:turn.actionProposal.sourceCreativeVersion,changes:[turn.actionProposal.proposal]};
+  const preview=await s.previewAssets(body);
+  assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}).orderBy('canonicalKey'),before,'human preview is zero-write');
+  await assert.rejects(s.applyAssets({...body,previewHash:'0'.repeat(64)}),error=>error.code==='PILOT_PREVIEW_STALE');
+  assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId}).orderBy('canonicalKey'),before,'failed apply creates no identity');
+  const applied=await s.applyAssets({...body,previewHash:preview.previewHash});
+  assert.deepEqual(applied.applied.map(row=>row.canonicalKey),['ACC-001']);
+  const created=await db('o_v04Asset').where({projectId:scope.projectId,canonicalKey:'ACC-001'}).first();
+  assert.equal(created.ownerKey,'CHAR-001');
+  await assert.rejects(s.applyAssets({...body,previewHash:preview.previewHash}),error=>error.code==='PILOT_PREVIEW_STALE');
+  assert.equal((await db('o_v04Asset').where({projectId:scope.projectId,category:'ACC'})).length,1,'stale replay cannot duplicate the identity');
+  await assert.rejects(s.previewAssets({...foreign,sourceCreativeVersion:turn.actionProposal.sourceCreativeVersion,changes:[turn.actionProposal.proposal]}),
+    error=>['PILOT_RELATION_INVALID','PILOT_SOURCE_STALE'].includes(error.code));
+  assert.equal(oss.modelCalls.filter(call=>call.method==='invokeText').length,2);
+});

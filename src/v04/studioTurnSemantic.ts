@@ -6,6 +6,9 @@ export const studioOutput = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("PROPOSE_CHANGE"), reply: z.string().min(1).max(12000),
     summary: z.string().min(1).max(500), rationale: z.string().max(1000),
     patch: z.record(z.string(), z.unknown()) }).strict(),
+  z.object({ mode: z.literal("ASSET_CREATE"), reply: z.string().min(1).max(12000),
+    summary: z.string().min(1).max(500), rationale: z.string().max(1000),
+    asset: z.record(z.string(), z.unknown()) }).strict(),
 ]);
 
 export type StudioOutput = z.infer<typeof studioOutput>;
@@ -22,6 +25,7 @@ export class StudioSemanticError extends Error {
 const modes: Record<string, StudioOutput["mode"]> = {
   DISCUSS: "DISCUSS", DISCUSSION: "DISCUSS", "讨论": "DISCUSS",
   PROPOSE_CHANGE: "PROPOSE_CHANGE", CHANGE: "PROPOSE_CHANGE", "修改": "PROPOSE_CHANGE", "修改提案": "PROPOSE_CHANGE",
+  ASSET_CREATE: "ASSET_CREATE", CREATE_ASSET: "ASSET_CREATE", "新增素材": "ASSET_CREATE", "创建资产": "ASSET_CREATE",
   NEEDS_TARGET_CONFIRMATION: "NEEDS_TARGET_CONFIRMATION", TARGET_CONFIRMATION: "NEEDS_TARGET_CONFIRMATION", "需要确认目标": "NEEDS_TARGET_CONFIRMATION",
 };
 const canonicalMode = (label: string) => modes[label.trim().replace(/[\s-]+/g, "_").toUpperCase()] ?? null;
@@ -88,4 +92,5 @@ export const studioTurnFormat = `Return exactly one JSON object, with no markdow
   `DISCUSS: {"mode":"DISCUSS","reply":"your answer"}.\n` +
   `NEEDS_TARGET_CONFIRMATION: {"mode":"NEEDS_TARGET_CONFIRMATION","reply":"your question"}.\n` +
   `PROPOSE_CHANGE: {"mode":"PROPOSE_CHANGE","reply":"your answer","summary":"brief change","rationale":"reason","patch":{}}.\n` +
+  `ASSET_CREATE: {"mode":"ASSET_CREATE","reply":"your answer","summary":"new asset","rationale":"reason","asset":{"name":"...","category":"ACC","assetKind":"PROP","description":"...","sourcePolicy":"AI_ALLOWED","ownerKey":"CHAR-001"}}. Only use when the user explicitly requests a separate new asset.\n` +
   `Do not omit required fields or add extra fields. Never turn a failed change proposal into DISCUSS.`;
