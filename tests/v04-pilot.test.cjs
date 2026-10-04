@@ -1678,6 +1678,11 @@ test('OPT-027A authenticated HTTP proposal and preview remain read-only until hu
   const candidate=proposed.payload.data.candidates[0];
   assert.deepEqual(candidate.spec.details.states.map(state=>state.key),['MIST','PARTICLE','SILHOUETTE','SOLID']);
   assert.match(candidate.spec.details.states[2].appearance,/Dream material/);
+  const draftPrompt=await post('/visual-spec/draft-prompts',{...scope,items:[{canonicalKey:'FX-001',sourceAssetRevision:candidate.sourceAssetRevision,spec:candidate.spec}]});
+  assert.equal(draftPrompt.status,200);assert.equal(draftPrompt.payload.data.candidates[0].generationIntent,'MATERIAL_STATE_BOARD');
+  assert.equal(draftPrompt.payload.data.applied,false);
+  assert.equal((await db('o_v04AssetVisualSpec').count({n:'revision'}).first()).n,0);
+  assert.equal((await db('o_v04AssetPromptBuild').count({n:'canonicalKey'}).first()).n,0);
   const input={...scope,canonicalKey:'FX-001',sourceAssetRevision:candidate.sourceAssetRevision,spec:candidate.spec};
   const preview=await post('/visual-spec/preview',input);
   assert.equal(preview.status,200);assert.deepEqual(preview.payload.data.issues,[]);
@@ -1686,4 +1691,32 @@ test('OPT-027A authenticated HTTP proposal and preview remain read-only until hu
   const applied=await post('/visual-spec/apply',{...input,previewHash:preview.payload.data.previewHash});
   assert.equal(applied.status,200);assert.equal(applied.payload.data.promptStatus,'READY');
   assert.equal((await s.readPilot(scope)).promptBuilds[0].generationIntent,'MATERIAL_STATE_BOARD');
+});
+
+test('OPT-031 Studio draft Prompt compiles against unconfirmed Visual Spec without truth writes', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const visual=loadSource(path.join(root,'src/v04/visualSpec.ts'),db,cache,oss);
+  const contract=loadSource(path.join(root,'src/v04/visualSpecContract.ts'),db,cache,oss);
+  const scope=await s.createPilotProject({name:'Studio drafts',brief:'One boy',targetDuration:30,aspectRatio:'16:9'},7);
+  const foreign=await s.createPilotProject({name:'Foreign',brief:'',targetDuration:30,aspectRatio:'16:9'},7);
+  const changes=[{operation:'ADD',clientRef:'boy',asset:{...asset('Boy'),assetKind:'HUMAN_CHARACTER',importance:'CORE'}}];
+  const preview=await s.previewAssets({...scope,changes});await s.applyAssets({...scope,changes,previewHash:preview.previewHash});
+  const spec=contract.compileVisualSemantic({name:'Boy',description:'calm',assetKind:'HUMAN_CHARACTER',identityAnchors:['scar'],mustPreserve:['scar'],forbiddenChanges:[]},
+    {visualIdentitySummary:'Boy with blue coat',silhouette:'small boy',primaryPalette:['blue'],details:{ageRange:'8-10',footwear:'canvas shoes',hair:{color:'black',silhouette:'short'},body:{build:'slim'},wardrobe:{upper:'blue coat'}}});
+  const beforeAsset=await db('o_v04Asset').where({projectId:scope.projectId,canonicalKey:'CHAR-001'}).first();
+  const input={...scope,items:[{canonicalKey:'CHAR-001',sourceAssetRevision:1,spec}]};
+  const result=await visual.compileStudioDraftPrompts(input);
+  assert.equal(result.candidates.length,1);assert.equal(result.failures.length,0);
+  assert.equal(result.candidates[0].generationIntent,'CHARACTER_TURNAROUND');
+  assert.deepEqual(result.candidates[0].draftPromptIR.viewIntent.map(v=>v.orientation),['FRONT','LEFT_PROFILE','BACK','THREE_QUARTER']);
+  assert.ok(result.candidates[0].draftRenderedPrompt.text.includes('same face'));
+  assert.equal(result.candidates[0].applied,false);
+  assert.equal((await db('o_v04AssetVisualSpec').count({n:'revision'}).first()).n,0);
+  assert.equal((await db('o_v04AssetPromptBuild').count({n:'canonicalKey'}).first()).n,0);
+  assert.deepEqual(await db('o_v04Asset').where({projectId:scope.projectId,canonicalKey:'CHAR-001'}).first(),beforeAsset);
+  const cross=await visual.compileStudioDraftPrompts({...foreign,items:input.items});
+  assert.equal(cross.candidates.length,0);assert.equal(cross.failures[0].code,'PILOT_VISUAL_SCOPE_INVALID');
+  const stale=await visual.compileStudioDraftPrompts({...scope,items:[{...input.items[0],sourceAssetRevision:2}]});
+  assert.equal(stale.failures[0].code,'PILOT_VISUAL_SOURCE_STALE');
+  assert.equal(oss.modelCalls.length,0,'draft compilation never calls the provider');
 });

@@ -11,7 +11,7 @@ import { answerProjectAgent } from "./agentOrchestrator";
 import { proposeAgentAction } from "./agentActionProposal";
 import { answerStudioTurn, StudioTurnFailure, studioTurnRequest } from "./studioTurn";
 import { buildProjectAgentContext, projectAgentMemoryKey, renderProjectAgentSystem } from "./agentContext";
-import { applyVisualSpec, previewVisualSpec, proposeVisualSpecs, rebuildVisualPrompt, setLibraryBinding } from "./visualSpec";
+import { applyVisualSpec, compileStudioDraftPrompts, previewVisualSpec, proposeVisualSpecs, rebuildVisualPrompt, setLibraryBinding } from "./visualSpec";
 
 const router = express.Router();
 const id = z.number().int().positive();
@@ -56,6 +56,7 @@ endpoint("/assets/apply", applyAssets);
 endpoint("/assets/turnaround/plan", planOptionalTurnaround);
 endpoint("/assets/resolve", resolveAssets);
 endpoint("/visual-spec/propose", proposeVisualSpecs);
+endpoint("/visual-spec/draft-prompts", compileStudioDraftPrompts);
 endpoint("/visual-spec/preview", previewVisualSpec);
 endpoint("/visual-spec/apply", applyVisualSpec);
 endpoint("/visual-spec/prompt/rebuild", rebuildVisualPrompt);

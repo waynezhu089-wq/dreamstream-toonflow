@@ -19,6 +19,8 @@ const target = scope.extend({ canonicalKey: key });
 const proposalRequest = scope.extend({ canonicalKeys: z.array(key).min(1).max(6) });
 const previewRequest = target.extend({ sourceAssetRevision: id, spec: visualSpecSchema });
 const applyRequest = previewRequest.extend({ previewHash: z.string().length(64) });
+const draftPromptRequest = scope.extend({ items: z.array(z.object({ canonicalKey: key,
+  sourceAssetRevision: id, spec: visualSpecSchema }).strict()).min(1).max(6) });
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 async function current(trx: Knex.Transaction, data: z.infer<typeof target>, includeObservations = false) {
@@ -198,6 +200,43 @@ async function plan(trx: Knex.Transaction, data: z.infer<typeof previewRequest>)
 export async function previewVisualSpec(input: unknown) {
   const data = previewRequest.parse(input);
   return q.transaction(trx => plan(trx, data));
+}
+
+// Studio compiles unconfirmed visual drafts with the same pure Prompt IR
+// compiler as the confirmed path. This read transaction does not create a
+// Visual Spec or an official Prompt Build.
+export async function compileStudioDraftPrompts(input: unknown) {
+  const data = draftPromptRequest.parse(input);
+  if (new Set(data.items.map(item => item.canonicalKey)).size !== data.items.length)
+    throw new PilotError("PILOT_VISUAL_DUPLICATE_KEY", "同一批草案不能重复引用资产", 422);
+  return q.transaction(async trx => {
+    const candidates: any[] = [], failures: { canonicalKey: string; code: string; message: string }[] = [];
+    for (const item of data.items) {
+      try {
+        const targetData = { projectId: data.projectId, scriptId: data.scriptId, canonicalKey: item.canonicalKey };
+        const { asset, refs } = await current(trx, targetData);
+        if (Number(asset.revision) !== item.sourceAssetRevision)
+          throw new PilotError("PILOT_VISUAL_SOURCE_STALE", "资产身份已更新，请重新生成视觉草案", 409);
+        if (referenceOnly(asset)) throw new PilotError("PILOT_VISUAL_REFERENCE_ONLY", "真实素材不能编译 AI 图片草案", 422);
+        validateSpec(asset, refs, item.spec);
+        const review = await trx("o_v04AssetReviewPlan").where(targetData).first();
+        const plan = review ?? reviewPlanFor(asset);
+        const generationIntent = intentFromReviewPlan(asset, plan);
+        if (!generationIntent) throw new PilotError("PILOT_VISUAL_INTENT_INVALID", "当前资产没有可用的图片生成意图", 422);
+        const draftPromptIR = compilePromptIR(asset, item.spec, generationIntent,
+          refs.map(ref => ({ attachmentId: ref.attachmentId, name: ref.originalName })));
+        candidates.push({ canonicalKey: item.canonicalKey, sourceAssetRevision: asset.revision,
+          generationIntent, draftPromptIR, draftRenderedPrompt: renderGenericPrompt(draftPromptIR),
+          previewPlan: { previewKind: plan.previewKind, previewSpec: typeof plan.previewSpec === "string" ? JSON.parse(plan.previewSpec) : plan.previewSpec,
+            turnaroundSpec: typeof plan.turnaroundSpec === "string" ? JSON.parse(plan.turnaroundSpec) : plan.turnaroundSpec },
+          completenessIssues: completenessIssues(item.spec), applied: false });
+      } catch (error) {
+        const safe = error instanceof PilotError ? error : new PilotError("PILOT_VISUAL_DRAFT_COMPILE_FAILED", "草案 Prompt 编译失败", 422);
+        failures.push({ canonicalKey: item.canonicalKey, code: safe.code, message: safe.message });
+      }
+    }
+    return { candidates, failures, applied: false };
+  });
 }
 
 async function savePromptBuild(trx: Knex.Transaction, projectId: number, canonicalKey: string, asset: any, spec: VisualSpec, specRevision: number, refs: { attachmentId: string; originalName: string }[], previewKind: string) {
