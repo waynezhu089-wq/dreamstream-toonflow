@@ -6,6 +6,36 @@ import { reviewPlanFor } from "./assetWorkflow";
 // Experimental authoring data. Existing production tables remain the authority
 // for media, Gate, Stage, Attempt and accepted video state.
 export async function initializeV04Schema(db: Knex) {
+  if (!await db.schema.hasTable("o_v04StudioImageExecutorConfig")) await db.schema.createTable("o_v04StudioImageExecutorConfig", t => {
+    t.integer("projectId").primary();
+    t.text("provider").notNullable().defaultTo("COMFY_LOCAL");
+    t.text("baseUrl").notNullable();
+    t.boolean("enabled").notNullable().defaultTo(false);
+    t.text("checkpoint").notNullable();
+    t.text("executorProfile").notNullable().defaultTo("LOCAL_DRAFT_V1");
+    t.integer("updatedAt").notNullable();
+  });
+  if (!await db.schema.hasTable("o_v04StudioAssetDraftJob")) await db.schema.createTable("o_v04StudioAssetDraftJob", t => {
+    t.text("id").primary();
+    t.integer("projectId").notNullable(); t.integer("scriptId").notNullable(); t.text("canonicalKey").notNullable();
+    t.integer("sourceAssetRevision").notNullable(); t.text("draftHash").notNullable();
+    t.text("generationIntent").notNullable(); t.text("executorType").notNullable();
+    t.text("executorProfile").notNullable(); t.text("workflowVersion").notNullable();
+    t.text("status").notNullable(); t.text("comfyPromptId").nullable();
+    t.text("inputSnapshotJson").notNullable(); t.text("outputsJson").notNullable().defaultTo("[]");
+    t.text("errorCode").nullable(); t.text("errorMessage").nullable();
+    t.integer("attemptCount").notNullable().defaultTo(1);
+    t.integer("createdAt").notNullable(); t.integer("startedAt").nullable();
+    t.integer("completedAt").nullable(); t.integer("updatedAt").notNullable();
+    t.index(["projectId", "scriptId", "canonicalKey", "createdAt"], "v04_draft_job_scope_idx");
+    t.index(["status", "createdAt"], "v04_draft_job_queue_idx");
+  });
+  if (!await db.schema.hasTable("o_v04StudioDraftArtifact")) await db.schema.createTable("o_v04StudioDraftArtifact", t => {
+    t.text("artifactId").primary(); t.text("jobId").notNullable().index();
+    t.integer("projectId").notNullable().index(); t.text("mimeType").notNullable();
+    t.text("extension").notNullable(); t.text("role").notNullable();
+    t.integer("width").notNullable(); t.integer("height").notNullable(); t.integer("createdAt").notNullable();
+  });
   if (!await db.schema.hasTable("o_v04Creative")) await db.schema.createTable("o_v04Creative", t => {
     t.integer("projectId").notNullable();
     t.integer("scriptId").notNullable();

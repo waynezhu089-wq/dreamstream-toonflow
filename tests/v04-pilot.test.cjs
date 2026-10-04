@@ -1761,3 +1761,107 @@ test('OPT-031 explicit Studio ASSET_CREATE stays proposal-only until existing As
     error=>['PILOT_RELATION_INVALID','PILOT_SOURCE_STALE'].includes(error.code));
   assert.equal(oss.modelCalls.filter(call=>call.method==='invokeText').length,2);
 });
+
+test('OPT-028 draft executor persists one scoped Comfy job and private artifact without confirming Visual Spec', async t => {
+  const {db,cache,oss,service}=await fixture(t);
+  const http=require('node:http');
+  const sharp=require('sharp');
+  const png=await sharp({create:{width:32,height:32,channels:3,background:'#3659ad'}}).png().toBuffer();
+  let submissions=0;
+  const comfy=http.createServer((req,res)=>{
+    res.setHeader('content-type',req.url.startsWith('/view')?'image/png':'application/json');
+    if(req.url==='/system_stats')return res.end(JSON.stringify({system:{comfyui_version:'test'}}));
+    if(req.url==='/object_info')return res.end(JSON.stringify({CheckpointLoaderSimple:{input:{required:{ckpt_name:[['test.safetensors']]}}},CLIPTextEncode:{},EmptyLatentImage:{},KSampler:{},VAEDecode:{},SaveImage:{}}));
+    if(req.url==='/prompt'){submissions++;return res.end(JSON.stringify({prompt_id:'test-prompt',node_errors:{}}));}
+    if(req.url==='/history/test-prompt')return res.end(JSON.stringify({'test-prompt':{status:{completed:true},outputs:{'7':{images:[{filename:'draft.png',subfolder:'',type:'output'}]}}}}));
+    if(req.url.startsWith('/view'))return res.end(png);
+    res.statusCode=404;res.end('{}');
+  });
+  await new Promise(resolve=>comfy.listen(0,'127.0.0.1',resolve));
+  t.after(()=>comfy.close());
+  const image=loadSource(path.join(root,'src/v04/studioDraftImage.ts'),db,cache,oss);
+  const contract=loadSource(path.join(root,'src/v04/visualSpecContract.ts'),db,cache,oss);
+  const scope=await service.createPilotProject({name:'Draft test',brief:'Boy on the island',targetDuration:30,aspectRatio:'16:9'},7);
+  await db('o_v04Asset').insert({projectId:scope.projectId,canonicalKey:'CHAR-001',category:'CHAR',name:'Boy',description:'Small boy in blue coat',
+    sourcePolicy:'AI_ALLOWED',assetKind:'HUMAN_CHARACTER',importance:'CORE',status:'ACTIVE',revision:1,createdAt:Date.now(),updatedAt:Date.now()});
+  const spec=contract.compileVisualSemantic({assetKind:'HUMAN_CHARACTER',name:'Boy',description:'Small boy in blue coat',identityAnchors:[],mustPreserve:[],forbiddenChanges:[]},
+    {visualIdentitySummary:'Small boy in blue coat',silhouette:'child',primaryPalette:['blue'],details:{ageRange:'8–10',footwear:'shoes',hair:{color:'black',silhouette:'short'},body:{build:'slim'},wardrobe:{upper:'blue coat'}}});
+  const baseUrl=`http://127.0.0.1:${comfy.address().port}`;
+  assert.equal((await image.testDraftExecutor({projectId:scope.projectId,baseUrl})).status,'CONNECTED');
+  await image.configureDraftExecutor({projectId:scope.projectId,baseUrl,checkpoint:'test.safetensors',enabled:true});
+  const input={...scope,canonicalKey:'CHAR-001',sourceAssetRevision:1,visualSpecDraft:spec};
+  const first=await image.enqueueDraftImage(input);
+  const second=await image.enqueueDraftImage(input);
+  assert.equal(second.reused,true);
+  assert.equal(second.job.id,first.job.id);
+  for(let i=0;i<80;i++){
+    const row=await db('o_v04StudioAssetDraftJob').where({id:first.job.id}).first();
+    if(row.status==='SUCCEEDED')break;
+    if(row.status==='FAILED')assert.fail(row.errorCode+' '+row.errorMessage);
+    await new Promise(resolve=>setTimeout(resolve,50));
+  }
+  const row=await db('o_v04StudioAssetDraftJob').where({id:first.job.id}).first();
+  assert.equal(row.status,'SUCCEEDED');
+  assert.equal(submissions,1);
+  const artifact=JSON.parse(row.outputsJson)[0];
+  assert.equal(artifact.role,'TURNAROUND_SHEET');
+  assert.deepEqual((await image.getDraftArtifact(scope.projectId,artifact.artifactId)).bytes,png);
+  await assert.rejects(image.getDraftArtifact(scope.projectId+1,artifact.artifactId),error=>error.code==='ARTIFACT_MISSING');
+  const express=require('express');
+  const app=express();app.use(express.json());app.use((req,_res,next)=>{req.user={id:Number(req.headers['x-test-user']||7)};next();});
+  app.use('/api/v04',loadSource(path.join(root,'src/v04/router.ts'),db,cache,oss).default);
+  const server=app.listen(0,'127.0.0.1');
+  await new Promise(resolve=>server.once('listening',resolve));
+  t.after(()=>server.close());
+  const artifactUrl=`http://127.0.0.1:${server.address().port}${artifact.fileRef}`;
+  const allowed=await fetch(artifactUrl,{headers:{'x-test-user':'7'}});
+  assert.equal(allowed.status,200);assert.equal(allowed.headers.get('content-type'),'image/png');
+  assert.deepEqual(Buffer.from(await allowed.arrayBuffer()),png);
+  assert.equal((await fetch(artifactUrl,{headers:{'x-test-user':'8'}})).status,403);
+  assert.equal((await db('o_v04AssetVisualSpec')).length,0);
+  assert.equal((await db('o_v04AssetPromptBuild')).length,0);
+  const retry=await image.enqueueDraftImage({...input,force:true});
+  assert.notEqual(retry.job.id,first.job.id);
+  assert.equal((await db('o_v04StudioAssetDraftJob').where({id:first.job.id}).first()).status,'STALE');
+  for(let i=0;i<80;i++){
+    const status=(await db('o_v04StudioAssetDraftJob').where({id:retry.job.id}).first()).status;
+    if(['SUCCEEDED','FAILED','STALE'].includes(status))break;
+    await new Promise(resolve=>setTimeout(resolve,50));
+  }
+  await db('o_v04Asset').where({projectId:scope.projectId,canonicalKey:'CHAR-001'}).update({sourcePolicy:'REAL_REQUIRED'});
+  await assert.rejects(image.enqueueDraftImage(input),error=>error.code==='PILOT_VISUAL_REFERENCE_ONLY');
+});
+
+test('OPT-028 optional real local Comfy smoke uses disposable SQLite and no project-truth write', {skip:process.env.V04_REAL_COMFY_TEST!=='1'}, async t => {
+  const {db,cache,oss,service}=await fixture(t);
+  const image=loadSource(path.join(root,'src/v04/studioDraftImage.ts'),db,cache,oss);
+  const contract=loadSource(path.join(root,'src/v04/visualSpecContract.ts'),db,cache,oss);
+  const scope=await service.createPilotProject({name:'Disposable Comfy smoke',brief:'A small blue-coated dreamer',targetDuration:20,aspectRatio:'16:9'},7);
+  await db('o_v04Asset').insert({projectId:scope.projectId,canonicalKey:'CHAR-001',category:'CHAR',name:'Young dreamer',description:'A young dreamer in a blue coat',
+    sourcePolicy:'AI_ALLOWED',assetKind:'HUMAN_CHARACTER',importance:'CORE',status:'ACTIVE',revision:1,createdAt:Date.now(),updatedAt:Date.now()});
+  const spec=contract.compileVisualSemantic({assetKind:'HUMAN_CHARACTER',name:'Young dreamer',description:'A young dreamer in a blue coat',identityAnchors:[],mustPreserve:[],forbiddenChanges:[]},
+    {visualIdentitySummary:'Young boy with short messy dark hair and a simple blue coat',silhouette:'small human child',primaryPalette:['deep blue'],
+      details:{ageRange:'8–10',footwear:'plain shoes',hair:{color:'dark',silhouette:'short and messy'},body:{build:'slim'},wardrobe:{upper:'simple blue coat'}}});
+  const baseUrl='http://127.0.0.1:8188';
+  const checked=await image.testDraftExecutor({projectId:scope.projectId,baseUrl});
+  assert.equal(checked.status,'CONNECTED',JSON.stringify(checked));
+  const checkpoint='DreamShaperXL1.0Alpha2_fixedVae_half_00001_.safetensors';
+  assert.ok(checked.checkpoints.includes(checkpoint),'preinstalled DreamShaper XL checkpoint is required');
+  await image.configureDraftExecutor({projectId:scope.projectId,baseUrl,checkpoint,enabled:true});
+  const started=Date.now();
+  const {job}=await image.enqueueDraftImage({...scope,canonicalKey:'CHAR-001',sourceAssetRevision:1,visualSpecDraft:spec});
+  let row;
+  for(let i=0;i<480;i++){
+    row=await db('o_v04StudioAssetDraftJob').where({id:job.id}).first();
+    if(['SUCCEEDED','FAILED','STALE'].includes(row.status))break;
+    await new Promise(resolve=>setTimeout(resolve,1000));
+  }
+  assert.equal(row?.status,'SUCCEEDED',`${row?.errorCode}: ${row?.errorMessage}`);
+  const artifact=JSON.parse(row.outputsJson)[0];
+  const downloaded=await image.getDraftArtifact(scope.projectId,artifact.artifactId);
+  assert.ok(downloaded.bytes.length>1000);
+  assert.equal((await db('o_v04AssetVisualSpec')).length,0);
+  assert.equal((await db('o_v04AssetPromptBuild')).length,0);
+  console.log('[OPT-028 Real Comfy Smoke]',{elapsedMs:Date.now()-started,artifactId:artifact.artifactId,width:artifact.width,height:artifact.height,
+    bytes:downloaded.bytes.length,checkpoint,sourceTableWrites:0});
+});

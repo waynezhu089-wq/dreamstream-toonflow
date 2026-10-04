@@ -12,6 +12,8 @@ import { proposeAgentAction } from "./agentActionProposal";
 import { answerStudioTurn, StudioTurnFailure, studioTurnRequest } from "./studioTurn";
 import { buildProjectAgentContext, projectAgentMemoryKey, renderProjectAgentSystem } from "./agentContext";
 import { applyVisualSpec, compileStudioDraftPrompts, previewVisualSpec, proposeVisualSpecs, rebuildVisualPrompt, setLibraryBinding } from "./visualSpec";
+import { configureDraftExecutor, enqueueDraftImage, getDraftArtifact, listDraftJobs, testDraftExecutor } from "./studioDraftImage";
+import { DraftComfyError } from "./comfyDraftClient";
 
 const router = express.Router();
 const id = z.number().int().positive();
@@ -37,10 +39,10 @@ function endpoint(route: string, run: (body: any, req: express.Request) => Promi
   router.post(route, async (req, res) => {
     try { res.json({ code: 200, data: await run(req.body, req), message: "成功" }); }
     catch (e: any) {
-      const status = e instanceof ZodError ? 400 : e instanceof PilotError ? e.status : 500;
-      const code = e instanceof ZodError ? "PILOT_INPUT_INVALID" : e instanceof PilotError ? e.code : "PILOT_FAILED";
+      const status = e instanceof ZodError ? 400 : e instanceof PilotError ? e.status : e instanceof DraftComfyError ? 409 : 500;
+      const code = e instanceof ZodError ? "PILOT_INPUT_INVALID" : e instanceof PilotError || e instanceof DraftComfyError ? e.code : "PILOT_FAILED";
       if (status >= 500 && !(e instanceof PilotError)) console.error("[V04 Pilot][InternalFailure]", { code, errorName: e?.name ?? "Error" });
-      res.status(status).json({ code, message: e instanceof PilotError ? e.message : e instanceof ZodError ? "请求参数无效" : "操作失败，请查看后端日志",
+      res.status(status).json({ code, message: e instanceof PilotError || e instanceof DraftComfyError ? e.message : e instanceof ZodError ? "请求参数无效" : "操作失败，请查看后端日志",
         ...(e instanceof StudioTurnFailure ? { userMessageId: e.userMessageId, terminal: e.terminal,
           retryAllowed: e.retryAllowed, checkStatusUseful: e.checkStatusUseful, correlationId: e.correlationId } : {}) });
     }
@@ -57,6 +59,23 @@ endpoint("/assets/turnaround/plan", planOptionalTurnaround);
 endpoint("/assets/resolve", resolveAssets);
 endpoint("/visual-spec/propose", proposeVisualSpecs);
 endpoint("/visual-spec/draft-prompts", compileStudioDraftPrompts);
+endpoint("/studio/executor/comfy/test", testDraftExecutor);
+endpoint("/studio/executor/comfy/configure", configureDraftExecutor);
+endpoint("/studio/draft-image/enqueue", enqueueDraftImage);
+endpoint("/studio/draft-image/jobs", listDraftJobs);
+router.get("/studio/artifact/:projectId/:artifactId", async (req, res) => {
+  try {
+    const projectId = Number(req.params.projectId);
+    const actorUserId = Number((req as any).user?.id);
+    if (!Number.isSafeInteger(projectId) || !Number.isSafeInteger(actorUserId)) return res.sendStatus(400);
+    const project = await db("o_project").where({ id: projectId, userId: actorUserId }).first();
+    if (!project) return res.sendStatus(403);
+    const artifact = await getDraftArtifact(projectId, String(req.params.artifactId));
+    res.setHeader("Content-Type", artifact.mimeType);
+    res.setHeader("Cache-Control", "private, max-age=60");
+    res.send(artifact.bytes);
+  } catch (error) { res.status(error instanceof PilotError ? error.status : 404).json({ code: "ARTIFACT_MISSING", message: "草图不可用" }); }
+});
 endpoint("/visual-spec/preview", previewVisualSpec);
 endpoint("/visual-spec/apply", applyVisualSpec);
 endpoint("/visual-spec/prompt/rebuild", rebuildVisualPrompt);
