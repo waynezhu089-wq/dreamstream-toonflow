@@ -28,10 +28,11 @@ function loadSource(file, db, cache = new Map(), oss = null) {
       if (oss.modelError) throw Error('provider call failed');
       return { object: oss.visionResult ?? { summary: 'A dark blue image with a bright logo', dominantColors: ['deep blue'], visibleText: ['DreamStream'], uncertainty: [] } };
     }, invoke: async input => {
-      oss.modelCalls.push({ model, ...input, method: 'invokeJson' });
-      const next=oss.skillResponses?.shift();
+      oss.modelCalls.push({ model, ...input, method: input.output ? 'invokeJson' : 'invokeText' });
+      const next=input.output ? oss.skillResponses?.shift() : oss.studioResponses?.shift();
       if (next instanceof Error) throw next;
       if (oss.modelError) throw Error('provider call failed');
+      if (!input.output) return { text: next === undefined ? JSON.stringify(oss.proposalOutput) : next };
       return { output: next ?? oss.proposalOutput };
     } }; }, invoke: async input => {
       oss.modelCalls.push({ model, ...input });
@@ -94,6 +95,90 @@ async function fixture(t) {
   return { db, oss, cache, service: loadSource(path.join(root,'src/v04/service.ts'),db,cache,oss), agent: loadSource(path.join(root,'src/v04/agentAttachments.ts'),db,cache,oss) };
 }
 const asset = (name='Dreamer', category='CHAR', sourcePolicy='AI_ALLOWED') => ({ name, category, description:'calm', identityAnchors:['left eyebrow scar'], mustPreserve:['scar'], forbiddenChanges:['redraw brand text'], ownerKey:null, variantOf:null, sourcePolicy, prompt:'' });
+
+test('Studio semantic ingress accepts one lightweight object and rejects ambiguous or unsafe action output', () => {
+  const {parseStudioTurnSemantic:parse}=loadSource(path.join(root,'src/v04/studioTurnSemantic.ts'),null);
+  for(const raw of [
+    '{"mode":"DISCUSS","reply":"男孩和鲸腹场景搭配。"}',
+    '```json\n{"mode":"discussion","reply":"男孩和鲸腹场景搭配。"}\n```',
+    '建议如下： {"mode":"讨论","reply":"男孩和鲸腹场景搭配。"} 请核对。',
+  ]) assert.deepEqual(parse(raw),{mode:'DISCUSS',reply:'男孩和鲸腹场景搭配。'});
+  assert.deepEqual(parse('{"mode":"修改","reply":"请预览","summary":"肩更窄","rationale":"保持年龄感","patch":{"silhouette":"narrower shoulders"}}'),
+    {mode:'PROPOSE_CHANGE',reply:'请预览',summary:'肩更窄',rationale:'保持年龄感',patch:{silhouette:'narrower shoulders'}});
+  assert.deepEqual(parse('{"mode":"target_confirmation","reply":"请先选中素材。"}'),
+    {mode:'NEEDS_TARGET_CONFIRMATION',reply:'请先选中素材。'});
+  const rejects=[
+    ['', 'EMPTY_RESPONSE'],
+    ['模型认为可以讨论。', 'JSON_EXTRACTION_FAILED'],
+    ['{"mode":"DISCUSS","reply":"一"} {"mode":"DISCUSS","reply":"二"}', 'JSON_EXTRACTION_FAILED'],
+    ['{"mode":"PROPOSE_CHANGE","reply":"可以改","summary":"改肩","rationale":"保留年龄"}', 'STRICT_VALIDATION_FAILED'],
+    ['{"mode":"unrelated","reply":"内容"}', 'SEMANTIC_NORMALIZATION_FAILED'],
+  ];
+  for(const [raw,stage] of rejects) assert.throws(()=>parse(raw),error=>error.stage===stage);
+});
+
+test('Studio plain-text boundary repairs malformed JSON once and classifies empty or provider failure', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const studio=loadSource(path.join(root,'src/v04/studioTurn.ts'),db,cache,oss);
+  const scope=await s.createPilotProject({name:'Studio replies',brief:'Whale dream',targetDuration:30,aspectRatio:'16:9'},7);
+  const input={context:{...scope,currentStage:'studio',currentRoute:'studio',selectedObject:null},message:'男孩和鲸腹场景搭吗？'};
+  oss.studioResponses=['{"mode":"DISCUSS","reply":"很搭"}'];
+  assert.equal((await studio.answerStudioTurn(input)).mode,'DISCUSS');
+  assert.equal(oss.modelCalls.at(-1).output,undefined,'Studio does not require provider Output.json');
+  const calls=oss.modelCalls.length;
+  oss.studioResponses=['{"mode":"DISCUSS","reply":"很搭"','{"mode":"DISCUSS","reply":"场景与男孩的比例协调。"}'];
+  assert.match((await studio.answerStudioTurn(input)).reply,/比例协调/);
+  assert.equal(oss.modelCalls.length,calls+2,'syntax repair is bounded to one pinned-session attempt');
+  const failedRepairCalls=oss.modelCalls.length;
+  oss.studioResponses=['{"mode":"DISCUSS","reply":"未闭合"','{"mode":"DISCUSS","reply":"仍未闭合"'];
+  await assert.rejects(studio.answerStudioTurn(input),error=>error.code==='PILOT_STUDIO_JSON_EXTRACTION_FAILED');
+  assert.equal(oss.modelCalls.length,failedRepairCalls+2,'a second malformed response cannot trigger a third call');
+  oss.studioResponses=['{"mode":"PROPOSE_CHANGE","reply":"修改中"','{"mode":"DISCUSS","reply":"只讨论"}'];
+  await assert.rejects(studio.answerStudioTurn(input),error=>error.code==='PILOT_STUDIO_STRICT_VALIDATION_FAILED',
+    'format repair may not downgrade action intent to discussion');
+  oss.studioResponses=[''];
+  await assert.rejects(studio.answerStudioTurn(input),error=>error.code==='PILOT_STUDIO_EMPTY_RESPONSE'&&error.terminal);
+  oss.studioResponses=[Error('provider unavailable')];
+  await assert.rejects(studio.answerStudioTurn(input),error=>error.code==='PILOT_STUDIO_PROVIDER_FAILED'&&error.terminal);
+  oss.studioResponses=['{"mode":"PROPOSE_CHANGE","reply":"改肩","summary":"肩更窄","rationale":"保持年龄"}'];
+  const before=oss.modelCalls.length;
+  await assert.rejects(studio.answerStudioTurn(input),error=>error.code==='PILOT_STUDIO_STRICT_VALIDATION_FAILED');
+  assert.equal(oss.modelCalls.length,before+1,'missing action patch is rejected without a speculative repair');
+  assert.equal((await db('o_v04Asset').where({projectId:scope.projectId})).length,0,'failed turns do not change project truth');
+});
+
+test('Studio HTTP terminal failure returns persisted user ID; retry reuses it and cannot duplicate a completed answer', async t => {
+  const {db,oss,cache,service:s}=await fixture(t);
+  const scope=await s.createPilotProject({name:'Studio retry',brief:'Whale dream',targetDuration:30,aspectRatio:'16:9'},7);
+  const context={...scope,currentStage:'studio',currentRoute:'studio',selectedObject:null};
+  const express=require('express'),app=express();app.use(express.json());
+  app.use((req,_res,next)=>{req.user={id:7};next();});
+  app.use('/api/v04',loadSource(path.join(root,'src/v04/router.ts'),db,cache,oss).default);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const post=async (route,body)=>{const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v04${route}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});return {status:response.status,body:await response.json()};};
+  oss.studioResponses=[''];
+  const failed=await post('/agent/studio-turn',{context,message:'男孩和鲸腹场景搭吗？'});
+  assert.equal(failed.status,502);assert.equal(failed.body.code,'PILOT_STUDIO_EMPTY_RESPONSE');
+  assert.equal(failed.body.terminal,true);assert.equal(failed.body.retryAllowed,true);assert.equal(failed.body.checkStatusUseful,false);
+  assert.match(failed.body.userMessageId,/^[0-9a-f-]{36}$/);
+  const key=`project:${scope.projectId}:projectAgent`;
+  assert.equal((await db('memories').where({isolationKey:key,role:'user'})).length,1);
+  assert.equal((await db('memories').where({isolationKey:key,role:'assistant'})).length,0);
+  oss.studioResponses=['{"mode":"DISCUSS","reply":"男孩的尺度可以和鲸腹空间形成对照。"}'];
+  const retried=await post('/agent/studio-turn/retry',{context,userMessageId:failed.body.userMessageId});
+  assert.equal(retried.status,200);assert.equal(retried.body.data.mode,'DISCUSS');
+  assert.equal(retried.body.data.userMessageId,failed.body.userMessageId);
+  assert.equal((await db('memories').where({isolationKey:key,role:'user'})).length,1,'retry never inserts another user message');
+  assert.equal((await db('memories').where({isolationKey:key,role:'assistant'})).length,1);
+  const calls=oss.modelCalls.length;
+  const duplicate=await post('/agent/studio-turn/retry',{context,userMessageId:failed.body.userMessageId});
+  assert.equal(duplicate.status,409);assert.equal(duplicate.body.code,'PILOT_STUDIO_ALREADY_ANSWERED');
+  assert.equal(oss.modelCalls.length,calls,'completed answer is rejected before another model call');
+  const other=await s.createPilotProject({name:'Other',brief:'',targetDuration:30,aspectRatio:'16:9'},7);
+  const cross=await post('/agent/studio-turn/retry',{context:{...context,...other},userMessageId:failed.body.userMessageId});
+  assert.equal(cross.status,404);
+});
 
 test('existing experimental Asset Bible schema upgrades additively and stays idempotent', async t => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'v04-asset-upgrade-'));

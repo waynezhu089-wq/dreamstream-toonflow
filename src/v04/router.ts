@@ -1,5 +1,5 @@
 import express from "express";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z, ZodError } from "zod";
 import { db } from "@/utils/db";
 import { ModelConfigError, requireModel } from "@/services/modelPreset";
@@ -9,7 +9,7 @@ import { previewSkill, previewCreativeProposal } from "./skills";
 import { applyAttachmentPromotion, attachmentsForMessage, getAgentAttachmentBytes, previewAttachmentPromotion, uploadAgentImage } from "./agentAttachments";
 import { answerProjectAgent } from "./agentOrchestrator";
 import { proposeAgentAction } from "./agentActionProposal";
-import { answerStudioTurn, studioTurnRequest } from "./studioTurn";
+import { answerStudioTurn, StudioTurnFailure, studioTurnRequest } from "./studioTurn";
 import { buildProjectAgentContext, projectAgentMemoryKey, renderProjectAgentSystem } from "./agentContext";
 import { applyVisualSpec, previewVisualSpec, proposeVisualSpecs, rebuildVisualPrompt, setLibraryBinding } from "./visualSpec";
 
@@ -40,7 +40,9 @@ function endpoint(route: string, run: (body: any, req: express.Request) => Promi
       const status = e instanceof ZodError ? 400 : e instanceof PilotError ? e.status : 500;
       const code = e instanceof ZodError ? "PILOT_INPUT_INVALID" : e instanceof PilotError ? e.code : "PILOT_FAILED";
       if (status >= 500 && !(e instanceof PilotError)) console.error("[V04 Pilot][InternalFailure]", { code, errorName: e?.name ?? "Error" });
-      res.status(status).json({ code, message: e instanceof PilotError ? e.message : e instanceof ZodError ? "请求参数无效" : "操作失败，请查看后端日志" });
+      res.status(status).json({ code, message: e instanceof PilotError ? e.message : e instanceof ZodError ? "请求参数无效" : "操作失败，请查看后端日志",
+        ...(e instanceof StudioTurnFailure ? { userMessageId: e.userMessageId, terminal: e.terminal,
+          retryAllowed: e.retryAllowed, checkStatusUseful: e.checkStatusUseful, correlationId: e.correlationId } : {}) });
     }
   });
 }
@@ -61,6 +63,33 @@ endpoint("/assets/library-binding/set", setLibraryBinding);
 endpoint("/skills/preview", previewSkill);
 endpoint("/agent/creative-proposal", previewCreativeProposal);
 endpoint("/agent/action-proposal", proposeAgentAction);
+// A stable assistant identity is a final duplicate-write fence for retries,
+// without introducing another task or lifecycle table.
+function studioAssistantId(userMessageId: string) {
+  const hash = createHash("sha256").update(`v04-studio-assistant:${userMessageId}`).digest("hex");
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+}
+async function completeStudioTurn(input: z.infer<typeof studioTurnRequest>, userMessageId: string) {
+  let result: Awaited<ReturnType<typeof answerStudioTurn>>;
+  try { result = await answerStudioTurn(input); }
+  catch (error) {
+    if (error instanceof StudioTurnFailure) { error.userMessageId = userMessageId; throw error; }
+    const correlationId = randomUUID();
+    console.error("[V04 StudioTurn][Failure]", { correlationId, projectId: input.context.projectId,
+      selectedTargetType: input.context.selectedObject?.type ?? null,
+      selectedTargetKey: input.context.selectedObject?.key ?? null,
+      stage: "PREPARATION_FAILED", errorName: error instanceof Error ? error.name : "Error" });
+    const failure = new StudioTurnFailure("PILOT_STUDIO_PREPARATION_FAILED",
+      "消息已保存，但 Project Agent 本次回答失败。", "PREPARATION_FAILED", correlationId);
+    failure.userMessageId = userMessageId;
+    throw failure;
+  }
+  const assistantMessageId = studioAssistantId(userMessageId);
+  await db("memories").insert({ id: assistantMessageId, isolationKey: memoryKey(input.context.projectId), type: "message",
+    role: "assistant", content: result.reply, embedding: null, summarized: 0, createTime: Date.now() });
+  return { ...result, isolationKey: memoryKey(input.context.projectId), userMessageId, assistantMessageId };
+}
+
 endpoint("/agent/studio-turn", async input => {
   const data = studioTurnRequest.parse(input);
   await readPilot({ projectId: data.context.projectId, scriptId: data.context.scriptId });
@@ -71,11 +100,30 @@ endpoint("/agent/studio-turn", async input => {
   catch (error) { if (!missingLocalEmbedding(error)) throw error; }
   await db("memories").insert({ id: userMessageId, isolationKey: key, type: "message", role: "user", content: data.message,
     embedding: embedding ? JSON.stringify(embedding) : null, summarized: 0, createTime: Date.now() });
-  const result = await answerStudioTurn(data);
-  const assistantMessageId = randomUUID();
-  await db("memories").insert({ id: assistantMessageId, isolationKey: key, type: "message", role: "assistant", content: result.reply,
-    embedding: null, summarized: 0, createTime: Date.now() });
-  return { ...result, isolationKey: key, userMessageId, assistantMessageId };
+  return completeStudioTurn(data, userMessageId);
+});
+const studioRetries = new Set<string>();
+endpoint("/agent/studio-turn/retry", async input => {
+  const data = studioTurnRequest.omit({ message: true }).extend({ userMessageId: z.string().uuid() }).parse(input);
+  await readPilot({ projectId: data.context.projectId, scriptId: data.context.scriptId });
+  const key = memoryKey(data.context.projectId);
+  const user = await db("memories").where({ id: data.userMessageId, isolationKey: key, type: "message", role: "user" })
+    .select("id", "content", "createTime", db.raw("rowid as sqliteRowId")).first();
+  if (!user) throw new PilotError("PILOT_STUDIO_MESSAGE_NOT_FOUND", "原消息不存在于当前项目", 404);
+  const existing = await db("memories").where({ id: studioAssistantId(user.id), isolationKey: key, role: "assistant" }).first();
+  const next = await db("memories").where({ isolationKey: key, type: "message" })
+    .whereRaw("rowid > ?", [user.sqliteRowId]).orderByRaw("rowid asc").first();
+  if (existing || next?.role === "assistant")
+    throw new PilotError("PILOT_STUDIO_ALREADY_ANSWERED", "这条消息已有回复，请刷新对话", 409);
+  if (studioRetries.has(user.id)) throw new PilotError("PILOT_STUDIO_RETRY_IN_PROGRESS", "这条消息正在重试，请稍后查看对话", 409);
+  studioRetries.add(user.id);
+  try { return await completeStudioTurn({ context: data.context, message: user.content,
+    ...(data.optionalDraft ? { optionalDraft: data.optionalDraft } : {}) }, user.id); }
+  catch (error: any) {
+    if (error?.code === "SQLITE_CONSTRAINT_PRIMARYKEY" || error?.code === "SQLITE_CONSTRAINT_UNIQUE")
+      throw new PilotError("PILOT_STUDIO_ALREADY_ANSWERED", "这条消息已有回复，请刷新对话", 409);
+    throw error;
+  } finally { studioRetries.delete(user.id); }
 });
 endpoint("/agent/image/upload", uploadAgentImage);
 endpoint("/agent/reference/preview", previewAttachmentPromotion);
