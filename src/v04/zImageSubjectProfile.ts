@@ -1,6 +1,8 @@
 // A parameterized translation of the locally verified Z-Image Turbo API graph.
 // The canonical Prompt IR remains unchanged; this is only its execution prompt.
 export const Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 = "Z_IMAGE_TURBO_SUBJECT_DRAFT_V1" as const;
+// Executor-only rendering language. It is deliberately separate from the canonical Prompt IR.
+export const Z_IMAGE_SUBJECT_RENDERING_V1 = "Z_IMAGE_SUBJECT_RENDERING_V1" as const;
 export const zImageSubjectModels = {
   unet: "z_image_turbo_int8_convrot.safetensors",
   textEncoder: "qwen_3_4b_fp8_mixed.safetensors",
@@ -10,6 +12,10 @@ export const zImageSubjectWorkflowVersion = "z-image-turbo-subject-draft-v1";
 
 const contains = (value: unknown, pattern: RegExp) => typeof value === "string" && pattern.test(value);
 const string = (value: unknown) => typeof value === "string" ? value : "";
+const subjectRenderingLanguage =
+  "Cinematic stylized realism: natural age-appropriate child anatomy and head-to-body ratio, refined facial anatomy, " +
+  "subtle realistic skin and fabric texture, soft filmic lighting, dreamlike but grounded, " +
+  "premium animated-film character concept art with gentle emotional realism.";
 
 export function zImageSubjectPrompt(ir: any) {
   const details = ir?.appearanceBlock?.details ?? {};
@@ -20,7 +26,7 @@ export function zImageSubjectPrompt(ir: any) {
   const gender = contains(details.genderPresentation, /男|boy|male/i) ? "boy" :
     contains(details.genderPresentation, /女|girl|female/i) ? "girl" : "child";
   const body = string(details.body?.build) + " " + string(ir?.appearanceBlock?.silhouette);
-  const hair = [details.hair?.color, details.hair?.silhouette, details.hair?.styling].map(string).join(" ");
+  const hair = [details.hair?.color, details.hair?.length, details.hair?.silhouette, details.hair?.styling].map(string).join(" ");
   const clothes = [details.wardrobe?.upper, details.wardrobe?.lower].map(string).join(" ");
   const palette = Array.isArray(ir?.materialBlock?.primaryPalette) ? ir.materialBlock.primaryPalette.join(" ") : "";
   const traits = [
@@ -37,9 +43,13 @@ export function zImageSubjectPrompt(ir: any) {
     contains(palette + " " + clothes, /灰蓝|gray.blue|blue.gray/i) ? "muted gray-blue" : "",
     contains(details.footwear, /赤足|光脚|barefoot/i) ? "barefoot" : "",
   ].filter(Boolean);
-  return `Full-body character design illustration of one ${years} ${gender}. ${traits.join(", ")}. ` +
-    "One character only, head and both feet fully visible, standing against a plain neutral studio background. " +
-    "Keep the same face, hairstyle, clothing, proportions and palette. No unlisted accessories, jewelry, logos, text, armor or extra people.";
+  const identity = `One ${years} ${gender}, ${traits.join(", ")}.`;
+  const composition = "Clean full-body single-character design study, head and both feet fully visible, neutral studio background.";
+  const constraints = "Preserve the specified identity, hairstyle, sleepwear, footwear, body proportions and palette; " +
+    "no new accessories, jewelry, logos, text, armor or extra people. " +
+    "Avoid chibi or super-deformed proportions, oversized head, anime mascot styling, toy-like body, " +
+    "flat vector or children's sticker illustration, and exaggerated cute facial features.";
+  return [identity, subjectRenderingLanguage, composition, constraints].join(" ");
 }
 
 export function buildZImageSubjectGraph(input: { positive: string; seed: number; width: number; height: number; filenamePrefix: string }) {

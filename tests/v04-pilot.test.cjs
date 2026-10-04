@@ -1833,13 +1833,18 @@ test('OPT-028 draft executor persists one scoped Comfy job and private artifact 
 });
 
 test('OPT-028B Z-Image subject profile compiles a short English prompt and preserves the verified workflow topology',()=>{
-  const {zImageSubjectPrompt,zImageSubjectModels,Z_IMAGE_TURBO_SUBJECT_DRAFT_V1}=loadSource(path.join(root,'src/v04/zImageSubjectProfile.ts'),null);
+  const {zImageSubjectPrompt,zImageSubjectModels,Z_IMAGE_TURBO_SUBJECT_DRAFT_V1,Z_IMAGE_SUBJECT_RENDERING_V1}=loadSource(path.join(root,'src/v04/zImageSubjectProfile.ts'),null);
   const {buildDraftWorkflow,draftWorkflowVersion}=loadSource(path.join(root,'src/v04/comfyDraftClient.ts'),null);
   const prompt=zImageSubjectPrompt({appearanceBlock:{silhouette:'纤细，窄肩',details:{ageRange:'约7–9岁',genderPresentation:'男孩',
     hair:{color:'深棕至墨黑',silhouette:'微乱短发'},body:{build:'清瘦纤细，窄肩'},wardrobe:{upper:'宽松月白长袖睡衣',lower:'灰蓝宽松长裤'},
     footwear:'赤足',face:{eyeLanguage:'深蓝灰瞳'}}},materialBlock:{primaryPalette:['月白 #E8E6DF','灰蓝 #7C8DA6']}});
   assert.match(prompt,/7 to 9 year old boy/);assert.match(prompt,/slim child proportions/);
-  for(const term of ['dark brown-black hair','slightly messy hair','pajamas','barefoot','One character only','No unlisted accessories'])assert.ok(prompt.includes(term),term);
+  for(const term of ['dark brown-black hair','short hair','slightly messy hair','pajamas','barefoot','moon-white','muted gray-blue',
+    'Cinematic stylized realism','natural age-appropriate child anatomy','refined facial anatomy',
+    'realistic skin and fabric texture','soft filmic lighting','dreamlike but grounded','premium animated-film',
+    'head and both feet fully visible','chibi','super-deformed','oversized head','anime mascot','toy-like',
+    'flat vector','sticker illustration','no new accessories'])assert.ok(prompt.includes(term),term);
+  assert.equal(Z_IMAGE_SUBJECT_RENDERING_V1,'Z_IMAGE_SUBJECT_RENDERING_V1');
   assert.doesNotMatch(prompt,/[\u3400-\u9fff]/,'execution prompt is English; canonical spec and IR remain unchanged');
   const workflow=buildDraftWorkflow({profile:Z_IMAGE_TURBO_SUBJECT_DRAFT_V1,intent:'CHARACTER_TURNAROUND',
     checkpoint:zImageSubjectModels.unet,positive:prompt,negative:'unused by ConditioningZeroOut',seed:20261004,width:1024,height:1024,
@@ -1910,10 +1915,68 @@ test('OPT-028B Z-Image subject uses the existing persistent job and artifact pip
     if(row.status==='FAILED')assert.fail(row.errorCode);await new Promise(resolve=>setTimeout(resolve,30));}
   const row=await db('o_v04StudioAssetDraftJob').where({id:z.job.id}).first();
   assert.equal(row.status,'SUCCEEDED');assert.equal(row.executorProfile,'Z_IMAGE_TURBO_SUBJECT_DRAFT_V1');
+  const snapshot=JSON.parse(row.inputSnapshotJson);
+  assert.equal(snapshot.renderingLanguageVersion,'Z_IMAGE_SUBJECT_RENDERING_V1');
+  const beforeRenderingVersion=[snapshot.visualSpecDraft,snapshot.draftPromptIR,snapshot.generationIntent,
+    snapshot.draftPromptIR.referenceBindings,row.executorProfile,row.workflowVersion,snapshot.checkpoint,snapshot.baseUrl,
+    snapshot.width,snapshot.height,snapshot.requestedSeed,snapshot.executionPrompt];
+  const preVersionHash=require('node:crypto').createHash('sha256').update(JSON.stringify(beforeRenderingVersion)).digest('hex');
+  assert.notEqual(row.draftHash,preVersionHash,'rendering-language version changes draft identity independently of prompt text');
   const artifact=JSON.parse(row.outputsJson)[0];assert.equal(artifact.role,'MAIN_PREVIEW');
   assert.deepEqual((await image.getDraftArtifact(scope.projectId,artifact.artifactId)).bytes,png);
   assert.equal(graphs.length,2);assert.equal(graphs[1]['8'].inputs.steps,8);
   assert.equal((await db('o_v04AssetVisualSpec')).length,0);assert.equal((await db('o_v04AssetPromptBuild')).length,0);
+});
+
+test('OPT-028B-01 optional real CHAR-001 rendering preview uses readonly Pilot truth and one disposable Z-Image job',
+  {skip:process.env.V04_Z_RENDERING_REAL_TEST!=='1'},async t=>{
+  const sourceDb=require('better-sqlite3')(path.resolve(root,'../userdata/pilot/data/db2.sqlite'),{readonly:true,fileMustExist:true});
+  t.after(()=>sourceDb.close());
+  const sourceProjectId=1790941805789310,canonicalKey='CHAR-001';
+  const asset=sourceDb.prepare('select * from o_v04Asset where projectId=? and canonicalKey=? and status=?')
+    .get(sourceProjectId,canonicalKey,'ACTIVE');
+  const specRow=sourceDb.prepare('select * from o_v04AssetVisualSpec where projectId=? and canonicalKey=? and status=? order by revision desc limit 1')
+    .get(sourceProjectId,canonicalKey,'CONFIRMED');
+  assert.ok(asset&&specRow&&Number(asset.revision)===Number(specRow.sourceAssetRevision));
+  const {db,cache,oss,service}=await fixture(t);
+  const image=loadSource(path.join(root,'src/v04/studioDraftImage.ts'),db,cache,oss);
+  const scope=await service.createPilotProject({name:'OPT-028B-01 disposable CHAR-001',brief:'Subject rendering comparison',
+    targetDuration:40,aspectRatio:'16:9'},7);
+  await db('o_v04Asset').insert({...asset,projectId:scope.projectId});
+  const baseUrl='http://127.0.0.1:8188',profile='Z_IMAGE_TURBO_SUBJECT_DRAFT_V1';
+  const checkpoint='z_image_turbo_int8_convrot.safetensors';
+  const available=await image.testDraftExecutor({projectId:scope.projectId,baseUrl,profile});
+  assert.equal(available.status,'CONNECTED',JSON.stringify(available));
+  assert.ok(available.checkpoints.includes(checkpoint));
+  await image.configureDraftExecutor({projectId:scope.projectId,baseUrl,profile,checkpoint,enabled:true});
+  const started=Date.now();
+  const {job}=await image.enqueueDraftImage({...scope,canonicalKey,sourceAssetRevision:asset.revision,
+    visualSpecDraft:JSON.parse(specRow.specJson),seed:20261004,width:1024,height:1024});
+  let row;
+  for(let i=0;i<480;i++){
+    row=await db('o_v04StudioAssetDraftJob').where({id:job.id}).first();
+    if(['SUCCEEDED','FAILED','STALE'].includes(row.status))break;
+    await new Promise(resolve=>setTimeout(resolve,1000));
+  }
+  assert.equal(row?.status,'SUCCEEDED',`${row?.errorCode}: ${row?.errorMessage}`);
+  const snapshot=JSON.parse(row.inputSnapshotJson);
+  assert.equal(snapshot.renderingLanguageVersion,'Z_IMAGE_SUBJECT_RENDERING_V1');
+  const artifact=JSON.parse(row.outputsJson)[0];
+  assert.equal(artifact.role,'MAIN_PREVIEW');
+  const downloaded=await image.getDraftArtifact(scope.projectId,artifact.artifactId);
+  const outDir=path.resolve(root,`../logs/opt028b01-rendering-${Date.now()}`);
+  fs.mkdirSync(outDir,{recursive:true});
+  const file=path.join(outDir,'char-001.png');fs.writeFileSync(file,downloaded.bytes,{flag:'wx'});
+  const report={canonicalKey,sourceProjectId,sourceAssetRevision:asset.revision,profile,renderingLanguageVersion:snapshot.renderingLanguageVersion,
+    workflowVersion:row.workflowVersion,draftHash:row.draftHash,jobId:row.id,artifactId:artifact.artifactId,
+    executionPrompt:snapshot.executionPrompt,seed:snapshot.seed,width:artifact.width,height:artifact.height,
+    elapsedMs:Date.now()-started,file,sha256:require('node:crypto').createHash('sha256').update(downloaded.bytes).digest('hex'),
+    projectTruthWrites:0};
+  assert.equal((await db('o_v04AssetVisualSpec')).length,0);
+  assert.equal((await db('o_v04AssetPromptBuild')).length,0);
+  fs.writeFileSync(path.join(outDir,'result.json'),JSON.stringify(report,null,2),{flag:'wx'});
+  console.log('[OPT-028B-01 CHAR-001]',JSON.stringify({outputDir:outDir,elapsedMs:report.elapsedMs,width:report.width,
+    height:report.height,seed:report.seed,projectTruthWrites:0}));
 });
 
 test('OPT-028 optional real local Comfy smoke uses disposable SQLite and no project-truth write', {skip:process.env.V04_REAL_COMFY_TEST!=='1'}, async t => {

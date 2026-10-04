@@ -10,7 +10,7 @@ import { compileStudioDraftPrompts } from "./visualSpec";
 import { visualSpecSchema } from "./visualSpecContract";
 import { awaitDraft, buildDraftWorkflow, downloadDraft, DraftComfyError, draftWorkflowVersion, inspectComfy,
   draftProfiles, LOCAL_DRAFT_V1, localComfyOrigin, submitDraft } from "./comfyDraftClient";
-import { Z_IMAGE_TURBO_SUBJECT_DRAFT_V1, zImageSubjectPrompt } from "./zImageSubjectProfile";
+import { Z_IMAGE_SUBJECT_RENDERING_V1, Z_IMAGE_TURBO_SUBJECT_DRAFT_V1, zImageSubjectPrompt } from "./zImageSubjectProfile";
 
 const q = db as Knex;
 const scope = z.object({ projectId: z.number().int().positive(), scriptId: z.number().int().positive() }).strict();
@@ -85,7 +85,7 @@ function snapshotHash(source: any, config: any, zOptions?: { width: number; heig
     source.draftPromptIR.referenceBindings, profile, draftWorkflowVersion(profile), config.checkpoint, config.baseUrl];
   // Preserve the Phase A hash bytes for existing LOCAL_DRAFT_V1 jobs.
   if (profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1) parts.push(zOptions?.width ?? 1024, zOptions?.height ?? 1024,
-    zOptions?.requestedSeed ?? null, zImageSubjectPrompt(source.draftPromptIR));
+    zOptions?.requestedSeed ?? null, Z_IMAGE_SUBJECT_RENDERING_V1, zImageSubjectPrompt(source.draftPromptIR));
   return hash(parts);
 }
 
@@ -120,6 +120,7 @@ export async function enqueueDraftImage(input: unknown) {
       inputSnapshotJson: JSON.stringify({ ...source, checkpoint: config.checkpoint, baseUrl: config.baseUrl,
         width, height, requestedSeed: data.seed ?? null, seed: data.seed ?? parseInt(draftHash.slice(0, 12), 16),
         executionPurpose: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? "SUBJECT_MAIN_PREVIEW" : null,
+        renderingLanguageVersion: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? Z_IMAGE_SUBJECT_RENDERING_V1 : null,
         executionPrompt: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? zImageSubjectPrompt(source.draftPromptIR) : null }),
       outputsJson: "[]", errorCode: null, errorMessage: null,
       attemptCount: existing ? Number(existing.attemptCount) + 1 : 1,
