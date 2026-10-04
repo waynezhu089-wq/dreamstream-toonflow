@@ -42,7 +42,7 @@ function loadSource(file, db, cache = new Map(), oss = null) {
       if (next instanceof Error) throw next;
       return { text: 'I can discuss the observed image in this project.', output: next ?? oss.proposalOutput };
     } }) } };
-    if (name === '@/utils/getPath') return () => path.join(oss.testDir,'v04-conversation');
+    if (name === '@/utils/getPath') return value => path.join(oss.testDir,...(Array.isArray(value)?value:[value||'v04-conversation']));
     if (name === '@/services/modelPreset') { oss.ModelConfigError ??= class ModelConfigError extends Error {}; return { ModelConfigError: oss.ModelConfigError, requireModel: async (_projectId, slot) => { if (slot === 'vision' && !oss.visionModel || slot === 'text' && oss.textModelUnavailable) throw new oss.ModelConfigError('model unavailable'); return slot === 'vision' ? oss.visionModel : 'fake:local'; }, resolveModels: async () => ({ models: { vision: oss.visionModel } }) }; }
     if (name === '@/utils/agent/memory') return class { async get() { if (oss.contextFailure) throw oss.contextFailure; return {rag:[], summaries:[]}; } };
     if (name === '@/utils/agent/embedding') return { getEmbedding: async () => [] };
@@ -1832,6 +1832,90 @@ test('OPT-028 draft executor persists one scoped Comfy job and private artifact 
   await assert.rejects(image.enqueueDraftImage(input),error=>error.code==='PILOT_VISUAL_REFERENCE_ONLY');
 });
 
+test('OPT-028B Z-Image subject profile compiles a short English prompt and preserves the verified workflow topology',()=>{
+  const {zImageSubjectPrompt,zImageSubjectModels,Z_IMAGE_TURBO_SUBJECT_DRAFT_V1}=loadSource(path.join(root,'src/v04/zImageSubjectProfile.ts'),null);
+  const {buildDraftWorkflow,draftWorkflowVersion}=loadSource(path.join(root,'src/v04/comfyDraftClient.ts'),null);
+  const prompt=zImageSubjectPrompt({appearanceBlock:{silhouette:'纤细，窄肩',details:{ageRange:'约7–9岁',genderPresentation:'男孩',
+    hair:{color:'深棕至墨黑',silhouette:'微乱短发'},body:{build:'清瘦纤细，窄肩'},wardrobe:{upper:'宽松月白长袖睡衣',lower:'灰蓝宽松长裤'},
+    footwear:'赤足',face:{eyeLanguage:'深蓝灰瞳'}}},materialBlock:{primaryPalette:['月白 #E8E6DF','灰蓝 #7C8DA6']}});
+  assert.match(prompt,/7 to 9 year old boy/);assert.match(prompt,/slim child proportions/);
+  for(const term of ['dark brown-black hair','slightly messy hair','pajamas','barefoot','One character only','No unlisted accessories'])assert.ok(prompt.includes(term),term);
+  assert.doesNotMatch(prompt,/[\u3400-\u9fff]/,'execution prompt is English; canonical spec and IR remain unchanged');
+  const workflow=buildDraftWorkflow({profile:Z_IMAGE_TURBO_SUBJECT_DRAFT_V1,intent:'CHARACTER_TURNAROUND',
+    checkpoint:zImageSubjectModels.unet,positive:prompt,negative:'unused by ConditioningZeroOut',seed:20261004,width:1024,height:1024,
+    filenamePrefix:'opt028b-test'});
+  const graph=workflow.graph;
+  assert.equal(workflow.role,'MAIN_PREVIEW');assert.equal(workflow.outputNode,'10');
+  assert.equal(workflow.version,draftWorkflowVersion(Z_IMAGE_TURBO_SUBJECT_DRAFT_V1));
+  assert.equal(graph['1'].class_type,'UNETLoader');assert.equal(graph['1'].inputs.unet_name,zImageSubjectModels.unet);
+  assert.equal(graph['2'].inputs.clip_name,zImageSubjectModels.textEncoder);assert.equal(graph['3'].inputs.vae_name,zImageSubjectModels.vae);
+  assert.deepEqual(graph['5'].inputs.conditioning,['4',0]);assert.deepEqual(graph['8'].inputs.negative,['5',0]);
+  assert.deepEqual([graph['7'].inputs.width,graph['7'].inputs.height],[1024,1024]);
+  assert.deepEqual([graph['8'].inputs.steps,graph['8'].inputs.cfg,graph['8'].inputs.sampler_name,graph['8'].inputs.scheduler],[8,1,'res_multistep','simple']);
+  assert.equal(graph['6'].inputs.shift,3);assert.equal(graph['8'].inputs.seed,20261004);
+  assert.equal(graph['10'].inputs.filename_prefix,'opt028b-test');
+  assert.throws(()=>buildDraftWorkflow({profile:Z_IMAGE_TURBO_SUBJECT_DRAFT_V1,intent:'MATERIAL_STATE_BOARD',
+    checkpoint:zImageSubjectModels.unet,positive:prompt,negative:'',seed:1}),error=>error.code==='WORKFLOW_UNAVAILABLE');
+});
+
+test('OPT-028B Z-Image subject uses the existing persistent job and artifact pipeline with a distinct draft hash',async t=>{
+  const {db,cache,oss,service}=await fixture(t);
+  const http=require('node:http'),sharp=require('sharp');
+  const png=await sharp({create:{width:32,height:32,channels:3,background:'#647b9c'}}).png().toBuffer();
+  const graphs=[];
+  const comfy=http.createServer(async(req,res)=>{
+    res.setHeader('content-type',req.url.startsWith('/view')?'image/png':'application/json');
+    if(req.url==='/system_stats')return res.end(JSON.stringify({system:{comfyui_version:'test'}}));
+    if(req.url==='/object_info')return res.end(JSON.stringify({
+      CheckpointLoaderSimple:{input:{required:{ckpt_name:[['dreamshaper.safetensors']]}}},
+      UNETLoader:{input:{required:{unet_name:[['z_image_turbo_int8_convrot.safetensors']]}}},
+      CLIPLoader:{input:{required:{clip_name:[['qwen_3_4b_fp8_mixed.safetensors']]}}},
+      VAELoader:{input:{required:{vae_name:[['ae.safetensors']]}}},
+      CLIPTextEncode:{},EmptyLatentImage:{},EmptySD3LatentImage:{},ConditioningZeroOut:{},ModelSamplingAuraFlow:{},KSampler:{},VAEDecode:{},SaveImage:{}}));
+    if(req.url==='/prompt'){
+      let body='';for await(const chunk of req)body+=chunk;graphs.push(JSON.parse(body).prompt);
+      return res.end(JSON.stringify({prompt_id:`prompt-${graphs.length}`,node_errors:{}}));
+    }
+    if(req.url?.startsWith('/history/')){const number=Number(req.url.split('-')[1]);return res.end(JSON.stringify({[`prompt-${number}`]:{
+      status:{completed:true},outputs:{[graphs[number-1]?.['10']?'10':'7']:{images:[{filename:'draft.png',subfolder:'',type:'output'}]}}}}));}
+    if(req.url?.startsWith('/view'))return res.end(png);
+    res.statusCode=404;res.end('{}');
+  });
+  await new Promise(resolve=>comfy.listen(0,'127.0.0.1',resolve));t.after(()=>comfy.close());
+  const image=loadSource(path.join(root,'src/v04/studioDraftImage.ts'),db,cache,oss);
+  const contract=loadSource(path.join(root,'src/v04/visualSpecContract.ts'),db,cache,oss);
+  const scope=await service.createPilotProject({name:'Z subject test',brief:'Character',targetDuration:30,aspectRatio:'16:9'},7);
+  await db('o_v04Asset').insert({projectId:scope.projectId,canonicalKey:'CHAR-001',category:'CHAR',name:'Boy',description:'A slender boy',
+    sourcePolicy:'AI_ALLOWED',assetKind:'HUMAN_CHARACTER',importance:'CORE',status:'ACTIVE',revision:1,createdAt:Date.now(),updatedAt:Date.now()});
+  const spec=contract.compileVisualSemantic({assetKind:'HUMAN_CHARACTER',name:'Boy',description:'A slender boy',identityAnchors:[],mustPreserve:[],forbiddenChanges:[]},
+    {visualIdentitySummary:'A slim boy in pajamas',silhouette:'清瘦窄肩',primaryPalette:['月白','灰蓝'],
+      details:{ageRange:'7–9岁',genderPresentation:'男孩',footwear:'赤足',hair:{color:'黑色',silhouette:'凌乱短发'},body:{build:'清瘦'},wardrobe:{upper:'宽松长袖睡衣',lower:'宽松长裤'}}});
+  const baseUrl=`http://127.0.0.1:${comfy.address().port}`;
+  await image.configureDraftExecutor({projectId:scope.projectId,baseUrl,checkpoint:'dreamshaper.safetensors',enabled:true});
+  const input={...scope,canonicalKey:'CHAR-001',sourceAssetRevision:1,visualSpecDraft:spec};
+  const old=await image.enqueueDraftImage(input);
+  for(let i=0;i<100;i++){const row=await db('o_v04StudioAssetDraftJob').where({id:old.job.id}).first();if(row.status==='SUCCEEDED')break;
+    if(row.status==='FAILED')assert.fail(row.errorCode);await new Promise(resolve=>setTimeout(resolve,30));}
+  const inspected=await image.testDraftExecutor({projectId:scope.projectId,baseUrl,profile:'Z_IMAGE_TURBO_SUBJECT_DRAFT_V1'});
+  assert.equal(inspected.status,'CONNECTED');assert.deepEqual(inspected.checkpoints,['z_image_turbo_int8_convrot.safetensors']);
+  await image.configureDraftExecutor({projectId:scope.projectId,baseUrl,profile:'Z_IMAGE_TURBO_SUBJECT_DRAFT_V1',
+    checkpoint:'z_image_turbo_int8_convrot.safetensors',enabled:true});
+  const current=await image.readDraftExecutor({projectId:scope.projectId});
+  assert.equal(current.profile,'Z_IMAGE_TURBO_SUBJECT_DRAFT_V1');
+  const z=await image.enqueueDraftImage({...input,width:1024,height:1024,seed:20261004});
+  assert.notEqual(z.job.draftHash,old.job.draftHash,'profile/version are part of the hash');
+  const reused=await image.enqueueDraftImage({...input,width:1024,height:1024,seed:20261004});
+  assert.equal(reused.reused,true);assert.equal(reused.job.id,z.job.id);
+  for(let i=0;i<100;i++){const row=await db('o_v04StudioAssetDraftJob').where({id:z.job.id}).first();if(row.status==='SUCCEEDED')break;
+    if(row.status==='FAILED')assert.fail(row.errorCode);await new Promise(resolve=>setTimeout(resolve,30));}
+  const row=await db('o_v04StudioAssetDraftJob').where({id:z.job.id}).first();
+  assert.equal(row.status,'SUCCEEDED');assert.equal(row.executorProfile,'Z_IMAGE_TURBO_SUBJECT_DRAFT_V1');
+  const artifact=JSON.parse(row.outputsJson)[0];assert.equal(artifact.role,'MAIN_PREVIEW');
+  assert.deepEqual((await image.getDraftArtifact(scope.projectId,artifact.artifactId)).bytes,png);
+  assert.equal(graphs.length,2);assert.equal(graphs[1]['8'].inputs.steps,8);
+  assert.equal((await db('o_v04AssetVisualSpec')).length,0);assert.equal((await db('o_v04AssetPromptBuild')).length,0);
+});
+
 test('OPT-028 optional real local Comfy smoke uses disposable SQLite and no project-truth write', {skip:process.env.V04_REAL_COMFY_TEST!=='1'}, async t => {
   const {db,cache,oss,service}=await fixture(t);
   const image=loadSource(path.join(root,'src/v04/studioDraftImage.ts'),db,cache,oss);
@@ -1864,4 +1948,56 @@ test('OPT-028 optional real local Comfy smoke uses disposable SQLite and no proj
   assert.equal((await db('o_v04AssetPromptBuild')).length,0);
   console.log('[OPT-028 Real Comfy Smoke]',{elapsedMs:Date.now()-started,artifactId:artifact.artifactId,width:artifact.width,height:artifact.height,
     bytes:downloaded.bytes.length,checkpoint,sourceTableWrites:0});
+});
+
+test('OPT-028B optional real CHAR-001 A/B benchmark uses readonly Pilot source and disposable job database',
+  {skip:process.env.V04_Z_SUBJECT_REAL_TEST!=='1'},async t=>{
+  const sourceDb=require('better-sqlite3')(path.resolve(root,'../userdata/pilot/data/db2.sqlite'),{readonly:true,fileMustExist:true});
+  t.after(()=>sourceDb.close());
+  const sourceProjectId=1790941805789310,canonicalKey='CHAR-001';
+  const asset=sourceDb.prepare('select * from o_v04Asset where projectId=? and canonicalKey=? and status=?')
+    .get(sourceProjectId,canonicalKey,'ACTIVE');
+  const specRow=sourceDb.prepare('select * from o_v04AssetVisualSpec where projectId=? and canonicalKey=? and status=? order by revision desc limit 1')
+    .get(sourceProjectId,canonicalKey,'CONFIRMED');
+  assert.ok(asset&&specRow&&Number(asset.revision)===Number(specRow.sourceAssetRevision));
+  const {db,cache,oss,service}=await fixture(t);
+  const image=loadSource(path.join(root,'src/v04/studioDraftImage.ts'),db,cache,oss);
+  const scope=await service.createPilotProject({name:'OPT-028B disposable A/B',brief:'CHAR-001 subject benchmark',targetDuration:40,aspectRatio:'16:9'},7);
+  await db('o_v04Asset').insert({...asset,projectId:scope.projectId});
+  const input={...scope,canonicalKey,sourceAssetRevision:asset.revision,visualSpecDraft:JSON.parse(specRow.specJson)};
+  const baseUrl='http://127.0.0.1:8188';
+  const outDir=path.resolve(root,`../logs/opt028b-benchmark-${Date.now()}`);fs.mkdirSync(outDir,{recursive:true});
+  async function execute(profile,checkpoint,seed,width,height,label){
+    const available=await image.testDraftExecutor({projectId:scope.projectId,baseUrl,profile});
+    assert.equal(available.status,'CONNECTED',JSON.stringify(available));assert.ok(available.checkpoints.includes(checkpoint));
+    await image.configureDraftExecutor({projectId:scope.projectId,baseUrl,profile,checkpoint,enabled:true});
+    const started=Date.now();
+    const {job}=await image.enqueueDraftImage({...input,...(seed==null?{}:{seed}),...(width==null?{}:{width,height})});
+    let row;
+    for(let i=0;i<480;i++){
+      row=await db('o_v04StudioAssetDraftJob').where({id:job.id}).first();
+      if(['SUCCEEDED','FAILED','STALE'].includes(row.status))break;
+      await new Promise(resolve=>setTimeout(resolve,1000));
+    }
+    assert.equal(row?.status,'SUCCEEDED',`${label}: ${row?.errorCode} ${row?.errorMessage}`);
+    const artifact=JSON.parse(row.outputsJson)[0];
+    const downloaded=await image.getDraftArtifact(scope.projectId,artifact.artifactId);
+    const file=path.join(outDir,`${label}.png`);fs.writeFileSync(file,downloaded.bytes,{flag:'wx'});
+    const snapshot=JSON.parse(row.inputSnapshotJson);
+    return {label,profile,workflowVersion:row.workflowVersion,draftHash:row.draftHash,jobId:row.id,
+      role:artifact.role,width:artifact.width,height:artifact.height,elapsedMs:Date.now()-started,
+      seed:snapshot.seed??parseInt(row.draftHash.slice(0,12),16),executionPrompt:snapshot.executionPrompt??snapshot.draftRenderedPrompt.text,
+      file,sha256:require('node:crypto').createHash('sha256').update(downloaded.bytes).digest('hex')};
+  }
+  const baseline=await execute('LOCAL_DRAFT_V1','DreamShaperXL1.0Alpha2_fixedVae_half_00001_.safetensors',null,null,null,'dreamshaper-char');
+  const subject=await execute('Z_IMAGE_TURBO_SUBJECT_DRAFT_V1','z_image_turbo_int8_convrot.safetensors',20261004,1024,1024,'z-image-char');
+  assert.notEqual(subject.draftHash,baseline.draftHash);
+  assert.equal(subject.role,'MAIN_PREVIEW');assert.equal(subject.width,1024);
+  assert.equal((await db('o_v04AssetVisualSpec')).length,0);
+  assert.equal((await db('o_v04AssetPromptBuild')).length,0);
+  const report={canonicalKey,sourceProjectId,sourceAssetRevision:asset.revision,
+    results:[baseline,subject],projectTruthWrites:0};
+  fs.writeFileSync(path.join(outDir,'benchmark.json'),JSON.stringify(report,null,2),{flag:'wx'});
+  console.log('[OPT-028B Benchmark]',JSON.stringify({outputDir:outDir,results:report.results.map(({label,profile,role,width,height,elapsedMs,seed})=>
+    ({label,profile,role,width,height,elapsedMs,seed}))}));
 });

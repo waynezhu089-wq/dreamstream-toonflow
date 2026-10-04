@@ -9,15 +9,19 @@ import { PilotError } from "./service";
 import { compileStudioDraftPrompts } from "./visualSpec";
 import { visualSpecSchema } from "./visualSpecContract";
 import { awaitDraft, buildDraftWorkflow, downloadDraft, DraftComfyError, draftWorkflowVersion, inspectComfy,
-  localComfyOrigin, submitDraft } from "./comfyDraftClient";
+  draftProfiles, LOCAL_DRAFT_V1, localComfyOrigin, submitDraft } from "./comfyDraftClient";
+import { Z_IMAGE_TURBO_SUBJECT_DRAFT_V1, zImageSubjectPrompt } from "./zImageSubjectProfile";
 
 const q = db as Knex;
 const scope = z.object({ projectId: z.number().int().positive(), scriptId: z.number().int().positive() }).strict();
 const target = scope.extend({ canonicalKey: z.string().min(1).max(128) });
 const draftInput = target.extend({ sourceAssetRevision: z.number().int().positive(), visualSpecDraft: visualSpecSchema,
-  force: z.boolean().default(false) }).strict();
+  force: z.boolean().default(false), width: z.number().int().min(512).max(1536).multipleOf(64).optional(),
+  height: z.number().int().min(512).max(1536).multipleOf(64).optional(),
+  seed: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional() }).strict();
 const configInput = z.object({ projectId: z.number().int().positive(), baseUrl: z.string().max(300),
-  checkpoint: z.string().min(1).max(300), enabled: z.boolean() }).strict();
+  checkpoint: z.string().min(1).max(300), enabled: z.boolean(),
+  profile: z.enum(draftProfiles).default(LOCAL_DRAFT_V1) }).strict();
 const hash = (data: unknown) => createHash("sha256").update(JSON.stringify(data)).digest("hex");
 const safeFailure = (error: unknown) => error instanceof DraftComfyError ? error :
   new DraftComfyError("EXECUTION_FAILED", "草图执行失败，请稍后重试");
@@ -35,25 +39,34 @@ async function assertScope(trx: Knex.Transaction, data: { projectId: number; scr
 export async function configureDraftExecutor(input: unknown) {
   const data = configInput.parse(input);
   const baseUrl = localComfyOrigin(data.baseUrl);
-  const inspection = await inspectComfy(baseUrl);
+  const inspection = await inspectComfy(baseUrl, data.profile);
   if (data.enabled && (inspection.status !== "CONNECTED" || !inspection.checkpoints.includes(data.checkpoint)))
     throw new PilotError(inspection.status === "UNAVAILABLE" ? "COMFY_OFFLINE" : "MODEL_MISSING",
       "本地 ComfyUI 未连接，或所选 checkpoint 尚未安装", 409);
   return q.transaction(async trx => {
     if (!await trx("o_project").where({ id: data.projectId }).first()) throw new PilotError("PILOT_SCOPE_INVALID", "项目不存在", 404);
     const record = { projectId: data.projectId, provider: "COMFY_LOCAL", baseUrl,
-      enabled: data.enabled, checkpoint: data.checkpoint, executorProfile: "LOCAL_DRAFT_V1", updatedAt: Date.now() };
+      enabled: data.enabled, checkpoint: data.checkpoint, executorProfile: data.profile, updatedAt: Date.now() };
     await trx("o_v04StudioImageExecutorConfig").insert(record).onConflict("projectId").merge(record);
     return { ...record, connection: inspection.status };
   });
 }
 
 export async function testDraftExecutor(input: unknown) {
-  const data = z.object({ projectId: z.number().int().positive(), baseUrl: z.string().max(300).optional() }).strict().parse(input);
+  const data = z.object({ projectId: z.number().int().positive(), baseUrl: z.string().max(300).optional(),
+    profile: z.enum(draftProfiles).optional() }).strict().parse(input);
   const project = await q("o_project").where({ id: data.projectId }).first();
   if (!project) throw new PilotError("PILOT_SCOPE_INVALID", "项目不存在", 404);
   const current = await q("o_v04StudioImageExecutorConfig").where({ projectId: data.projectId }).first();
-  return inspectComfy(data.baseUrl ?? current?.baseUrl ?? "http://127.0.0.1:8188");
+  return inspectComfy(data.baseUrl ?? current?.baseUrl ?? "http://127.0.0.1:8188",
+    data.profile ?? current?.executorProfile ?? LOCAL_DRAFT_V1);
+}
+
+export async function readDraftExecutor(input: unknown) {
+  const data = z.object({ projectId: z.number().int().positive() }).strict().parse(input);
+  const current = await q("o_v04StudioImageExecutorConfig").where({ projectId: data.projectId }).first();
+  return current ? { baseUrl: current.baseUrl, checkpoint: current.checkpoint,
+    profile: current.executorProfile ?? LOCAL_DRAFT_V1, enabled: !!current.enabled } : null;
 }
 
 async function sourceSnapshot(data: z.infer<typeof draftInput>) {
@@ -66,9 +79,14 @@ async function sourceSnapshot(data: z.infer<typeof draftInput>) {
     draftRenderedPrompt: candidate.draftRenderedPrompt, generationIntent: candidate.generationIntent };
 }
 
-function snapshotHash(source: any, config: any) {
-  return hash([source.visualSpecDraft, source.draftPromptIR, source.generationIntent,
-    source.draftPromptIR.referenceBindings, config.executorProfile, draftWorkflowVersion(), config.checkpoint, config.baseUrl]);
+function snapshotHash(source: any, config: any, zOptions?: { width: number; height: number; requestedSeed?: number }) {
+  const profile = config.executorProfile ?? LOCAL_DRAFT_V1;
+  const parts = [source.visualSpecDraft, source.draftPromptIR, source.generationIntent,
+    source.draftPromptIR.referenceBindings, profile, draftWorkflowVersion(profile), config.checkpoint, config.baseUrl];
+  // Preserve the Phase A hash bytes for existing LOCAL_DRAFT_V1 jobs.
+  if (profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1) parts.push(zOptions?.width ?? 1024, zOptions?.height ?? 1024,
+    zOptions?.requestedSeed ?? null, zImageSubjectPrompt(source.draftPromptIR));
+  return hash(parts);
 }
 
 export async function enqueueDraftImage(input: unknown) {
@@ -81,7 +99,14 @@ export async function enqueueDraftImage(input: unknown) {
       throw new PilotError("STALE_JOB", "素材已变化或必须使用真实参考，不能加入 AI 草图队列", 409);
     const config = await trx("o_v04StudioImageExecutorConfig").where({ projectId: data.projectId }).first();
     if (!config?.enabled) throw new PilotError("WORKFLOW_UNAVAILABLE", "请先启用本地 Comfy 草图执行器", 409);
-    const draftHash = snapshotHash(source, config);
+    const profile = config.executorProfile ?? LOCAL_DRAFT_V1;
+    if (profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 &&
+        (source.generationIntent !== "CHARACTER_TURNAROUND" || source.visualSpecDraft.assetKind !== "HUMAN_CHARACTER"))
+      throw new PilotError("WORKFLOW_UNAVAILABLE", "Z-Image 实验 profile 目前仅支持人物主视图", 409);
+    const width = profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? data.width ?? 1024 : 512;
+    const height = profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? data.height ?? 1024 : 512;
+    const zOptions = { width, height, requestedSeed: data.seed };
+    const draftHash = snapshotHash(source, config, zOptions);
     const existing = await trx("o_v04StudioAssetDraftJob").where({ projectId: data.projectId, scriptId: data.scriptId,
       canonicalKey: data.canonicalKey, sourceAssetRevision: data.sourceAssetRevision, draftHash })
       .orderBy("createdAt", "desc").first();
@@ -90,9 +115,12 @@ export async function enqueueDraftImage(input: unknown) {
     const now = Date.now();
     const job = { id: randomUUID(), projectId: data.projectId, scriptId: data.scriptId,
       canonicalKey: data.canonicalKey, sourceAssetRevision: data.sourceAssetRevision, draftHash,
-      generationIntent: source.generationIntent, executorType: "COMFY_LOCAL", executorProfile: config.executorProfile,
-      workflowVersion: draftWorkflowVersion(), status: "QUEUED", comfyPromptId: null,
-      inputSnapshotJson: JSON.stringify({ ...source, checkpoint: config.checkpoint, baseUrl: config.baseUrl }),
+      generationIntent: source.generationIntent, executorType: "COMFY_LOCAL", executorProfile: profile,
+      workflowVersion: draftWorkflowVersion(profile), status: "QUEUED", comfyPromptId: null,
+      inputSnapshotJson: JSON.stringify({ ...source, checkpoint: config.checkpoint, baseUrl: config.baseUrl,
+        width, height, requestedSeed: data.seed ?? null, seed: data.seed ?? parseInt(draftHash.slice(0, 12), 16),
+        executionPurpose: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? "SUBJECT_MAIN_PREVIEW" : null,
+        executionPrompt: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? zImageSubjectPrompt(source.draftPromptIR) : null }),
       outputsJson: "[]", errorCode: null, errorMessage: null,
       attemptCount: existing ? Number(existing.attemptCount) + 1 : 1,
       createdAt: now, startedAt: null, completedAt: null, updatedAt: now };
@@ -109,7 +137,8 @@ export async function enqueueDraftImage(input: unknown) {
 function publicJob(job: any) {
   return { id: job.id, projectId: job.projectId, scriptId: job.scriptId, canonicalKey: job.canonicalKey,
     sourceAssetRevision: job.sourceAssetRevision, draftHash: job.draftHash, generationIntent: job.generationIntent,
-    executorProfile: job.executorProfile, workflowVersion: job.workflowVersion, status: job.status,
+    executorProfile: job.executorProfile, executionPurpose: job.executorProfile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? "SUBJECT_MAIN_PREVIEW" : null,
+    workflowVersion: job.workflowVersion, status: job.status,
     attemptCount: job.attemptCount, outputs: JSON.parse(job.outputsJson), errorCode: job.errorCode,
     errorMessage: job.errorMessage, createdAt: job.createdAt, updatedAt: job.updatedAt };
 }
@@ -171,18 +200,24 @@ async function produce(job: any, freshClaim: boolean) {
         visualSpecDraft: snapshot.visualSpecDraft, force: false }); }
       catch { await q("o_v04StudioAssetDraftJob").where({ id: job.id, status: "RUNNING" }).update({ status: "STALE", errorCode: "STALE_JOB", updatedAt: Date.now() }); return; }
       const config = await q("o_v04StudioImageExecutorConfig").where({ projectId: job.projectId }).first();
-      if (!config?.enabled || snapshotHash(source, config) !== job.draftHash) {
+      if (!config?.enabled || snapshotHash(source, config, { width: snapshot.width ?? 1024,
+        height: snapshot.height ?? 1024, requestedSeed: snapshot.requestedSeed ?? undefined }) !== job.draftHash) {
         await q("o_v04StudioAssetDraftJob").where({ id: job.id, status: "RUNNING" }).update({ status: "STALE", errorCode: "STALE_JOB", updatedAt: Date.now() });
         return;
       }
     }
     const base = localComfyOrigin(snapshot.baseUrl);
+    const profile = job.executorProfile ?? LOCAL_DRAFT_V1;
     const workflow = buildDraftWorkflow({ intent: job.generationIntent, checkpoint: snapshot.checkpoint,
-      positive: snapshot.draftRenderedPrompt.text, negative: snapshot.draftRenderedPrompt.negative || "",
-      seed: parseInt(job.draftHash.slice(0, 12), 16) });
-    const inspection = await inspectComfy(base);
+      positive: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? snapshot.executionPrompt : snapshot.draftRenderedPrompt.text,
+      negative: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? "" : snapshot.draftRenderedPrompt.negative || "",
+      seed: snapshot.seed ?? parseInt(job.draftHash.slice(0, 12), 16), profile,
+      width: snapshot.width, height: snapshot.height,
+      filenamePrefix: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? `DreamStreamV04ZSubject_${job.id.slice(0, 8)}` : undefined });
+    const inspection = await inspectComfy(base, profile);
     if (inspection.status === "UNAVAILABLE") throw new DraftComfyError("COMFY_OFFLINE", "本地 ComfyUI 未运行");
     if (inspection.missingNodes.length) throw new DraftComfyError("NODE_MISSING", "本地 ComfyUI 缺少草图节点");
+    if (inspection.missingModels.length) throw new DraftComfyError("MODEL_MISSING", "本地 ComfyUI 缺少 Z-Image 模型文件");
     if (!inspection.checkpoints.includes(snapshot.checkpoint)) throw new DraftComfyError("MODEL_MISSING", "配置的 checkpoint 已不存在");
     const promptId = job.comfyPromptId ?? await submitDraft(base, workflow);
     if (!job.comfyPromptId) await q("o_v04StudioAssetDraftJob").where({ id: job.id }).update({ comfyPromptId: promptId, updatedAt: Date.now() });
@@ -201,7 +236,9 @@ async function produce(job: any, freshClaim: boolean) {
       visualSpecDraft: snapshot.visualSpecDraft, force: false }); }
     catch { /* The source may have changed while Comfy was running. Keep its output as history. */ }
     const currentConfig = await q("o_v04StudioImageExecutorConfig").where({ projectId: job.projectId }).first();
-    const stillFresh = source && currentConfig?.enabled && snapshotHash(source, currentConfig) === job.draftHash;
+    const stillFresh = source && currentConfig?.enabled && snapshotHash(source, currentConfig, {
+      width: snapshot.width ?? 1024, height: snapshot.height ?? 1024,
+      requestedSeed: snapshot.requestedSeed ?? undefined }) === job.draftHash;
     await q.transaction(async trx => {
       await trx("o_v04StudioDraftArtifact").insert({ artifactId, jobId: job.id, projectId: job.projectId,
         mimeType: downloaded.mimeType, extension: downloaded.extension, role: workflow.role,

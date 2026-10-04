@@ -12,7 +12,7 @@ import { proposeAgentAction } from "./agentActionProposal";
 import { answerStudioTurn, StudioTurnFailure, studioTurnRequest } from "./studioTurn";
 import { buildProjectAgentContext, projectAgentMemoryKey, renderProjectAgentSystem } from "./agentContext";
 import { applyVisualSpec, compileStudioDraftPrompts, previewVisualSpec, proposeVisualSpecs, rebuildVisualPrompt, setLibraryBinding } from "./visualSpec";
-import { configureDraftExecutor, enqueueDraftImage, getDraftArtifact, listDraftJobs, testDraftExecutor } from "./studioDraftImage";
+import { configureDraftExecutor, enqueueDraftImage, getDraftArtifact, listDraftJobs, readDraftExecutor, testDraftExecutor } from "./studioDraftImage";
 import { DraftComfyError } from "./comfyDraftClient";
 
 const router = express.Router();
@@ -61,6 +61,7 @@ endpoint("/visual-spec/propose", proposeVisualSpecs);
 endpoint("/visual-spec/draft-prompts", compileStudioDraftPrompts);
 endpoint("/studio/executor/comfy/test", testDraftExecutor);
 endpoint("/studio/executor/comfy/configure", configureDraftExecutor);
+endpoint("/studio/executor/comfy/current", readDraftExecutor);
 endpoint("/studio/draft-image/enqueue", enqueueDraftImage);
 endpoint("/studio/draft-image/jobs", listDraftJobs);
 router.get("/studio/artifact/:projectId/:artifactId", async (req, res) => {

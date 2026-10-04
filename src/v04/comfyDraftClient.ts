@@ -1,4 +1,10 @@
 import sharp from "sharp";
+import { buildZImageSubjectGraph, Z_IMAGE_TURBO_SUBJECT_DRAFT_V1, zImageSubjectModels,
+  zImageSubjectWorkflowVersion } from "./zImageSubjectProfile";
+
+export const LOCAL_DRAFT_V1 = "LOCAL_DRAFT_V1" as const;
+export const draftProfiles = [LOCAL_DRAFT_V1, Z_IMAGE_TURBO_SUBJECT_DRAFT_V1] as const;
+export type DraftProfile = typeof draftProfiles[number];
 
 export class DraftComfyError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -23,21 +29,31 @@ export function localComfyOrigin(raw: string) {
 }
 
 const requiredNodes = ["CheckpointLoaderSimple", "CLIPTextEncode", "EmptyLatentImage", "KSampler", "VAEDecode", "SaveImage"];
-export async function inspectComfy(raw: string) {
+const zSubjectNodes = ["UNETLoader", "CLIPLoader", "VAELoader", "CLIPTextEncode", "ConditioningZeroOut",
+  "ModelSamplingAuraFlow", "EmptySD3LatentImage", "KSampler", "VAEDecode", "SaveImage"];
+export async function inspectComfy(raw: string, profile: DraftProfile = LOCAL_DRAFT_V1) {
   const base = localComfyOrigin(raw);
   try {
     const [stats, nodes] = await Promise.all([
       request(`${base}/system_stats`).then(r => r.json()) as Promise<any>,
       request(`${base}/object_info`).then(r => r.json()) as Promise<any>,
     ]);
-    const missingNodes = requiredNodes.filter(node => !nodes[node]);
-    const checkpoints: string[] = nodes.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] ?? [];
-    return { status: missingNodes.length || !checkpoints.length ? "INCOMPATIBLE" : "CONNECTED", baseUrl: base,
-      version: stats.system?.comfyui_version ?? null, checkpoints, missingNodes };
+    const zSubject = profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1;
+    const missingNodes = (zSubject ? zSubjectNodes : requiredNodes).filter(node => !nodes[node]);
+    const listed = (node: string, key: string): string[] => nodes[node]?.input?.required?.[key]?.[0] ?? [];
+    const checkpoints = zSubject ? listed("UNETLoader", "unet_name").filter(name => name === zImageSubjectModels.unet) :
+      listed("CheckpointLoaderSimple", "ckpt_name");
+    const missingModels = zSubject ? [
+      ...(!checkpoints.length ? [zImageSubjectModels.unet] : []),
+      ...(!listed("CLIPLoader", "clip_name").includes(zImageSubjectModels.textEncoder) ? [zImageSubjectModels.textEncoder] : []),
+      ...(!listed("VAELoader", "vae_name").includes(zImageSubjectModels.vae) ? [zImageSubjectModels.vae] : []),
+    ] : [];
+    return { status: missingNodes.length || missingModels.length || !checkpoints.length ? "INCOMPATIBLE" : "CONNECTED",
+      baseUrl: base, profile, version: stats.system?.comfyui_version ?? null, checkpoints, missingNodes, missingModels };
   } catch (error) {
     if (error instanceof DraftComfyError && error.code === "COMFY_OFFLINE")
-      return { status: "UNAVAILABLE", baseUrl: base, version: null, checkpoints: [], missingNodes: [] };
-    return { status: "INCOMPATIBLE", baseUrl: base, version: null, checkpoints: [], missingNodes: [] };
+      return { status: "UNAVAILABLE", baseUrl: base, profile, version: null, checkpoints: [], missingNodes: [], missingModels: [] };
+    return { status: "INCOMPATIBLE", baseUrl: base, profile, version: null, checkpoints: [], missingNodes: [], missingModels: [] };
   }
 }
 
@@ -49,8 +65,21 @@ const roleByIntent: Record<string, string> = {
   ENVIRONMENT_ESTABLISHING: "ENVIRONMENT_ESTABLISHING", MATERIAL_STATE_BOARD: "MATERIAL_STATE_BOARD",
   CELESTIAL_REFERENCE: "CELESTIAL_REFERENCE",
 };
-export function draftWorkflowVersion() { return workflowVersion; }
-export function buildDraftWorkflow(input: { intent: string; checkpoint: string; positive: string; negative: string; seed: number }): DraftWorkflow {
+export function draftWorkflowVersion(profile: DraftProfile = LOCAL_DRAFT_V1) {
+  return profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? zImageSubjectWorkflowVersion : workflowVersion;
+}
+export function buildDraftWorkflow(input: { intent: string; checkpoint: string; positive: string; negative: string;
+  seed: number; profile?: DraftProfile; width?: number; height?: number; filenamePrefix?: string }): DraftWorkflow {
+  if (input.profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1) {
+    if (input.intent !== "CHARACTER_TURNAROUND" || input.checkpoint !== zImageSubjectModels.unet)
+      throw new DraftComfyError("WORKFLOW_UNAVAILABLE", "Z-Image 人物草图仅支持当前人物主视图工作流");
+    const width = input.width ?? 1024, height = input.height ?? 1024;
+    if (![width, height].every(size => Number.isInteger(size) && size >= 512 && size <= 1536 && size % 64 === 0))
+      throw new DraftComfyError("WORKFLOW_UNAVAILABLE", "Z-Image 草图尺寸无效");
+    return { graph: buildZImageSubjectGraph({ positive: input.positive, seed: input.seed, width, height,
+      filenamePrefix: input.filenamePrefix ?? "DreamStreamV04ZSubject" }), outputNode: "10",
+      role: "MAIN_PREVIEW", version: zImageSubjectWorkflowVersion };
+  }
   const role = roleByIntent[input.intent];
   if (!role) throw new DraftComfyError("WORKFLOW_UNAVAILABLE", "当前生成意图没有本地图片工作流");
   const graph = {
