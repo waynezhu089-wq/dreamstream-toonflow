@@ -1,3 +1,4 @@
+import {directorDryRun} from './directorDryRun';
 import {inspectOperations,recentExecutions,executionDetail,workflowExample,previewRouting,applyRouting} from './operations';
 import {reconcileAutoAssets,autoAssetCoverage} from './autoAsset';
 import {wakeDraftWorker} from './studioDraftImage';
@@ -64,6 +65,7 @@ endpoint('/operations/routing/preview',input=>previewRouting(input));
 endpoint('/operations/routing/apply',(input,req)=>applyRouting(input,Number((req as any).user.id)));
 endpoint("/project/create", (body, req) => createPilotProject(body, Number((req as any).user.id)));
 endpoint("/project/read", input => readPilot(input));
+endpoint("/director/dry-run",directorDryRun);
 endpoint("/creative/preview", previewCreative);
 endpoint("/creative/apply", applyCreative);
 endpoint("/assets/preview", previewAssets);

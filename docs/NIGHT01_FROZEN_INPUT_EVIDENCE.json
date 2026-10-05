@@ -1,0 +1,316 @@
+[
+  {
+    "id": "da45b4df-aa9f-4d45-a2ca-2ce85e6fb942",
+    "canonicalKey": "CHAR-003",
+    "status": "SUCCEEDED",
+    "sourceAssetRevision": 1,
+    "executionPurpose": "ASSET_MAIN_PREVIEW",
+    "executorProfile": "KREA2_T2I_ASSET_V1",
+    "createdAt": 1791214118796,
+    "executionPrompt": "鲸鱼\n从海中央下方升起的巨大鲸鱼，一口吞没船，使光被整体吞入；后因蓝光变亮发痒而打喷嚏，将男孩与潜水艇从头顶出水口喷出。\n从海中央下方升起的巨大鲸鱼，一口吞没船，使光被整体吞入；后因蓝光变亮发痒而打喷嚏，将男孩与潜水艇从头顶出水口喷出。\nIdentity: []. Preserve: [].\nAppearance: {\"silhouette\":\"\",\"scale\":\"\",\"proportion\":\"\",\"palette\":[],\"materials\":[],\"details\":{\"speciesOrForm\":\"\",\"bodyStructure\":\"\",\"anatomy\":\"\",\"relativeScale\":\"\",\"surface\":\"\",\"skinFurFeatherLanguage\":\"\",\"eyes\":\"\",\"movementLanguage\":\"\"}}.\nOne complete creature, readable silhouette, all wings and limbs visible, calm neutral presentation.\nCinematic stylized realism, refined concept art, soft filmic lighting, coherent material detail; no chibi proportions, no text or multi-view sheet.\nAvoid: [].\nProject direction (context only, do not insert other story subjects): 我想为 Dream Stream 制作一支约 40 秒的品牌短片。\n\nDream Stream 是一个 AI 视频创作与制片平台，我想表达的核心概念是：\n“把脑海里的梦，变成真正可以制作出来的影像。”\n\n这支片不要像普通的软件功能介绍广告，也不要只是展示界面。\n我希望它有电影感、梦幻感和创作者气质，让观众感受到一个想法从脑海中出现，逐渐变成人物、场景、分镜，最后成为完整影像的过程。\n\n目标观众主要是 AI 视频创作者、导演型创作者和有创意但缺少传统影视制作能力的人。\n\n真实的 Dream Stream Logo 和软件 UI 后续应使用真实素材，不允许 AI 重画。",
+    "visualSpecDraft": {
+      "assetKind": "CREATURE",
+      "visualIdentitySummary": "从海中央下方升起的巨大鲸鱼，一口吞没船，使光被整体吞入；后因蓝光变亮发痒而打喷嚏，将男孩与潜水艇从头顶出水口喷出。",
+      "silhouette": "",
+      "scale": "",
+      "proportion": "",
+      "primaryPalette": [],
+      "secondaryPalette": [],
+      "materials": [],
+      "surfaceLanguage": "",
+      "distinctiveFeatures": [],
+      "continuityNotes": [],
+      "identityAnchors": [],
+      "mustPreserve": [],
+      "forbiddenChanges": [],
+      "embeddedElements": [],
+      "details": {
+        "speciesOrForm": "",
+        "bodyStructure": "",
+        "anatomy": "",
+        "relativeScale": "",
+        "surface": "",
+        "skinFurFeatherLanguage": "",
+        "eyes": "",
+        "movementLanguage": ""
+      }
+    },
+    "draftPromptIR": {
+      "schemaVersion": 1,
+      "compilerVersion": "v04.prompt-ir.1",
+      "generationIntent": "CREATURE_TURNAROUND",
+      "identityBlock": {
+        "canonicalKey": "CHAR-003",
+        "name": "鲸鱼",
+        "description": "从海中央下方升起的巨大鲸鱼，一口吞没船，使光被整体吞入；后因蓝光变亮发痒而打喷嚏，将男孩与潜水艇从头顶出水口喷出。",
+        "visualIdentitySummary": "从海中央下方升起的巨大鲸鱼，一口吞没船，使光被整体吞入；后因蓝光变亮发痒而打喷嚏，将男孩与潜水艇从头顶出水口喷出。",
+        "identityAnchors": [],
+        "ownerKey": null,
+        "variantOf": null,
+        "sharedVisualSystemKey": null
+      },
+      "appearanceBlock": {
+        "silhouette": "",
+        "scale": "",
+        "proportion": "",
+        "distinctiveFeatures": [],
+        "details": {
+          "speciesOrForm": "",
+          "bodyStructure": "",
+          "anatomy": "",
+          "relativeScale": "",
+          "surface": "",
+          "skinFurFeatherLanguage": "",
+          "eyes": "",
+          "movementLanguage": ""
+        }
+      },
+      "materialBlock": {
+        "materials": [],
+        "surfaceLanguage": "",
+        "primaryPalette": [],
+        "secondaryPalette": []
+      },
+      "continuityBlock": {
+        "mustPreserve": [],
+        "continuityNotes": [],
+        "embeddedElements": []
+      },
+      "environmentBlock": null,
+      "viewIntent": [
+        {
+          "orientation": "FRONT",
+          "identityInvariant": "CHAR-003"
+        },
+        {
+          "orientation": "LEFT_PROFILE",
+          "identityInvariant": "CHAR-003"
+        },
+        {
+          "orientation": "BACK",
+          "identityInvariant": "CHAR-003"
+        },
+        {
+          "orientation": "THREE_QUARTER",
+          "identityInvariant": "CHAR-003"
+        }
+      ],
+      "compositionIntent": {
+        "emptyEnvironment": false
+      },
+      "positiveConstraints": [],
+      "negativeConstraints": [],
+      "referenceBindings": []
+    }
+  },
+  {
+    "id": "1503fda9-9fcd-4e46-9266-5cb5442a3061",
+    "canonicalKey": "PROP-001",
+    "status": "SUCCEEDED",
+    "sourceAssetRevision": 1,
+    "executionPurpose": "ASSET_MAIN_PREVIEW",
+    "executorProfile": "KREA2_T2I_ASSET_V1",
+    "createdAt": 1791214118796,
+    "executionPrompt": "海盗船\n蓝色荧光物质凝成的海盗船形态，男孩踏上后离岸驶向远处；是物质第一次完整凝聚成实体。\n蓝色荧光物质凝成的海盗船形态，男孩踏上后离岸驶向远处；是物质第一次完整凝聚成实体。\nIdentity: []. Preserve: [].\nAppearance: {\"silhouette\":\"\",\"scale\":\"\",\"proportion\":\"\",\"palette\":[],\"materials\":[],\"details\":{\"vehicleType\":\"\",\"overallSilhouette\":\"\",\"relativeScale\":\"\",\"mainStructure\":\"\",\"secondaryStructure\":\"\",\"surfaceTreatment\":\"\",\"propulsion\":\"\",\"windows\":\"\",\"openings\":\"\"}}.\nOne complete vehicle in three-quarter hero view, readable structure, materials and proportions.\nCinematic stylized realism, refined concept art, soft filmic lighting, coherent material detail; no chibi proportions, no text or multi-view sheet.\nAvoid: [].\nProject direction (context only, do not insert other story subjects): 我想为 Dream Stream 制作一支约 40 秒的品牌短片。\n\nDream Stream 是一个 AI 视频创作与制片平台，我想表达的核心概念是：\n“把脑海里的梦，变成真正可以制作出来的影像。”\n\n这支片不要像普通的软件功能介绍广告，也不要只是展示界面。\n我希望它有电影感、梦幻感和创作者气质，让观众感受到一个想法从脑海中出现，逐渐变成人物、场景、分镜，最后成为完整影像的过程。\n\n目标观众主要是 AI 视频创作者、导演型创作者和有创意但缺少传统影视制作能力的人。\n\n真实的 Dream Stream Logo 和软件 UI 后续应使用真实素材，不允许 AI 重画。",
+    "visualSpecDraft": {
+      "assetKind": "VEHICLE",
+      "visualIdentitySummary": "蓝色荧光物质凝成的海盗船形态，男孩踏上后离岸驶向远处；是物质第一次完整凝聚成实体。",
+      "silhouette": "",
+      "scale": "",
+      "proportion": "",
+      "primaryPalette": [],
+      "secondaryPalette": [],
+      "materials": [],
+      "surfaceLanguage": "",
+      "distinctiveFeatures": [],
+      "continuityNotes": [],
+      "identityAnchors": [],
+      "mustPreserve": [],
+      "forbiddenChanges": [],
+      "embeddedElements": [],
+      "details": {
+        "vehicleType": "",
+        "overallSilhouette": "",
+        "relativeScale": "",
+        "mainStructure": "",
+        "secondaryStructure": "",
+        "surfaceTreatment": "",
+        "propulsion": "",
+        "windows": "",
+        "openings": ""
+      }
+    },
+    "draftPromptIR": {
+      "schemaVersion": 1,
+      "compilerVersion": "v04.prompt-ir.1",
+      "generationIntent": "VEHICLE_TURNAROUND",
+      "identityBlock": {
+        "canonicalKey": "PROP-001",
+        "name": "海盗船",
+        "description": "蓝色荧光物质凝成的海盗船形态，男孩踏上后离岸驶向远处；是物质第一次完整凝聚成实体。",
+        "visualIdentitySummary": "蓝色荧光物质凝成的海盗船形态，男孩踏上后离岸驶向远处；是物质第一次完整凝聚成实体。",
+        "identityAnchors": [],
+        "ownerKey": null,
+        "variantOf": null,
+        "sharedVisualSystemKey": "FX-001"
+      },
+      "appearanceBlock": {
+        "silhouette": "",
+        "scale": "",
+        "proportion": "",
+        "distinctiveFeatures": [],
+        "details": {
+          "vehicleType": "",
+          "overallSilhouette": "",
+          "relativeScale": "",
+          "mainStructure": "",
+          "secondaryStructure": "",
+          "surfaceTreatment": "",
+          "propulsion": "",
+          "windows": "",
+          "openings": ""
+        }
+      },
+      "materialBlock": {
+        "materials": [],
+        "surfaceLanguage": "",
+        "primaryPalette": [],
+        "secondaryPalette": []
+      },
+      "continuityBlock": {
+        "mustPreserve": [],
+        "continuityNotes": [],
+        "embeddedElements": []
+      },
+      "environmentBlock": null,
+      "viewIntent": [
+        {
+          "orientation": "FRONT",
+          "identityInvariant": "PROP-001"
+        },
+        {
+          "orientation": "LEFT_PROFILE",
+          "identityInvariant": "PROP-001"
+        },
+        {
+          "orientation": "BACK",
+          "identityInvariant": "PROP-001"
+        },
+        {
+          "orientation": "THREE_QUARTER",
+          "identityInvariant": "PROP-001"
+        }
+      ],
+      "compositionIntent": {
+        "emptyEnvironment": false
+      },
+      "positiveConstraints": [],
+      "negativeConstraints": [],
+      "referenceBindings": []
+    }
+  },
+  {
+    "id": "6aafa442-75a6-47ce-950c-608e2382f9b2",
+    "canonicalKey": "CHAR-002",
+    "status": "SUCCEEDED",
+    "sourceAssetRevision": 2,
+    "executionPurpose": "ASSET_MAIN_PREVIEW",
+    "executorProfile": "KREA2_T2I_ASSET_V1",
+    "createdAt": 1791214118794,
+    "executionPrompt": "飞马\n蓝色荧光物质在男孩下坠时重新聚拢成形、驮住男孩并转向月亮向上的有翼马；回应男孩上一次伸手。\n蓝色荧光物质在男孩下坠时重新聚拢成形、驮住男孩并转向月亮向上的有翼马；回应男孩上一次伸手。\nIdentity: []. Preserve: [].\nAppearance: {\"silhouette\":\"\",\"scale\":\"\",\"proportion\":\"\",\"palette\":[],\"materials\":[],\"details\":{\"speciesOrForm\":\"\",\"bodyStructure\":\"\",\"anatomy\":\"\",\"relativeScale\":\"\",\"surface\":\"\",\"skinFurFeatherLanguage\":\"\",\"eyes\":\"\",\"movementLanguage\":\"\"}}.\nOne complete creature, readable silhouette, all wings and limbs visible, calm neutral presentation.\nCinematic stylized realism, refined concept art, soft filmic lighting, coherent material detail; no chibi proportions, no text or multi-view sheet.\nAvoid: [].\nProject direction (context only, do not insert other story subjects): 我想为 Dream Stream 制作一支约 40 秒的品牌短片。\n\nDream Stream 是一个 AI 视频创作与制片平台，我想表达的核心概念是：\n“把脑海里的梦，变成真正可以制作出来的影像。”\n\n这支片不要像普通的软件功能介绍广告，也不要只是展示界面。\n我希望它有电影感、梦幻感和创作者气质，让观众感受到一个想法从脑海中出现，逐渐变成人物、场景、分镜，最后成为完整影像的过程。\n\n目标观众主要是 AI 视频创作者、导演型创作者和有创意但缺少传统影视制作能力的人。\n\n真实的 Dream Stream Logo 和软件 UI 后续应使用真实素材，不允许 AI 重画。",
+    "visualSpecDraft": {
+      "assetKind": "CREATURE",
+      "visualIdentitySummary": "蓝色荧光物质在男孩下坠时重新聚拢成形、驮住男孩并转向月亮向上的有翼马；回应男孩上一次伸手。",
+      "silhouette": "",
+      "scale": "",
+      "proportion": "",
+      "primaryPalette": [],
+      "secondaryPalette": [],
+      "materials": [],
+      "surfaceLanguage": "",
+      "distinctiveFeatures": [],
+      "continuityNotes": [],
+      "identityAnchors": [],
+      "mustPreserve": [],
+      "forbiddenChanges": [],
+      "embeddedElements": [],
+      "details": {
+        "speciesOrForm": "",
+        "bodyStructure": "",
+        "anatomy": "",
+        "relativeScale": "",
+        "surface": "",
+        "skinFurFeatherLanguage": "",
+        "eyes": "",
+        "movementLanguage": ""
+      }
+    },
+    "draftPromptIR": {
+      "schemaVersion": 1,
+      "compilerVersion": "v04.prompt-ir.1",
+      "generationIntent": "CREATURE_TURNAROUND",
+      "identityBlock": {
+        "canonicalKey": "CHAR-002",
+        "name": "飞马",
+        "description": "蓝色荧光物质在男孩下坠时重新聚拢成形、驮住男孩并转向月亮向上的有翼马；回应男孩上一次伸手。",
+        "visualIdentitySummary": "蓝色荧光物质在男孩下坠时重新聚拢成形、驮住男孩并转向月亮向上的有翼马；回应男孩上一次伸手。",
+        "identityAnchors": [],
+        "ownerKey": null,
+        "variantOf": null,
+        "sharedVisualSystemKey": "FX-001"
+      },
+      "appearanceBlock": {
+        "silhouette": "",
+        "scale": "",
+        "proportion": "",
+        "distinctiveFeatures": [],
+        "details": {
+          "speciesOrForm": "",
+          "bodyStructure": "",
+          "anatomy": "",
+          "relativeScale": "",
+          "surface": "",
+          "skinFurFeatherLanguage": "",
+          "eyes": "",
+          "movementLanguage": ""
+        }
+      },
+      "materialBlock": {
+        "materials": [],
+        "surfaceLanguage": "",
+        "primaryPalette": [],
+        "secondaryPalette": []
+      },
+      "continuityBlock": {
+        "mustPreserve": [],
+        "continuityNotes": [],
+        "embeddedElements": []
+      },
+      "environmentBlock": null,
+      "viewIntent": [
+        {
+          "orientation": "FRONT",
+          "identityInvariant": "CHAR-002"
+        },
+        {
+          "orientation": "LEFT_PROFILE",
+          "identityInvariant": "CHAR-002"
+        },
+        {
+          "orientation": "BACK",
+          "identityInvariant": "CHAR-002"
+        },
+        {
+          "orientation": "THREE_QUARTER",
+          "identityInvariant": "CHAR-002"
+        }
+      ],
+      "compositionIntent": {
+        "emptyEnvironment": false
+      },
+      "positiveConstraints": [],
+      "negativeConstraints": [],
+      "referenceBindings": []
+    }
+  }
+]

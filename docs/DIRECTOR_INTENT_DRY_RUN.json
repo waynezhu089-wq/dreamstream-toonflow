@@ -1,0 +1,508 @@
+{
+  "status": "CANDIDATE_ONLY",
+  "persisted": false,
+  "affectsGeneration": false,
+  "projectId": 1790941805789310,
+  "scriptId": 4,
+  "sourceCreativeVersion": 2,
+  "evidence": "NIGHT01_SOURCE_EVIDENCE.json",
+  "candidateOrigin": "offline source interpretation + explicit work-order direction; NOT accepted Truth",
+  "intent": {
+    "schemaVersion": 1,
+    "globalVisualDNA": {
+      "artStyle": "cinematic stylized realism / dreamlike but grounded",
+      "colorLanguage": [
+        "night blue",
+        "preserve confirmed palettes"
+      ],
+      "lightingLanguage": [
+        "blue emission motivates local light",
+        "filmic night readability"
+      ],
+      "materialLanguage": [
+        "one blue mist/particle/contour/solid material"
+      ],
+      "motionLanguage": [
+        "condense → adapt → dissolve → return"
+      ],
+      "recurringVisualMotifs": [
+        "blue matter",
+        "reaching hand",
+        "moon destination"
+      ],
+      "realismLevel": "refined film concept; not photoreal mandate",
+      "atmosphere": "wonder → overwhelm → freedom → recognition",
+      "forbiddenStyleDrift": [
+        "mascot whale",
+        "unrequested people in isolated assets",
+        "inconsistent dream magic",
+        "AI Logo redraw"
+      ]
+    },
+    "emotionalArc": [
+      {
+        "beatRef": "B01",
+        "emotion": "quiet anticipation",
+        "intensity": null,
+        "transition": "wonder and adventure",
+        "visualExpression": "island/sea night"
+      },
+      {
+        "beatRef": "B02",
+        "emotion": "wonder and adventure",
+        "intensity": null,
+        "transition": "overwhelmed uncertainty",
+        "visualExpression": "blue matter becomes pirate ship"
+      },
+      {
+        "beatRef": "B03",
+        "emotion": "overwhelmed uncertainty",
+        "intensity": null,
+        "transition": "curious agency",
+        "visualExpression": "whale engulfs ship/light"
+      },
+      {
+        "beatRef": "B04",
+        "emotion": "curious agency",
+        "intensity": null,
+        "transition": "adaptive passage",
+        "visualExpression": "boy reaches blue glow in whale dream space"
+      },
+      {
+        "beatRef": "B05",
+        "emotion": "adaptive passage",
+        "intensity": null,
+        "transition": "trust and release",
+        "visualExpression": "submarine manifestation and ejection"
+      },
+      {
+        "beatRef": "B06",
+        "emotion": "trust and release",
+        "intensity": null,
+        "transition": "freedom and arrival",
+        "visualExpression": "material returns as Pegasus below boy"
+      },
+      {
+        "beatRef": "B07",
+        "emotion": "freedom and arrival",
+        "intensity": null,
+        "transition": "quiet recognition",
+        "visualExpression": "flight toward moon"
+      },
+      {
+        "beatRef": "B08",
+        "emotion": "quiet recognition",
+        "intensity": null,
+        "transition": "resolution",
+        "visualExpression": "composition resolves into real Logo"
+      }
+    ],
+    "narrativeVisualRoles": [
+      {
+        "canonicalKey": "CHAR-001",
+        "narrativeFunction": "Dreamer and active chooser",
+        "emotionalRead": "curiosity → vulnerability → trust → freedom",
+        "dramaticImportance": "core",
+        "scaleFunction": "small human vs enormous whale",
+        "requiredAudiencePerception": [
+          "same designed boy",
+          "agency through reaching"
+        ],
+        "forbiddenInterpretations": [
+          "adult hero",
+          "passive mascot"
+        ]
+      },
+      {
+        "canonicalKey": "FX-001",
+        "narrativeFunction": "One shared material through forms",
+        "emotionalRead": "responsive luminous wonder",
+        "dramaticImportance": "core",
+        "scaleFunction": "material identity survives form",
+        "requiredAudiencePerception": [
+          "mist → particles → silhouette → solid"
+        ],
+        "forbiddenInterpretations": [
+          "unrelated magic per form"
+        ]
+      },
+      {
+        "canonicalKey": "PROP-001",
+        "narrativeFunction": "First traversable manifestation",
+        "emotionalRead": "inviting adventure",
+        "dramaticImportance": "core",
+        "scaleFunction": "much smaller than whale",
+        "requiredAudiencePerception": [
+          "complete unoccupied ASSET structure"
+        ],
+        "forbiddenInterpretations": [
+          "permanent crew"
+        ]
+      },
+      {
+        "canonicalKey": "CHAR-003",
+        "narrativeFunction": "Overwhelming obstacle and second dream space",
+        "emotionalRead": "ancient majestic overwhelming",
+        "dramaticImportance": "core",
+        "scaleFunction": "boy < ship << whale",
+        "requiredAudiencePerception": [
+          "credible ship-swallowing scale",
+          "not cute"
+        ],
+        "forbiddenInterpretations": [
+          "juvenile",
+          "toy-like",
+          "friendly mascot"
+        ]
+      },
+      {
+        "canonicalKey": "PROP-002",
+        "narrativeFunction": "Adaptive response inside whale",
+        "emotionalRead": "ingenuity and passage",
+        "dramaticImportance": "core",
+        "scaleFunction": "boy fits; small vs whale",
+        "requiredAudiencePerception": [
+          "same Dream Matter transformed"
+        ],
+        "forbiddenInterpretations": [
+          "unrelated identity"
+        ]
+      },
+      {
+        "canonicalKey": "CHAR-002",
+        "narrativeFunction": "Catch after dissolution; salvation",
+        "emotionalRead": "freedom / transcendence",
+        "dramaticImportance": "core",
+        "scaleFunction": "readable boy support in SHOT",
+        "requiredAudiencePerception": [
+          "same blue material",
+          "wings/limbs readable"
+        ],
+        "forbiddenInterpretations": [
+          "unrelated horse",
+          "rider in isolated ASSET"
+        ]
+      },
+      {
+        "canonicalKey": "LOC-003",
+        "narrativeFunction": "Destination",
+        "emotionalRead": "arrival / stillness",
+        "dramaticImportance": "core",
+        "scaleFunction": "distant destination",
+        "requiredAudiencePerception": [
+          "not creature transformation"
+        ],
+        "forbiddenInterpretations": []
+      },
+      {
+        "canonicalKey": "BRAND-001",
+        "narrativeFunction": "Real logo resolution",
+        "emotionalRead": "recognition and closure",
+        "dramaticImportance": "core",
+        "scaleFunction": "composition aligns then real logo",
+        "requiredAudiencePerception": [
+          "confirmed real reference",
+          "no AI redraw"
+        ],
+        "forbiddenInterpretations": [
+          "physical morph redraws Logo"
+        ]
+      }
+    ],
+    "scaleRelations": [
+      {
+        "smaller": "CHAR-001",
+        "larger": "PROP-001",
+        "kind": "RELATIVE",
+        "shotRef": null,
+        "requirement": "ship carries boy; qualitative, not measured metres"
+      },
+      {
+        "smaller": "PROP-001",
+        "larger": "CHAR-003",
+        "kind": "RELATIVE",
+        "shotRef": null,
+        "requirement": "whale swallows whole ship"
+      },
+      {
+        "smaller": "PROP-001",
+        "larger": "CHAR-003",
+        "kind": "DRAMATIC",
+        "shotRef": null,
+        "requirement": "ship reads toy-scale against whale, not a toy ship identity"
+      }
+    ],
+    "transformationLineage": [
+      {
+        "from": "FX-001",
+        "to": "PROP-001",
+        "relationType": "MATERIAL_TRANSFORMATION",
+        "inheritedVisualDNA": [
+          "same blue Dream Matter"
+        ],
+        "preservedTraits": [
+          "material identity, not anatomy"
+        ],
+        "transformedTraits": [
+          "silhouette and function"
+        ],
+        "visualContinuityRules": [
+          "mist → particles → contour → solid; no reset"
+        ]
+      },
+      {
+        "from": "PROP-001",
+        "to": "PROP-002",
+        "relationType": "MATERIAL_TRANSFORMATION",
+        "inheritedVisualDNA": [
+          "same blue Dream Matter"
+        ],
+        "preservedTraits": [
+          "material identity, not anatomy"
+        ],
+        "transformedTraits": [
+          "silhouette and function"
+        ],
+        "visualContinuityRules": [
+          "mist → particles → contour → solid; no reset"
+        ]
+      },
+      {
+        "from": "PROP-002",
+        "to": "CHAR-002",
+        "relationType": "MATERIAL_TRANSFORMATION",
+        "inheritedVisualDNA": [
+          "same blue Dream Matter"
+        ],
+        "preservedTraits": [
+          "material identity, not anatomy"
+        ],
+        "transformedTraits": [
+          "silhouette and function"
+        ],
+        "visualContinuityRules": [
+          "mist → particles → contour → solid; no reset"
+        ]
+      },
+      {
+        "from": "CHAR-002",
+        "to": "BRAND-001",
+        "relationType": "COMPOSITION_RESOLUTION",
+        "inheritedVisualDNA": [
+          "flow guides final composition"
+        ],
+        "preservedTraits": [
+          "confirmed real Logo geometry"
+        ],
+        "transformedTraits": [],
+        "visualContinuityRules": [
+          "NOT physical Pegasus-to-logo morph",
+          "moon/flight composition then real Logo dissolve/reflection"
+        ]
+      }
+    ],
+    "shotDramaticIntents": [
+      {
+        "clientRef": "intent-B01",
+        "storyboardId": null,
+        "narrativeBeat": "B01",
+        "audienceFeeling": "quiet anticipation",
+        "primarySubject": "CHAR-001",
+        "secondarySubjects": [
+          "LOC-001"
+        ],
+        "scaleRelationship": [
+          "relevant qualitative relations only"
+        ],
+        "compositionIntent": "island/sea night",
+        "lightingIntent": "motivated blue light / night readability",
+        "motionIntent": "island/sea night",
+        "continuityIntent": [
+          "same Dream Matter and boy identity"
+        ],
+        "storyConstraints": [
+          "unpersisted candidate beat; no fixed duration",
+          "no automatic binding",
+          "real Logo only"
+        ]
+      },
+      {
+        "clientRef": "intent-B02",
+        "storyboardId": null,
+        "narrativeBeat": "B02",
+        "audienceFeeling": "wonder and adventure",
+        "primarySubject": "PROP-001",
+        "secondarySubjects": [
+          "CHAR-001",
+          "FX-001",
+          "LOC-001"
+        ],
+        "scaleRelationship": [
+          "relevant qualitative relations only"
+        ],
+        "compositionIntent": "blue matter becomes pirate ship",
+        "lightingIntent": "motivated blue light / night readability",
+        "motionIntent": "blue matter becomes pirate ship",
+        "continuityIntent": [
+          "same Dream Matter and boy identity"
+        ],
+        "storyConstraints": [
+          "unpersisted candidate beat; no fixed duration",
+          "no automatic binding",
+          "real Logo only"
+        ]
+      },
+      {
+        "clientRef": "intent-B03",
+        "storyboardId": null,
+        "narrativeBeat": "B03",
+        "audienceFeeling": "overwhelmed uncertainty",
+        "primarySubject": "CHAR-003",
+        "secondarySubjects": [
+          "PROP-001",
+          "CHAR-001"
+        ],
+        "scaleRelationship": [
+          "relevant qualitative relations only"
+        ],
+        "compositionIntent": "whale engulfs ship/light",
+        "lightingIntent": "motivated blue light / night readability",
+        "motionIntent": "whale engulfs ship/light",
+        "continuityIntent": [
+          "same Dream Matter and boy identity"
+        ],
+        "storyConstraints": [
+          "unpersisted candidate beat; no fixed duration",
+          "no automatic binding",
+          "real Logo only"
+        ]
+      },
+      {
+        "clientRef": "intent-B04",
+        "storyboardId": null,
+        "narrativeBeat": "B04",
+        "audienceFeeling": "curious agency",
+        "primarySubject": "CHAR-001",
+        "secondarySubjects": [
+          "FX-001",
+          "LOC-002"
+        ],
+        "scaleRelationship": [
+          "relevant qualitative relations only"
+        ],
+        "compositionIntent": "boy reaches blue glow in whale dream space",
+        "lightingIntent": "motivated blue light / night readability",
+        "motionIntent": "boy reaches blue glow in whale dream space",
+        "continuityIntent": [
+          "same Dream Matter and boy identity"
+        ],
+        "storyConstraints": [
+          "unpersisted candidate beat; no fixed duration",
+          "no automatic binding",
+          "real Logo only"
+        ]
+      },
+      {
+        "clientRef": "intent-B05",
+        "storyboardId": null,
+        "narrativeBeat": "B05",
+        "audienceFeeling": "adaptive passage",
+        "primarySubject": "PROP-002",
+        "secondarySubjects": [
+          "CHAR-001",
+          "FX-001",
+          "LOC-002"
+        ],
+        "scaleRelationship": [
+          "relevant qualitative relations only"
+        ],
+        "compositionIntent": "submarine manifestation and ejection",
+        "lightingIntent": "motivated blue light / night readability",
+        "motionIntent": "submarine manifestation and ejection",
+        "continuityIntent": [
+          "same Dream Matter and boy identity"
+        ],
+        "storyConstraints": [
+          "unpersisted candidate beat; no fixed duration",
+          "no automatic binding",
+          "real Logo only"
+        ]
+      },
+      {
+        "clientRef": "intent-B06",
+        "storyboardId": null,
+        "narrativeBeat": "B06",
+        "audienceFeeling": "trust and release",
+        "primarySubject": "CHAR-002",
+        "secondarySubjects": [
+          "CHAR-001",
+          "FX-001"
+        ],
+        "scaleRelationship": [
+          "relevant qualitative relations only"
+        ],
+        "compositionIntent": "material returns as Pegasus below boy",
+        "lightingIntent": "motivated blue light / night readability",
+        "motionIntent": "material returns as Pegasus below boy",
+        "continuityIntent": [
+          "same Dream Matter and boy identity"
+        ],
+        "storyConstraints": [
+          "unpersisted candidate beat; no fixed duration",
+          "no automatic binding",
+          "real Logo only"
+        ]
+      },
+      {
+        "clientRef": "intent-B07",
+        "storyboardId": null,
+        "narrativeBeat": "B07",
+        "audienceFeeling": "freedom and arrival",
+        "primarySubject": "LOC-003",
+        "secondarySubjects": [
+          "CHAR-002",
+          "CHAR-001",
+          "LOC-004"
+        ],
+        "scaleRelationship": [
+          "relevant qualitative relations only"
+        ],
+        "compositionIntent": "flight toward moon",
+        "lightingIntent": "motivated blue light / night readability",
+        "motionIntent": "flight toward moon",
+        "continuityIntent": [
+          "same Dream Matter and boy identity"
+        ],
+        "storyConstraints": [
+          "unpersisted candidate beat; no fixed duration",
+          "no automatic binding",
+          "real Logo only"
+        ]
+      },
+      {
+        "clientRef": "intent-B08",
+        "storyboardId": null,
+        "narrativeBeat": "B08",
+        "audienceFeeling": "quiet recognition",
+        "primarySubject": "BRAND-001",
+        "secondarySubjects": [
+          "LOC-003"
+        ],
+        "scaleRelationship": [
+          "relevant qualitative relations only"
+        ],
+        "compositionIntent": "composition resolves into real Logo",
+        "lightingIntent": "motivated blue light / night readability",
+        "motionIntent": "composition resolves into real Logo",
+        "continuityIntent": [
+          "same Dream Matter and boy identity"
+        ],
+        "storyConstraints": [
+          "unpersisted candidate beat; no fixed duration",
+          "no automatic binding",
+          "real Logo only"
+        ]
+      }
+    ]
+  }
+}

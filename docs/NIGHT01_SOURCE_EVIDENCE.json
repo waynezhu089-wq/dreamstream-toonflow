@@ -1,0 +1,904 @@
+{
+  "project": {
+    "id": 1790941805789310,
+    "name": "DREAM_STREAM_BRAND_PILOT_V04"
+  },
+  "creative": {
+    "projectId": 1790941805789310,
+    "scriptId": 4,
+    "brief": "我想为 Dream Stream 制作一支约 40 秒的品牌短片。\n\nDream Stream 是一个 AI 视频创作与制片平台，我想表达的核心概念是：\n“把脑海里的梦，变成真正可以制作出来的影像。”\n\n这支片不要像普通的软件功能介绍广告，也不要只是展示界面。\n我希望它有电影感、梦幻感和创作者气质，让观众感受到一个想法从脑海中出现，逐渐变成人物、场景、分镜，最后成为完整影像的过程。\n\n目标观众主要是 AI 视频创作者、导演型创作者和有创意但缺少传统影视制作能力的人。\n\n真实的 Dream Stream Logo 和软件 UI 后续应使用真实素材，不允许 AI 重画。",
+    "treatment": "Treatment 正式提案· 工作标题《梦的物质》\n\n统一命题：梦不是被生成出来的，是被一种物质反复\"凝\"成的。它每遇到一次限制，就换一次形态——但从不换材质。\n\n统一视觉母题：蓝色荧光物质是全片唯一的材质。它只有四个状态：雾 → 颗粒 → 轮廓 → 实体。海盗船、潜水艇、飞马不是三个道具、三次变身，而是同一团物质的连续形态。观众要相信的是\"它一直在那儿\"，而不是\"特效又来了\"——这个用词差别，决定这支片是\"显影\"，还是\"魔法特效\"。\n\n情绪矢量：静（溢出与凝聚）→ 紧（吞入与伸手）→ 落再升（融解与还原）。\n\n第一段｜溢出与凝聚（约 10–11 秒）\n\n海岛入夜。不从\"他如何入睡\"开始，从\"梦已经开始了\"开始——男孩已经睡着。\n\n蓝色荧光物质从他身侧缓缓溢出：先是雾，不成形，也不着急。它越过沙面、掠到海面上方，开始往一起聚——雾变颗粒，颗粒勾出轮廓，轮廓收成实体。海盗船是\"凝\"出来的，不是\"变\"出来的。\n\n这是全片唯一一次完整展示凝聚过程。后面两次形态转换都沿用同一套语法，只是更快。\n\n男孩走向船、踏上船——这是他的第一个动作，也是他还没意识到自己在做梦的时刻。船离岸，驶向远处。\n\n这一段承担全片全部的\"显影\"质感。它必须慢、必须有呼吸。它被压缩，整支片就降格成一支冒险动画。\n\n第二段｜吞入与伸手（约 16–17 秒）\n\n船行至海中央。巨大的鲸鱼从下方升起，一口吞没。光被整体压暗——不是黑场，是\"光被吞进去了\"。\n\n船在受限空间里重新凝聚为潜水艇形态。这里不是变形，是同一团蓝光换了一个更合适的形状。观众不该看到机械拆解，该看到\"物质适应了处境\"。\n\n鲸腹内景——这一段必须有实际内容，不能是\"游历一番\"。\n\n鲸腹不是内脏，是第二片夜空。它和开头海岛的夜空同构，但更近、更浓、更暗。里面漂浮着大量还没成形的蓝色光雾与碎片——它们是还没有成为影像的念头，是梦最原始的状态。男孩看见的不是危险，是无数个\"还没长出来\"的东西。\n\n全片的转折点在这里：他第一次主动伸出手。不是为了求生，是因为他看见了一个还没成形的东西，他想碰它。\n\n手一碰，碎片朝他聚过来——他掌中出现了一个方向，指向鲸鱼头顶的出水口。蓝光骤然变亮，鲸鱼被照得发痒，一个喷嚏把他们从头顶喷了出去。\n\n这一段同时解决三件事：把\"被喷嚏喷出\"从偶然变成他行动的结果；把男孩从\"被运送的人\"变成\"做过一次选择的人\"；让第三次载具（飞马）成为他调用的，而不是又一次被动承接。前两次是梦带着他走，第三次是他伸手换来的。\n\n节奏上，这是全片最紧的一段，但末尾要留一次真正的停顿——就是他伸手前的那一瞬。全片只需要这一次停顿。\n\n第三段｜融解与还原（约 11–12 秒）\n\n被喷出后，潜水艇不再维持形状——它不是爆炸，是溶解，塌回成雾。男孩下坠。\n\n雾在他下方重新聚拢、加厚、成形。那匹飞马不是\"来接他\"的，是物质回应了他上一次的伸手。他被驮住，转向月亮，向上。\n\n片尾接口——这是与 BRAND-001 的衔接方式：\n\n不做任何\"画面变形变成 Logo\"。\n\n最后一镜的构图本身就是 BRAND-001 的构成现场：月亮落在画面中对应的位置，与字母 D 内部的月牙元素同位；飞马的头颈弧线走向，与字母 S 融合的马头那一笔同向；蓝色荧光物质的冷光与 BRAND-001 的蓝紫自发光视觉体系同源，不需要调色对抗；飞马掠海面时，下方水面先浮出字标——Logo 本身就有水面倒影这一层，这个动作是现成的。\n\n观众在最后一秒意识到的不是\"变形了\"，而是\"原来刚才那一切都是这个字的一部分\"。\n\n真实 Logo 作为独立素材落上，只做位置对齐与亮度过渡——真实素材保持原样，不做形变、不重绘、不改字形、不改核心图形比例与结构。\n\n执行层面的诚实说明：BRAND-001 目前在生产执行层面尚未绑定到当前制作单元，因此这一镜的构图意图可以在本 Treatment 中写定，但执行参数（月亮在画面中的确切位置、地平水平度、飞马头颈的朝向角度、字标落的准确位置）要等 BRAND-001 完成到当前制作单元的 Production binding 之后才能锁死。\n\n时长分配\n\n第一段 溢出与凝聚：10–11 秒，承担唯一的完整凝聚过程与全片的\"显影\"质感。\n第二段 吞入与伸手：16–17 秒，承担唯一的转折点与男孩的主动性。\n第三段 融解与还原：11–12 秒，承担情绪落点与与 BRAND-001 的构图接口。\n\n约 18 个硬节拍落在 38–40 秒里，第一段和鲸腹段能真正\"呼吸\"，凝聚与伸手两个关键点都读得出来。这是这条故事线能保住母题的最短长度；再往下压，第一段的凝聚会先被牺牲。\n\n本提案按确认要求将正式目标时长调整为 40 秒；正文对节奏的描述仍以 38–40 秒区间表述。\n\n留待后续阶段处理的事项\n\n1. 蓝色荧光物质的具体色值留到视觉开发阶段确定。BRAND-001 身份锚点写明的是\"蓝紫发光视觉体系\"，本提案不指定色值档位。\n2. BRAND-001 到当前制作单元的 Production binding 留到生产阶段推进。在此之前，片尾镜头的执行参数不锁死，本 Treatment 中只保留构图意图。\n3. 男孩在鲸腹中第一次主动伸手，已正式保留为本 Treatment 的叙事转折点。\n\n本提案为 Treatment 完整候选正文，不含分镜、镜头 Prompt 或新增支线；除 Treatment 与目标时长外的其他 Creative 字段保持不变。本提案尚未应用，须经人工预览与确认后方可成为项目创意事实。",
+    "script": "",
+    "targetDuration": 40,
+    "aspectRatio": "16:9",
+    "version": 2
+  },
+  "assets": [
+    {
+      "projectId": 1790941805789310,
+      "canonicalKey": "ACC-001",
+      "category": "ACC",
+      "name": "月牙挂件",
+      "description": "男孩随身的一枚小型月牙形配饰，用于跨镜头识别。形体为抽象、简化的新月初升弧，边缘柔缓圆润，非具象写实刀刃状；材质为冷银／月白磨砂金属，低反光、轻微手绘颗粒，与角色的柔雾哑光表面语言一致；沿月牙内弧带一道极克制的冷蓝微光，与冷调月夜色感同源，但不使用蓝色荧光物质的半透明可聚散材质，也不属于 FX-001。整体尺寸控制在儿童掌心以内，叙事尺度约 3–5cm，避免夸张饰品化或成年化。可作为颈挂、腕绳或衣袋随身物，具体佩戴方式待确认。须为独立抽象图形，不得复刻或缩微 BRAND-001 中 D 内的月牙/星形品牌元素，不得构成对真实 Logo 的重绘。默认无文字、无星形附饰、无高饱和色彩，禁止恐怖或血腥化处理。绑定为 CHAR-001 固定识别物的决定不在本条目内，需另行确认。",
+      "identityAnchors": [],
+      "mustPreserve": [],
+      "forbiddenChanges": [],
+      "ownerKey": "CHAR-001",
+      "variantOf": null,
+      "sourcePolicy": "AI_ALLOWED",
+      "prompt": "",
+      "status": "ACTIVE",
+      "revision": 1,
+      "createdAt": 1791114035850,
+      "updatedAt": 1791114035850,
+      "assetKind": "PROP",
+      "importance": "SUPPORTING",
+      "relatedKeys": [],
+      "sharedVisualSystemKey": null
+    },
+    {
+      "projectId": 1790941805789310,
+      "canonicalKey": "BRAND-001",
+      "category": "BRAND",
+      "name": "Dream Stream Logo",
+      "description": "Dream Stream 官方品牌 Logo，用于片尾及品牌识别，不允许 AI 重绘或改变核心结构。",
+      "identityAnchors": [
+        "Dream Stream 字标",
+        "蓝紫发光视觉体系",
+        "S 与马头融合的核心图形",
+        "D 内月牙/星形元素"
+      ],
+      "mustPreserve": [
+        "官方文字结构",
+        "马头/S 核心关系",
+        "月牙/星形品牌元素"
+      ],
+      "forbiddenChanges": [
+        "不得 AI 重绘 Logo",
+        "不得改字形",
+        "不得改变核心图形比例与结构"
+      ],
+      "ownerKey": null,
+      "variantOf": null,
+      "sourcePolicy": "REAL_REQUIRED",
+      "prompt": "",
+      "status": "ACTIVE",
+      "revision": 2,
+      "createdAt": 1790964315972,
+      "updatedAt": 1791056186548,
+      "assetKind": "OTHER",
+      "importance": "SUPPORTING",
+      "relatedKeys": [],
+      "sharedVisualSystemKey": null
+    },
+    {
+      "projectId": 1790941805789310,
+      "canonicalKey": "CHAR-001",
+      "category": "CHAR",
+      "name": "男孩",
+      "description": "已睡着的男孩，海岛入夜时被梦带走；走向并踏上凝成的海盗船，在鲸腹中第一次主动伸手触碰未成形碎片，后被飞马驮住转向月亮。",
+      "identityAnchors": [
+        "儿童体型与4.5–5头身比例",
+        "深色微乱短发及后颈翘发",
+        "圆润脸型、略宽眼距、深蓝灰瞳",
+        "月白/灰蓝宽松睡衣轮廓",
+        "柔雾哑光与冷调月夜色感",
+        "无固定挂件"
+      ],
+      "mustPreserve": [
+        "儿童体型与头身比",
+        "深色微乱短发及后颈翘发",
+        "圆润脸型、略宽眼距、深蓝灰瞳",
+        "月白/灰蓝宽松睡衣轮廓",
+        "柔雾哑光与冷调月夜色感",
+        "无固定挂件"
+      ],
+      "forbiddenChanges": [
+        "禁止成年化、性化、写实人像化",
+        "禁止改变性别表现、年龄感、发型剪影、眼型瞳色、睡衣基础轮廓",
+        "禁止添加真实Logo或UI",
+        "禁止将梦境碎片、飞马、海盗船、鲸腹等临时叙事元素固化为角色固有服装或挂件",
+        "禁止高饱和、血腥或恐怖化处理"
+      ],
+      "ownerKey": null,
+      "variantOf": null,
+      "sourcePolicy": "AI_ALLOWED",
+      "prompt": "",
+      "status": "ACTIVE",
+      "revision": 2,
+      "createdAt": 1791035544471,
+      "updatedAt": 1791046130758,
+      "assetKind": "HUMAN_CHARACTER",
+      "importance": "CORE",
+      "relatedKeys": [],
+      "sharedVisualSystemKey": null
+    },
+    {
+      "projectId": 1790941805789310,
+      "canonicalKey": "CHAR-002",
+      "category": "CHAR",
+      "name": "飞马",
+      "description": "蓝色荧光物质在男孩下坠时重新聚拢成形、驮住男孩并转向月亮向上的有翼马；回应男孩上一次伸手。",
+      "identityAnchors": [],
+      "mustPreserve": [],
+      "forbiddenChanges": [],
+      "ownerKey": null,
+      "variantOf": null,
+      "sourcePolicy": "AI_ALLOWED",
+      "prompt": "",
+      "status": "ACTIVE",
+      "revision": 2,
+      "createdAt": 1791035544477,
+      "updatedAt": 1791055415876,
+      "assetKind": "CREATURE",
+      "importance": "CORE",
+      "relatedKeys": [
+        "FX-001",
+        "PROP-001",
+        "PROP-002"
+      ],
+      "sharedVisualSystemKey": "FX-001"
+    },
+    {
+      "projectId": 1790941805789310,
+      "canonicalKey": "CHAR-003",
+      "category": "CHAR",
+      "name": "鲸鱼",
+      "description": "从海中央下方升起的巨大鲸鱼，一口吞没船，使光被整体吞入；后因蓝光变亮发痒而打喷嚏，将男孩与潜水艇从头顶出水口喷出。",
+      "identityAnchors": [],
+      "mustPreserve": [],
+      "forbiddenChanges": [],
+      "ownerKey": null,
+      "variantOf": null,
+      "sourcePolicy": "AI_ALLOWED",
+      "prompt": "",
+      "status": "ACTIVE",
+      "revision": 1,
+      "createdAt": 1791035544477,
+      "updatedAt": 1791035544477,
+      "assetKind": "CREATURE",
+      "importance": "CORE",
+      "relatedKeys": [],
+      "sharedVisualSystemKey": null
+    },
+    {
+      "projectId": 1790941805789310,
+      "canonicalKey": "FX-001",
+      "category": "FX",
+      "name": "蓝色荧光物质",
+      "description": "全片唯一材质，冷蓝荧光，只有雾→颗粒→轮廓→实体四个状态；可凝成海盗船、潜水艇、飞马，可在鲸腹中呈未成形光雾与碎片，可聚成掌中方向并骤然变亮。",
+      "identityAnchors": [
+        "冷蓝荧光",
+        "单一材质贯穿全片",
+        "雾→颗粒→轮廓→实体四态",
+        "可凝成海盗船、潜水艇、飞马",
+        "鲸腹中未成形光雾与碎片",
+        "掌中方向聚光与骤然变亮"
+      ],
+      "mustPreserve": [
+        "全片唯一材质的身份：冷蓝荧光、半透明、可聚散。",
+        "雾、颗粒、轮廓、实体四种状态及其连续过渡。",
+        "凝形为海盗船、潜水艇、飞马时仍保留同一材质的光雾、颗粒与透光特征。",
+        "在鲸腹中保持未成形光雾与碎片。",
+        "掌中聚成方向并骤然变亮的临时强度变化。"
+      ],
+      "forbiddenChanges": [
+        "不可变成暖色、多色霓虹或与冷蓝荧光无关的材质。",
+        "不可失去半透明、发光、可聚散的物质感，不可变成普通不透明硬块。",
+        "不可跳过雾→颗粒→轮廓→实体的核心状态逻辑，除非叙事明确要求骤然变亮。",
+        "不可重画或替换真实 Logo/UI 元素。",
+        "不可将海盗船、潜水艇、飞马等凝形赋予与 FX-001 不一致的材质语言或另起一套 Dream Matter 视觉系统。"
+      ],
+      "ownerKey": null,
+      "variantOf": null,
+      "sourcePolicy": "AI_ALLOWED",
+      "prompt": "",
+      "status": "ACTIVE",
+      "revision": 2,
+      "createdAt": 1791035544473,
+      "updatedAt": 1791049422211,
+      "assetKind": "MATERIAL_FX",
+      "importance": "SUPPORTING",
+      "relatedKeys": [],
+      "sharedVisualSystemKey": null
+    },
+    {
+      "projectId": 1790941805789310,
+      "canonicalKey": "LOC-001",
+      "category": "LOC",
+      "name": "海岛与海面夜晚",
+      "description": "海岛入夜的沙面、海面、远处海平线与夜空，覆盖船离岸、驶向海中央、飞马掠海面等局部变化。",
+      "identityAnchors": [],
+      "mustPreserve": [],
+      "forbiddenChanges": [],
+      "ownerKey": null,
+      "variantOf": null,
+      "sourcePolicy": "AI_ALLOWED",
+      "prompt": "",
+      "status": "ACTIVE",
+      "revision": 2,
+      "createdAt": 1791035544478,
+      "updatedAt": 1791055729879,
+      "assetKind": "ENVIRONMENT",
+      "importance": "SUPPORTING",
+      "relatedKeys": [],
+      "sharedVisualSystemKey": null
+    },
+    {
+      "projectId": 1790941805789310,
+      "canonicalKey": "LOC-002",
+      "category": "LOC",
+      "name": "鲸腹内景",
+      "description": "鲸腹内不是内脏，而是第二片夜空，与开头海岛夜空同构但更近、更浓、更暗；漂浮未成形蓝色光雾与碎片，是梦最原始状态。",
+      "identityAnchors": [
+        "第二片夜空",
+        "与开头海岛夜空同构但更近、更浓、更暗",
+        "漂浮未成形蓝色光雾与碎片，是梦最原始状态"
+      ],
+      "mustPreserve": [
+        "鲸腹内景不是内脏，而是第二片夜空",
+        "与开头海岛夜空同构",
+        "更近、更浓、更暗",
+        "漂浮未成形的蓝色光雾与碎片",
+        "梦最原始状态"
+      ],
+      "forbiddenChanges": [
+        "不得变成真实内脏、器官、血肉或胃壁",
+        "不得添加明确建筑、家具、人物、真实Logo或UI",
+        "不得变成普通写实星空或宇宙",
+        "不得丢失蓝色光雾与碎片",
+        "不得与开头海岛夜空完全等同而忽略更近、更浓、更暗的差异"
+      ],
+      "ownerKey": null,
+      "variantOf": null,
+      "sourcePolicy": "AI_ALLOWED",
+      "prompt": "",
+      "status": "ACTIVE",
+      "revision": 2,
+      "createdAt": 1791035544479,
+      "updatedAt": 1791053770763,
+      "assetKind": "ENVIRONMENT",
+      "importance": "SUPPORTING",
+      "relatedKeys": [],
+      "sharedVisualSystemKey": null
+    },
+    {
+      "projectId": 1790941805789310,
+      "canonicalKey": "LOC-003",
+      "category": "LOC",
+      "name": "月亮",
+      "description": "片尾天空中的月亮，位于构图对应位置，与 BRAND-001 字母 D 内部月牙元素同位。",
+      "identityAnchors": [],
+      "mustPreserve": [],
+      "forbiddenChanges": [],
+      "ownerKey": null,
+      "variantOf": null,
+      "sourcePolicy": "AI_ALLOWED",
+      "prompt": "",
+      "status": "ACTIVE",
+      "revision": 1,
+      "createdAt": 1791035544480,
+      "updatedAt": 1791035544480,
+      "assetKind": "CELESTIAL",
+      "importance": "SUPPORTING",
+      "relatedKeys": [],
+      "sharedVisualSystemKey": null
+    },
+    {
+      "projectId": 1790941805789310,
+      "canonicalKey": "LOC-004",
+      "category": "LOC",
+      "name": "高空月夜／目的地环境",
+      "description": "飞马驮着男孩升入高空后的终场环境。由云层、月亮、夜空以及下方若隐若现的海面/云海共同构成，用于承接飞向月亮的最后上升段，并服务于片尾 Dream Stream Logo 的对接构图。",
+      "identityAnchors": [],
+      "mustPreserve": [],
+      "forbiddenChanges": [],
+      "ownerKey": null,
+      "variantOf": null,
+      "sourcePolicy": "AI_ALLOWED",
+      "prompt": "飞马驮着男孩升入高空后的终场环境。由云层、月亮、夜空以及下方若隐若现的海面/云海共同构成，用于承接飞向月亮的最后上升段，并服务于片尾 Dream Stream Logo 的对接构图。",
+      "status": "ACTIVE",
+      "revision": 2,
+      "createdAt": 1791035544480,
+      "updatedAt": 1791036430056,
+      "assetKind": "ENVIRONMENT",
+      "importance": "CORE",
+      "relatedKeys": [],
+      "sharedVisualSystemKey": null
+    },
+    {
+      "projectId": 1790941805789310,
+      "canonicalKey": "PROP-001",
+      "category": "PROP",
+      "name": "海盗船",
+      "description": "蓝色荧光物质凝成的海盗船形态，男孩踏上后离岸驶向远处；是物质第一次完整凝聚成实体。",
+      "identityAnchors": [],
+      "mustPreserve": [],
+      "forbiddenChanges": [],
+      "ownerKey": null,
+      "variantOf": null,
+      "sourcePolicy": "AI_ALLOWED",
+      "prompt": "",
+      "status": "ACTIVE",
+      "revision": 1,
+      "createdAt": 1791035544474,
+      "updatedAt": 1791035544474,
+      "assetKind": "VEHICLE",
+      "importance": "CORE",
+      "relatedKeys": [
+        "FX-001",
+        "PROP-002",
+        "CHAR-002"
+      ],
+      "sharedVisualSystemKey": "FX-001"
+    },
+    {
+      "projectId": 1790941805789310,
+      "canonicalKey": "PROP-002",
+      "category": "PROP",
+      "name": "潜水艇",
+      "description": "船在鲸腹受限空间里由同一团蓝光重新凝聚成的潜水艇形态，非机械拆解，物质适应处境。",
+      "identityAnchors": [],
+      "mustPreserve": [],
+      "forbiddenChanges": [],
+      "ownerKey": null,
+      "variantOf": null,
+      "sourcePolicy": "AI_ALLOWED",
+      "prompt": "",
+      "status": "ACTIVE",
+      "revision": 2,
+      "createdAt": 1791035544474,
+      "updatedAt": 1791055455330,
+      "assetKind": "VEHICLE",
+      "importance": "CORE",
+      "relatedKeys": [
+        "FX-001",
+        "PROP-001",
+        "CHAR-002"
+      ],
+      "sharedVisualSystemKey": "FX-001"
+    }
+  ],
+  "storyboards": [],
+  "visualSpecs": [
+    {
+      "canonicalKey": "CHAR-001",
+      "revision": 3,
+      "sourceAssetRevision": 2,
+      "status": "CONFIRMED",
+      "spec": {
+        "assetKind": "HUMAN_CHARACTER",
+        "visualIdentitySummary": "约7–9岁男孩，儿童比例，圆润安静面孔，深色微乱短发，后颈一撮翘发，眼距略宽、深蓝灰瞳；肩线极窄、肩点内收，躯干薄；穿月白/灰蓝宽松睡衣，赤足；整体呈月夜冷调、柔雾哑光，无固定挂件。",
+        "silhouette": "纤细轻盈，肩线进一步收窄、肩点内收，肩部轮廓比现版更薄更斜，躯干薄、四肢细长，颈线略长；宽松睡衣在窄肩上形成更明显的垂坠与落肩感，仍为柔和直筒/A形轮廓，呈「宽松衣物裹着瘦小身体」的观感，无肌肉感、无少年感；赤足",
+        "scale": "儿童尺度，叙事身高约1.15–1.35m，相对成人约0.7–0.8；可随镜头适配但不改变儿童比例。",
+        "proportion": "头身比约4.5–5头身，头略大，肩宽明显小于头宽，肩线薄而内收，四肢细，手脚偏小；比例仍为儿童期，不拉长四肢、不改变头身比。",
+        "primaryPalette": [
+          "月白 #E8E6DF",
+          "深靛蓝 #2C3A5A",
+          "灰蓝 #7C8DA6"
+        ],
+        "secondaryPalette": [
+          "暖沙 #C9A77C",
+          "褪色珊瑚 #C97B6E",
+          "银灰 #A7ADB5"
+        ],
+        "materials": [
+          "柔软棉布",
+          "亚麻",
+          "哑光雾面",
+          "微光梦境碎片（临时）"
+        ],
+        "surfaceLanguage": "柔雾哑光，低对比，轻微手绘颗粒；夜间冷调为主，暖色仅作小面积肤色与灯光反射；边缘柔化，高光克制，布料褶皱圆缓，无硬质高反光。",
+        "distinctiveFeatures": [
+          "深色微乱短发，后颈一撮上翘",
+          "圆润脸型，眼距略宽，深蓝灰瞳",
+          "清瘦骨架，肩线极窄、肩点内收，细腕细踝，儿童头身比",
+          "月白/灰蓝宽松睡衣，肩部垂坠与落肩感明显，领口松软",
+          "赤足或浅色软底睡鞋",
+          "无固定挂件"
+        ],
+        "continuityNotes": [
+          "保持相同发型剪影、眼距、瞳色、肤色与睡衣基础版型",
+          "肩线宽度为新增连续性项：同一角色跨镜头需保持窄肩剪影一致，不得因姿态或视角回宽",
+          "梦境元素仅临时叠加，不改变角色固有外观",
+          "允许姿态、视角、光线轻微变化，但不可改变身份锚点",
+          "避免年龄突变、写实化或风格漂移",
+          "肩线收窄不得引向少年化或成年化，头身比与年龄感保持不变"
+        ],
+        "identityAnchors": [
+          "儿童体型与4.5–5头身比例",
+          "深色微乱短发及后颈翘发",
+          "圆润脸型、略宽眼距、深蓝灰瞳",
+          "月白/灰蓝宽松睡衣轮廓",
+          "柔雾哑光与冷调月夜色感",
+          "无固定挂件"
+        ],
+        "mustPreserve": [
+          "儿童体型与头身比",
+          "深色微乱短发及后颈翘发",
+          "圆润脸型、略宽眼距、深蓝灰瞳",
+          "月白/灰蓝宽松睡衣轮廓",
+          "柔雾哑光与冷调月夜色感",
+          "无固定挂件"
+        ],
+        "forbiddenChanges": [
+          "禁止成年化、性化、写实人像化",
+          "禁止改变性别表现、年龄感、发型剪影、眼型瞳色、睡衣基础轮廓",
+          "禁止添加真实Logo或UI",
+          "禁止将梦境碎片、飞马、海盗船、鲸腹等临时叙事元素固化为角色固有服装或挂件",
+          "禁止高饱和、血腥或恐怖化处理"
+        ],
+        "embeddedElements": [],
+        "details": {
+          "ageRange": "约7–9岁",
+          "genderPresentation": "男孩，柔和中性",
+          "face": {
+            "faceShape": "圆润偏鹅蛋，下颌柔软",
+            "facialFeatures": "鼻梁低、鼻头圆，唇形薄而放松，眉形细软",
+            "skinTone": "暖白至浅麦色，夜间冷光下偏月白",
+            "eyeLanguage": "眼型偏圆，眼距略宽，瞳色深蓝灰；安静、好奇、困倦"
+          },
+          "hair": {
+            "color": "深棕至墨黑",
+            "length": "短发，耳上至后颈",
+            "silhouette": "微乱蓬松，后颈一撮上翘，额前碎发",
+            "styling": "自然睡乱，不刻意定型"
+          },
+          "body": {
+            "build": "明显清瘦纤细，肩线极窄、肩点内收、肩部轮廓薄而斜，躯干薄、腰线不显，四肢细长、腕踝纤细，锁骨与颈线略可见（克制、非病态瘦削），整体轻而柔、不显硬朗；纵向比例不改变",
+            "heightProportion": "儿童身高，约1.15–1.35m；头身比约4.5–5头身",
+            "ageProportion": "儿童期，头略大，手脚偏小"
+          },
+          "wardrobe": {
+            "upper": "宽松浅色长袖睡衣，圆领，袖口略松；在窄肩上呈更明显的落肩与垂坠，肩缝位置略向下",
+            "lower": "同色系宽松长裤",
+            "outer": "无固定外套",
+            "material": "柔软棉布",
+            "palette": "月白、灰蓝、浅沙色为主，深蓝滚边"
+          },
+          "footwear": "赤足",
+          "defaultExpression": "安静、困倦、微放松",
+          "expressionRange": [
+            "困倦",
+            "好奇",
+            "惊讶",
+            "专注",
+            "安心",
+            "轻微恐惧但不狰狞"
+          ]
+        }
+      }
+    },
+    {
+      "canonicalKey": "FX-001",
+      "revision": 1,
+      "sourceAssetRevision": 2,
+      "status": "CONFIRMED",
+      "spec": {
+        "assetKind": "MATERIAL_FX",
+        "visualIdentitySummary": "全片唯一的冷蓝荧光物质，半透明、可聚散，以雾→颗粒→轮廓→实体四态变化；同一物质可凝成海盗船、潜水艇、飞马，在鲸腹中呈未成形光雾与碎片，也可在掌中聚成方向并骤然变亮。",
+        "silhouette": "无固定单一轮廓；随状态从弥散雾团、颗粒群，到收束的发光轮廓，再到半透明实体。凝形时外形可辨，但边缘与内部仍保留荧光物质感。",
+        "scale": "尺度跨度大：可从掌中光点/碎片，到人形大小的凝形，再到充斥鲸腹的大面积光雾或载具级实体。",
+        "proportion": "以体积光雾和发光核心为主体，外缘羽化；凝形时内部高密度、外层低密度透光，整体呈流线、聚合、非硬质比例。",
+        "primaryPalette": [
+          "深钴蓝",
+          "电光蓝",
+          "青蓝"
+        ],
+        "secondaryPalette": [
+          "苍白青白",
+          "暗海军蓝",
+          "冷白高光"
+        ],
+        "materials": [
+          "体积光雾",
+          "悬浮荧光颗粒",
+          "半透明胶质/玻璃感凝体",
+          "冷光边缘"
+        ],
+        "surfaceLanguage": "软羽化与体积光为基底；实体态出现湿润玻璃或晶体般高光、内部流动光纹，无粗糙颗粒纹理。",
+        "distinctiveFeatures": [
+          "冷蓝荧光与半透明体积光",
+          "四态变化：雾、颗粒、轮廓、实体",
+          "可凝成海盗船、潜水艇、飞马",
+          "鲸腹中未成形光雾与碎片",
+          "掌中聚成方向并骤然变亮"
+        ],
+        "continuityNotes": [
+          "所有形态共享同一冷蓝荧光色相与半透明发光逻辑。",
+          "状态过渡保留颗粒/光雾残留，避免硬切到实体。",
+          "凝形细节可有差异，但材质核心属性与发光方式一致。",
+          "骤然变亮只改变亮度/强度，不改变色相与材质身份。",
+          "在鲸腹、掌中等特殊场景中保持相同材质规则。"
+        ],
+        "identityAnchors": [
+          "冷蓝荧光",
+          "单一材质贯穿全片",
+          "雾→颗粒→轮廓→实体四态",
+          "可凝成海盗船、潜水艇、飞马",
+          "鲸腹中未成形光雾与碎片",
+          "掌中方向聚光与骤然变亮"
+        ],
+        "mustPreserve": [
+          "全片唯一材质的身份：冷蓝荧光、半透明、可聚散。",
+          "雾、颗粒、轮廓、实体四种状态及其连续过渡。",
+          "凝形为海盗船、潜水艇、飞马时仍保留同一材质的光雾、颗粒与透光特征。",
+          "在鲸腹中保持未成形光雾与碎片。",
+          "掌中聚成方向并骤然变亮的临时强度变化。"
+        ],
+        "forbiddenChanges": [
+          "不可变成暖色、多色霓虹或与冷蓝荧光无关的材质。",
+          "不可失去半透明、发光、可聚散的物质感，不可变成普通不透明硬块。",
+          "不可跳过雾→颗粒→轮廓→实体的核心状态逻辑，除非叙事明确要求骤然变亮。",
+          "不可重画或替换真实 Logo/UI 元素。",
+          "不可将海盗船、潜水艇、飞马等凝形赋予与 FX-001 不一致的材质语言或另起一套 Dream Matter 视觉系统。"
+        ],
+        "embeddedElements": [],
+        "details": {
+          "baseColor": "深钴蓝至青蓝的冷色基底，低透明区可见暗蓝体积",
+          "emissionColor": "冷蓝荧光，核心偏青白，外缘偏电光蓝；骤然变亮时短暂提高青白强度",
+          "particleLanguage": "细小、悬浮、疏密不均的冷蓝光点；雾态为微尘般弥散，颗粒态可聚成流束或碎片群",
+          "edgeLanguage": "雾态/颗粒态为羽化、无锐边；轮廓态边缘开始收束但仍带光晕；实体态边缘清晰、带湿润或玻璃般高光",
+          "density": "可从极稀薄到高密度凝聚；内部密度高于边缘，凝形时中心更实、外层仍透光",
+          "transparency": "整体半透明至透明，实体态也保留内部透光与发光，不变成不透明硬块",
+          "states": [
+            {
+              "key": "MIST",
+              "appearance": "冷蓝光雾，弥散、无固定边界，像有体积的荧光空气；在鲸腹中可呈现未成形光雾与碎片。"
+            },
+            {
+              "key": "PARTICLE",
+              "appearance": "大量冷蓝荧光颗粒悬浮、旋转、聚合或散开；可用于构成碎片群与过渡形态。"
+            },
+            {
+              "key": "SILHOUETTE",
+              "appearance": "颗粒与雾收束成可辨识外形轮廓，边缘仍羽化，内部透光，细节未完全实化。"
+            },
+            {
+              "key": "SOLID",
+              "appearance": "凝为具有冷蓝荧光、半透明玻璃/胶质感的实体形态，表面有高光与内部流动光；可成海盗船、潜水艇、飞马等。"
+            }
+          ],
+          "transitionRules": [
+            "状态按雾→颗粒→轮廓→实体推进，也可反向消散；过渡连续，不出现瞬切硬换。",
+            "同一物质始终保留冷蓝荧光与半透明发光属性，状态变化不改变材质身份。",
+            "在掌中可聚成方向，并骤然变亮；该变亮是同一物质的临时强度变化，不产生新材质。"
+          ],
+          "interactionRules": [
+            "与角色或环境接触时以光雾、颗粒、轮廓先行，再凝为实体；实体态仍保持荧光与透光。",
+            "可包裹、托举或形成载具/生物形态，但不改变化学/视觉身份。",
+            "在鲸腹中保持未成形光雾与碎片，不强行凝成完整实体，除非叙事需要。"
+          ],
+          "manifestationRules": [
+            "可凝成海盗船、潜水艇、飞马等形态；这些形态对应独立的 canonical assets，但共享同一套蓝色荧光物质显化逻辑与材质语言。"
+          ]
+        }
+      }
+    },
+    {
+      "canonicalKey": "LOC-002",
+      "revision": 1,
+      "sourceAssetRevision": 2,
+      "status": "CONFIRMED",
+      "spec": {
+        "assetKind": "ENVIRONMENT",
+        "visualIdentitySummary": "鲸腹内景不是内脏，而是第二片夜空；与开头海岛夜空同构，但整体更近、更浓、更暗，空间被暗夜与未成形的蓝色光雾、碎片包围，呈现梦最原始的状态。",
+        "silhouette": "无明确实体轮廓，观感为被暗色夜空包围的非实体内部空间，无清晰边界。",
+        "scale": "宏阔、包围式；相对开头海岛夜空更近，因此光雾与暗色更浓更暗。",
+        "proportion": "不依赖常规地面或地平线比例；垂直与水平关系弱化，以暗夜底色和悬浮光雾/碎片的密度构成空间感。",
+        "primaryPalette": [
+          "深黑",
+          "暗夜蓝",
+          "靛蓝"
+        ],
+        "secondaryPalette": [
+          "未成形蓝色光雾",
+          "碎片微光"
+        ],
+        "materials": [
+          "非生物组织",
+          "暗色雾幕感",
+          "悬浮光雾",
+          "碎片微粒",
+          "夜空式光感"
+        ],
+        "surfaceLanguage": "深暗、低透、雾化、微粒悬浮，局部透出未成形的蓝色光。",
+        "distinctiveFeatures": [
+          "第二片夜空",
+          "与开头海岛夜空同构",
+          "比开头海岛夜空更近、更浓、更暗",
+          "漂浮未成形的蓝色光雾与碎片",
+          "梦最原始状态"
+        ],
+        "continuityNotes": [
+          "与开头海岛夜空保持同构关系；在同一视觉系统下呈现更近、更浓、更暗的差异；维持非实体夜空式空间，不变成真实器官或明确建筑。"
+        ],
+        "identityAnchors": [
+          "第二片夜空",
+          "与开头海岛夜空同构但更近、更浓、更暗",
+          "漂浮未成形蓝色光雾与碎片，是梦最原始状态"
+        ],
+        "mustPreserve": [
+          "鲸腹内景不是内脏，而是第二片夜空",
+          "与开头海岛夜空同构",
+          "更近、更浓、更暗",
+          "漂浮未成形的蓝色光雾与碎片",
+          "梦最原始状态"
+        ],
+        "forbiddenChanges": [
+          "不得变成真实内脏、器官、血肉或胃壁",
+          "不得添加明确建筑、家具、人物、真实Logo或UI",
+          "不得变成普通写实星空或宇宙",
+          "不得丢失蓝色光雾与碎片",
+          "不得与开头海岛夜空完全等同而忽略更近、更浓、更暗的差异"
+        ],
+        "embeddedElements": [],
+        "details": {
+          "spaceType": "鲸腹内景，非真实内脏空间，而是第二片夜空",
+          "geography": "无明确地理结构，无地面、无地平线、无清晰边界",
+          "layout": "以夜空式包围空间呈现，蓝色光雾与碎片漂浮其中",
+          "scale": "宏阔、近而浓、暗而包围",
+          "foreground": "近处漂浮未成形的蓝色光雾、细小碎片与稀疏粒子，作为空间尺度参照，不出现真实血肉或器官结构。",
+          "midground": "大面积深暗空域中缓慢流动着蓝色 Dream Matter 光雾与碎片，形成主要视觉层次和梦境空间感。",
+          "background": "远处逐渐消失在深蓝黑色的“第二片夜空”中，散布稀疏冷蓝微光与未成形碎片，没有明确实体边界。",
+          "architectureOrNaturalForms": [],
+          "timeOfDay": "",
+          "weather": "",
+          "atmosphere": "梦最原始状态",
+          "lighting": "低照度，暗夜基调，蓝色自发光光雾与碎片",
+          "recurringAnchors": [
+            "第二片夜空",
+            "与开头海岛夜空同构",
+            "更近更浓更暗",
+            "蓝色未成形光雾与碎片"
+          ],
+          "emptyEnvironmentPolicy": "EMPTY_CANONICAL_REFERENCE"
+        }
+      }
+    }
+  ],
+  "coverage": [
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 0,
+      "label": "男孩已睡在海岛夜晚",
+      "coverageType": "PERSON",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"CHAR-001\",\"LOC-001\"]",
+      "note": "不从入睡过程开始，从梦已经开始的画面切入。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 1,
+      "label": "蓝色荧光物质从男孩身侧溢出为雾",
+      "coverageType": "FX_MATERIAL",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"FX-001\",\"CHAR-001\"]",
+      "note": "初始状态：雾，不成形，越过沙面、掠到海面上方。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 2,
+      "label": "蓝色荧光物质完整凝聚为海盗船",
+      "coverageType": "VEHICLE",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"FX-001\",\"PROP-001\"]",
+      "note": "全片唯一一次完整展示凝聚过程：雾→颗粒→轮廓→实体；是“凝”出来，不是“变”出来。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 3,
+      "label": "男孩踏上海盗船离岸",
+      "coverageType": "VEHICLE",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"CHAR-001\",\"PROP-001\",\"LOC-001\"]",
+      "note": "男孩第一个动作，尚未意识到自己在做梦；船驶向远处。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 4,
+      "label": "鲸鱼从海中央升起吞没船",
+      "coverageType": "CREATURE",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"CHAR-003\",\"PROP-001\",\"LOC-001\",\"FX-001\"]",
+      "note": "光被整体压暗，不是黑场，是光被吞进去了。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 5,
+      "label": "鲸腹内景作为第二片夜空",
+      "coverageType": "SCENE",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"LOC-002\"]",
+      "note": "与开头海岛夜空同构，但更近、更浓、更暗；不是内脏。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 6,
+      "label": "鲸腹中漂浮未成形蓝色光雾与碎片",
+      "coverageType": "FX_MATERIAL",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"FX-001\",\"LOC-002\"]",
+      "note": "大量还没成形的念头，梦最原始状态；不另建独立资产，归入蓝色荧光物质状态。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 7,
+      "label": "船在鲸腹中重新凝聚为潜水艇",
+      "coverageType": "VEHICLE",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"PROP-002\",\"FX-001\",\"LOC-002\"]",
+      "note": "不是变形，是同一团蓝光换形状；不出现机械拆解，物质适应处境。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 8,
+      "label": "男孩在鲸腹中第一次主动伸手",
+      "coverageType": "PERSON",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"CHAR-001\",\"FX-001\",\"LOC-002\"]",
+      "note": "全片转折点；伸手前有一瞬真正停顿，全片唯一停顿。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 9,
+      "label": "碎片聚向手掌并显现方向",
+      "coverageType": "FX_MATERIAL",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"FX-001\",\"CHAR-001\"]",
+      "note": "瞬时效果，不建独立 visualElement；掌中出现方向，指向鲸鱼头顶出水口。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 10,
+      "label": "蓝光变亮引发鲸鱼喷嚏喷出",
+      "coverageType": "CREATURE",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"CHAR-003\",\"CHAR-001\",\"PROP-002\",\"FX-001\"]",
+      "note": "喷嚏从偶然变成男孩行动的结果；从头顶出水口喷出。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 11,
+      "label": "潜水艇溶解塌回成雾",
+      "coverageType": "FX_MATERIAL",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"PROP-002\",\"FX-001\"]",
+      "note": "不是爆炸，是溶解；形态不再维持。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 12,
+      "label": "男孩下坠",
+      "coverageType": "PERSON",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"CHAR-001\"]",
+      "note": "下坠为飞马成形提供条件。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 13,
+      "label": "雾在男孩下方重新聚拢成形为飞马",
+      "coverageType": "CREATURE",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"FX-001\",\"CHAR-002\"]",
+      "note": "飞马不是来接他，是物质回应上一次伸手。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 14,
+      "label": "飞马驮住男孩转向月亮向上",
+      "coverageType": "CREATURE",
+      "classification": "SHOT_LOCAL",
+      "canonicalKeys": "[\"CHAR-002\",\"CHAR-001\",\"LOC-003\"]",
+      "note": "情绪落点：融解与还原；方向向上。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 15,
+      "label": "飞马掠海面，水面先浮出字标",
+      "coverageType": "COMPOSITION_GOAL",
+      "classification": "COMPOSITION_MOTIF",
+      "canonicalKeys": "[\"BRAND-001\",\"CHAR-002\",\"LOC-001\"]",
+      "note": "Logo 本身有水面倒影层，这个动作是现成的；真实 Logo 作为独立素材落上，只做位置对齐与亮度过渡。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 16,
+      "label": "最后一镜构图与 BRAND-001 构成现场重合",
+      "coverageType": "COMPOSITION_GOAL",
+      "classification": "COMPOSITION_MOTIF",
+      "canonicalKeys": "[\"BRAND-001\",\"LOC-003\",\"CHAR-002\",\"FX-001\",\"LOC-001\"]",
+      "note": "月亮与字母 D 内部月牙同位；飞马头颈弧线与字母 S 融合的马头那一笔同向；蓝紫自发光同源；执行参数待 BRAND-001 完成 Production binding 后锁死。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 17,
+      "label": "真实 Logo 独立素材落上",
+      "coverageType": "COMPOSITION_GOAL",
+      "classification": "COMPOSITION_MOTIF",
+      "canonicalKeys": "[\"BRAND-001\"]",
+      "note": "保持原样，不做形变、不重绘、不改字形、不改核心图形比例与结构；仅位置对齐与亮度过渡。本提案未应用。"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 18,
+      "label": "蓝色荧光物质",
+      "coverageType": "FX_MATERIAL",
+      "classification": "VISUAL_SYSTEM",
+      "canonicalKeys": "[\"FX-001\"]",
+      "note": "持续视觉系统身份"
+    },
+    {
+      "projectId": 1790941805789310,
+      "scriptId": 4,
+      "creativeVersion": 2,
+      "position": 19,
+      "label": "高空月夜／目的地环境",
+      "coverageType": "SCENE",
+      "classification": "CANONICAL_ASSET",
+      "canonicalKeys": "[\"LOC-004\"]",
+      "note": "Treatment 写到“月亮，向上”，但尚无明确的目的地环境；请确认是否需要独立场景资产或现有环境变体"
+    }
+  ],
+  "references": [
+    {
+      "targetKey": "BRAND-001",
+      "targetType": "ASSET_BIBLE",
+      "attachmentId": "b3227f96-ff7b-4e40-9327-46e89b21f3fa"
+    },
+    {
+      "targetKey": "CHAR-001",
+      "targetType": "ASSET_BIBLE",
+      "attachmentId": "10a533cc-9998-4955-bf62-c85eb23d76cf"
+    },
+    {
+      "targetKey": "CHAR-001",
+      "targetType": "ASSET_BIBLE",
+      "attachmentId": "5adce948-6aa7-464e-bf83-b60291f87a53"
+    },
+    {
+      "targetKey": "CHAR-001",
+      "targetType": "ASSET_BIBLE",
+      "attachmentId": "5e8af0fd-ddd6-4439-a0f8-d03066392880"
+    }
+  ]
+}
