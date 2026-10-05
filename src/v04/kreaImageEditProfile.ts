@@ -1,5 +1,5 @@
 import { DraftComfyError, type DraftWorkflow } from './comfyDraftClient';
-export const kreaEditProfiles=['KREA2_T2I_ASSET_V1','KREA2_SOURCE_EDIT_V1','KREA2_REFERENCE_EDIT_V1','KREA2_DERIVE_CHARACTER_REFERENCE_V1'] as const;
+export const kreaEditProfiles=['KREA2_T2I_ASSET_V1','KREA2_SOURCE_EDIT_V1','KREA2_REFERENCE_EDIT_V1','KREA2_DERIVE_CHARACTER_REFERENCE_V1','KREA2_DERIVE_ASSET_REFERENCE_V1'] as const;
 export const KREA_EDIT_WORKFLOW_VERSION='krea2-identity-edit-1.2-fit-v1';
 export const kreaModels={unet:'krea2_turbo_fp8_scaled.safetensors',clip:'qwen3vl_4b_fp8_scaled.safetensors',vae:'qwen_image_vae.safetensors',lora:'krea2_identity_edit_v1_2.safetensors'};
 export function buildKreaEditWorkflow(input:{profile:string;prompt:string;seed:number;width?:number;height?:number;sourceImage?:string;referenceImage?:string;targetRole:string;jobId:string}):DraftWorkflow{

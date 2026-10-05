@@ -1,4 +1,6 @@
 import { produceAssetImageEdit } from "./assetImageEdit";
+import {produceAutoAsset,reconcileAutoAssets,autoJobFresh,captureAutoAssetReadContext} from './autoAsset';
+import {acquireDraftWorkerLease} from './draftWorkerLease';
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -160,7 +162,8 @@ export async function listDraftJobs(input: unknown) {
     // Image-edit candidates have their own review surface. They must not become
     // Reference Pack display jobs before explicit adoption.
     const rows = await trx("o_v04StudioAssetDraftJob").where(data).whereNot("generationIntent", "ASSET_IMAGE_EDIT").orderBy("createdAt", "desc").limit(300);
-    return rows.map(publicJob);
+    const context=rows.some(row=>JSON.parse(row.inputSnapshotJson)?.autoVersion)?await captureAutoAssetReadContext(trx,data):undefined;
+    return Promise.all(rows.map(async row => ({...publicJob(row),status:row.status==='SUCCEEDED'&&!await autoJobFresh(row,trx,context)?'STALE':row.status})));
   });
 }
 
@@ -179,28 +182,37 @@ export function wakeDraftWorker() {
   if (working) return;
   working = true;
   void (async () => {
+    let release:(()=>Promise<void>)|null=null;
     try {
+      release=await acquireDraftWorkerLease(getPath(['v04-draft-worker.lock']));
+      if(!release){pendingWake=false;setTimeout(wakeDraftWorker,30000).unref();return;}
       while (pendingWake) {
         pendingWake = false;
         let job = await q("o_v04StudioAssetDraftJob").where({ status: "RUNNING" }).orderBy("startedAt").first();
         let freshClaim = false;
         if (!job) {
-          job = await q("o_v04StudioAssetDraftJob").where({ status: "QUEUED" }).orderBy("createdAt").first();
+          job = await q("o_v04StudioAssetDraftJob").where({ status: "QUEUED" })
+            .orderByRaw("CASE WHEN executionPurpose = 'ASSET_MAIN_PREVIEW' THEN 0 WHEN json_extract(inputSnapshotJson, '$.autoVersion') IS NOT NULL THEN 2 ELSE 1 END")
+            .orderBy("createdAt").first();
           if (!job) break;
           const changed = await q("o_v04StudioAssetDraftJob").where({ id: job.id, status: "QUEUED" })
             .update({ status: "RUNNING", startedAt: Date.now(), updatedAt: Date.now() });
           if (changed !== 1) { pendingWake = true; continue; }
           freshClaim = true;
         }
-        await produce(job, freshClaim);
+        const result = await produce(job, freshClaim);
+        if(result?.paused){setTimeout(wakeDraftWorker,30000).unref();break;}
+        if(JSON.parse(job.inputSnapshotJson)?.autoVersion)
+          await reconcileAutoAssets({projectId:job.projectId,scriptId:job.scriptId});
         pendingWake = true;
       }
     } catch (error) { console.error("[V04 DraftImage][Worker]", { errorName: error instanceof Error ? error.name : "Error" }); }
-    finally { working = false; if (pendingWake) wakeDraftWorker(); }
+    finally { if(release)await release();working = false; if (pendingWake) wakeDraftWorker(); }
   })();
 }
 
 async function produce(job: any, freshClaim: boolean) {
+  if(JSON.parse(job.inputSnapshotJson)?.autoVersion) return produceAutoAsset(job,freshClaim);
   if (job.generationIntent === "ASSET_IMAGE_EDIT") return produceAssetImageEdit(job, freshClaim);
   try {
     const snapshot = JSON.parse(job.inputSnapshotJson);

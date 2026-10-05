@@ -207,9 +207,12 @@ export async function previewVisualSpec(input: unknown) {
 // Visual Spec or an official Prompt Build.
 export async function compileStudioDraftPrompts(input: unknown) {
   const data = draftPromptRequest.parse(input);
+  return q.transaction(trx => compileStudioDraftPromptsInTransaction(trx, data));
+}
+// Same compiler/validation boundary for automatic admission; no nested snapshot.
+export async function compileStudioDraftPromptsInTransaction(trx: Knex.Transaction, data: z.infer<typeof draftPromptRequest>) {
   if (new Set(data.items.map(item => item.canonicalKey)).size !== data.items.length)
     throw new PilotError("PILOT_VISUAL_DUPLICATE_KEY", "同一批草案不能重复引用资产", 422);
-  return q.transaction(async trx => {
     const candidates: any[] = [], failures: { canonicalKey: string; code: string; message: string }[] = [];
     for (const item of data.items) {
       try {
@@ -236,7 +239,6 @@ export async function compileStudioDraftPrompts(input: unknown) {
       }
     }
     return { candidates, failures, applied: false };
-  });
 }
 
 async function savePromptBuild(trx: Knex.Transaction, projectId: number, canonicalKey: string, asset: any, spec: VisualSpec, specRevision: number, refs: { attachmentId: string; originalName: string }[], previewKind: string) {

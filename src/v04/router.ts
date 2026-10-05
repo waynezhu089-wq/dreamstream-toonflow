@@ -1,4 +1,6 @@
 import {inspectOperations,recentExecutions,executionDetail,workflowExample,previewRouting,applyRouting} from './operations';
+import {reconcileAutoAssets,autoAssetCoverage} from './autoAsset';
+import {wakeDraftWorker} from './studioDraftImage';
 import {listImageBaselines,previewImageBaseline,confirmImageBaseline} from './assetImageBaseline';
 import { listAssetImageCandidates, previewAssetImageCandidate, acceptAssetImageCandidate, rejectAssetImageCandidate } from "./assetImageEdit";
 import express from "express";
@@ -53,6 +55,8 @@ function endpoint(route: string, run: (body: any, req: express.Request) => Promi
 }
 endpoint("/projects", async (_body, req) => listPilotProjects(Number((req as any).user.id)));
 endpoint('/operations/status',inspectOperations);
+endpoint('/studio/auto-assets/reconcile',async body=>{const result=await reconcileAutoAssets(body);wakeDraftWorker();return result;});
+endpoint('/studio/auto-assets/coverage',autoAssetCoverage);
 endpoint('/operations/executions',recentExecutions);
 endpoint('/operations/execution',executionDetail);
 endpoint('/operations/workflow/example',async input=>workflowExample(input));

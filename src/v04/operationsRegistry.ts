@@ -37,8 +37,8 @@ export function workflowRegistry(checkpoint?: string) {
     return { profile, workflowVersion: workflow.version, sourceType: 'CODE_GENERATED', jsonFile: null,
       builder: profile.startsWith('KREA2') ? 'src/v04/kreaImageEditProfile.ts' : profile.startsWith('Z_IMAGE') ?
         'src/v04/zImageSubjectProfile.ts' : 'src/v04/comfyDraftClient.ts',
-      capabilities: [task ?? 'T2I', ...(profile.startsWith('Z_IMAGE') ? ['CHARACTER'] : ['CHARACTER', 'ENVIRONMENT', 'PROP', 'VEHICLE'])],
-      wiring: profile === 'KREA2_T2I_ASSET_V1' ? 'NOT_WIRED' : task ? 'AGENT_EDIT' : 'MANUAL_LEGACY',
+      capabilities: [profile==='KREA2_DERIVE_ASSET_REFERENCE_V1'?'DERIVE_VIEW':task ?? 'T2I', ...(profile.startsWith('Z_IMAGE') ? ['CHARACTER'] : ['CHARACTER', 'CREATURE', 'ENVIRONMENT', 'PROP', 'VEHICLE', 'MATERIAL_FX', 'CELESTIAL'])],
+      wiring: ['KREA2_T2I_ASSET_V1','KREA2_DERIVE_ASSET_REFERENCE_V1'].includes(profile) ? 'AUTO_ASSET' : task ? 'AGENT_EDIT' : 'MANUAL_LEGACY',
       limitations: profile.startsWith('Z_IMAGE') ? 'Subject main preview only; not a turnaround.' : profile === LOCAL_DRAFT_V1 ?
         'Legacy checkpoint configuration; example requires an installed checkpoint.' : 'Draft only; identity preservation is not guaranteed. At most one external reference.',
       ...graphFacts(workflow.graph), purpose: task ?? 'LEGACY_DRAFT',

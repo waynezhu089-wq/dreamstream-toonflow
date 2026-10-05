@@ -1,3 +1,4 @@
+import {autoJobFresh,captureAutoAssetReadContext} from './autoAsset';
 import {createHash,randomUUID} from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -131,7 +132,7 @@ export async function produceAssetImageEdit(job:any,freshClaim:boolean){
  }finally{await settleJobTraces(job.id);}
 }
 export async function listAssetImageCandidates(input:unknown){const scope=scopeSchema.parse(input);return q.transaction(async trx=>{
- await assertScope(trx,scope);const rows=await trx('o_v04StudioAssetDraftJob').where({...scope,generationIntent:'ASSET_IMAGE_EDIT'}).orderBy('createdAt','desc').limit(100);
+ await assertScope(trx,scope);const rows=await trx('o_v04StudioAssetDraftJob').where(scope).where(function(){this.where({generationIntent:'ASSET_IMAGE_EDIT'}).orWhereRaw("json_extract(inputSnapshotJson, '$.autoVersion') IS NOT NULL");}).orderBy('createdAt','desc').limit(100);
  const decisions=await trx('o_v04Decision').where({...scope,category:'ASSET_IMAGE_EDIT'}).orderBy('createdAt','desc').limit(300);
  const snapshots=rows.map((j:any)=>JSON.parse(j.inputSnapshotJson)),keys=[...new Set(rows.map((j:any)=>j.canonicalKey))];
  const assets=await trx('o_v04Asset').where({projectId:scope.projectId}).whereIn('canonicalKey',keys);
@@ -140,14 +141,15 @@ export async function listAssetImageCandidates(input:unknown){const scope=scopeS
  const sources=await trx('o_v04StudioAssetDraftJob').where(scope).whereIn('id',snapshots.map((s:any)=>s.sourceJobId).filter(Boolean));
  const attachmentSources=await trx('o_v04AgentAttachment').where(scope).whereIn('id',snapshots.map((s:any)=>s.sourceAttachmentId).filter(Boolean));
  const baselines=await baselinesInTransaction(trx,scope);
- const refs=await trx('o_v04AgentAttachment').where(scope).whereIn('id',snapshots.flatMap((s:any)=>s.referenceBindings.map((r:any)=>r.attachmentId)));
- return rows.map((j:any,i:number)=>{const s=snapshots[i],asset=assets.find((a:any)=>a.canonicalKey===j.canonicalKey),spec=specs.find((a:any)=>a.canonicalKey===j.canonicalKey);
-  const current=sourceIsCurrent(j,s,asset,spec,s.sourceAttachmentId?attachmentSources.find((p:any)=>p.id===s.sourceAttachmentId):sources.find((p:any)=>p.id===s.sourceJobId),refs,decisions.some((d:any)=>d.subjectKey===s.sourceJobId&&d.status==='REJECTED'),suitableBaseline(baselines,j.canonicalKey,s.intent.targetRole==='FACE_HERO'?'FACE':s.intent.targetRole==='FULL_BODY_BACK'?'BACK':s.intent.sourceFocus));
-  return {id:j.id,assetName:asset?.name??'素材',canonicalKey:j.canonicalKey,sourceAssetRevision:j.sourceAssetRevision,userMessageId:s.userMessageId,parentCandidateId:s.parentCandidateId,sourceArtifactId:s.sourceArtifactId,targetRole:j.executionPurpose,status:j.status==='SUCCEEDED'&&!current?'STALE':j.status,outputs:JSON.parse(j.outputsJson),errorMessage:j.errorMessage,decision:decisions.find((d:any)=>d.subjectKey===j.id)?.status??null,createdAt:j.createdAt};});
+ const refs=await trx('o_v04AgentAttachment').where(scope).whereIn('id',snapshots.flatMap((s:any)=>(s.referenceBindings??[]).map((r:any)=>r.attachmentId)));
+ const autoContext=rows.some((j:any)=>JSON.parse(j.inputSnapshotJson).autoVersion)?await captureAutoAssetReadContext(trx,scope):undefined;
+ return Promise.all(rows.map(async(j:any,i:number)=>{const s=snapshots[i],asset=assets.find((a:any)=>a.canonicalKey===j.canonicalKey),spec=specs.find((a:any)=>a.canonicalKey===j.canonicalKey);
+  const current=s.autoVersion?await autoJobFresh(j,trx,autoContext):sourceIsCurrent(j,s,asset,spec,s.sourceAttachmentId?attachmentSources.find((p:any)=>p.id===s.sourceAttachmentId):sources.find((p:any)=>p.id===s.sourceJobId),refs,decisions.some((d:any)=>d.subjectKey===s.sourceJobId&&d.status==='REJECTED'),suitableBaseline(baselines,j.canonicalKey,s.intent.targetRole==='FACE_HERO'?'FACE':s.intent.targetRole==='FULL_BODY_BACK'?'BACK':s.intent.sourceFocus));
+  return {id:j.id,assetName:asset?.name??'素材',canonicalKey:j.canonicalKey,sourceAssetRevision:j.sourceAssetRevision,userMessageId:s.userMessageId,parentCandidateId:s.parentCandidateId,sourceArtifactId:s.sourceArtifactId,targetRole:j.executionPurpose,automatic:!!s.autoVersion,status:j.status==='SUCCEEDED'&&!current?'STALE':j.status,outputs:JSON.parse(j.outputsJson),errorMessage:j.errorMessage,decision:decisions.find((d:any)=>d.subjectKey===j.id)?.status??null,createdAt:j.createdAt};}));
 });}
 async function candidatePlan(trx:Knex.Transaction,data:z.infer<typeof jobRequest>){
- await assertScope(trx,data);const job=await trx('o_v04StudioAssetDraftJob').where({id:data.jobId,projectId:data.projectId,scriptId:data.scriptId,generationIntent:'ASSET_IMAGE_EDIT',status:'SUCCEEDED'}).first();
- if(!job||!await fresh(job,JSON.parse(job.inputSnapshotJson),trx))throw new PilotError('PILOT_SOURCE_STALE','候选已过期，不能采用',409);
+ await assertScope(trx,data);const job=await trx('o_v04StudioAssetDraftJob').where({id:data.jobId,projectId:data.projectId,scriptId:data.scriptId,status:'SUCCEEDED'}).first();
+ if(!job||!(JSON.parse(job.inputSnapshotJson).autoVersion?await autoJobFresh(job,trx):job.generationIntent==='ASSET_IMAGE_EDIT'&&await fresh(job,JSON.parse(job.inputSnapshotJson),trx)))throw new PilotError('PILOT_SOURCE_STALE','候选已过期，不能采用',409);
  const decisions=await trx('o_v04Decision').where({projectId:data.projectId,scriptId:data.scriptId,category:'ASSET_IMAGE_EDIT',subjectKey:job.id}).orderBy('createdAt','desc');
  if(decisions[0]?.status==='REJECTED')throw new PilotError('PILOT_CANDIDATE_REJECTED','此候选已放弃',409);
  return {job,previewHash:sha({id:job.id,draftHash:job.draftHash,outputs:job.outputsJson,decision:decisions[0]?.id??null})};
@@ -165,15 +167,15 @@ export async function acceptAssetImageCandidate(input:unknown){
   const current=await candidatePlan(trx,data);if(current.previewHash!==data.previewHash)throw new PilotError('PILOT_PREVIEW_STALE','候选预览已过期',409);
   const existing=await trx('o_v04Decision').where({projectId:data.projectId,scriptId:data.scriptId,category:'ASSET_IMAGE_EDIT',subjectKey:plan.job.id,status:'ACCEPTED'}).first();if(existing)return {applied:true,replayed:true};
   const now=Date.now(),snapshot=JSON.parse(plan.job.inputSnapshotJson);
-  await trx('o_v04AgentAttachment').insert({id,projectId:data.projectId,scriptId:data.scriptId,messageId:snapshot.userMessageId,contextJson:JSON.stringify({projectId:data.projectId,scriptId:data.scriptId,currentStage:'studio',currentRoute:'studio',selectedObject:{type:'ASSET',key:plan.job.canonicalKey}}),filePath:`/v04-conversation/${data.projectId}/${id}.${ext}`,originalName:`${plan.job.canonicalKey}-candidate.png`,mimeType:media.mimeType,bytes:media.bytes.length,sha256:bytesHash(media.bytes),purpose:'GENERATED_CANDIDATE',createdAt:now});
+  await trx('o_v04AgentAttachment').insert({id,projectId:data.projectId,scriptId:data.scriptId,messageId:snapshot.userMessageId??null,contextJson:JSON.stringify({projectId:data.projectId,scriptId:data.scriptId,currentStage:'studio',currentRoute:'studio',selectedObject:{type:'ASSET',key:plan.job.canonicalKey}}),filePath:`/v04-conversation/${data.projectId}/${id}.${ext}`,originalName:`${plan.job.canonicalKey}-candidate.png`,mimeType:media.mimeType,bytes:media.bytes.length,sha256:bytesHash(media.bytes),purpose:'GENERATED_CANDIDATE',createdAt:now});
   await recordCandidateBaseline(trx,plan.job,id,{...candidateOutput,sha256:bytesHash(media.bytes)},data.previewHash);
   await trx('o_v04AgentReference').insert({id:randomUUID(),projectId:data.projectId,scriptId:data.scriptId,attachmentId:id,targetType:'ASSET_BIBLE',targetKey:plan.job.canonicalKey,assetId:null,createdAt:now});
-  await trx('o_v04Decision').insert({id:randomUUID(),projectId:data.projectId,scriptId:data.scriptId,category:'ASSET_IMAGE_EDIT',subjectType:'ASSET',subjectKey:plan.job.id,content:JSON.stringify({canonicalKey:plan.job.canonicalKey,artifactId,attachmentId:id,previewHash:data.previewHash}),status:'ACCEPTED',sourceMessageIds:JSON.stringify([snapshot.userMessageId]),supersedesDecisionId:null,createdAt:now,acceptedAt:now});
+  await trx('o_v04Decision').insert({id:randomUUID(),projectId:data.projectId,scriptId:data.scriptId,category:'ASSET_IMAGE_EDIT',subjectType:'ASSET',subjectKey:plan.job.id,content:JSON.stringify({canonicalKey:plan.job.canonicalKey,artifactId,attachmentId:id,previewHash:data.previewHash}),status:'ACCEPTED',sourceMessageIds:JSON.stringify([snapshot.userMessageId].filter(Boolean)),supersedesDecisionId:null,createdAt:now,acceptedAt:now});
   return {applied:true,artifactId,attachmentId:id};
  });}catch(e){await fs.unlink(file).catch(()=>{});throw e;}
 }
 export async function rejectAssetImageCandidate(input:unknown){const data=jobRequest.parse(input);return q.transaction(async trx=>{
- await assertScope(trx,data);const job=await trx('o_v04StudioAssetDraftJob').where({id:data.jobId,projectId:data.projectId,scriptId:data.scriptId,generationIntent:'ASSET_IMAGE_EDIT'}).first();if(!job)throw new PilotError('PILOT_SCOPE_INVALID','候选不存在',404);
+ await assertScope(trx,data);const job=await trx('o_v04StudioAssetDraftJob').where({id:data.jobId,projectId:data.projectId,scriptId:data.scriptId}).first();if(!job||!(job.generationIntent==='ASSET_IMAGE_EDIT'||JSON.parse(job.inputSnapshotJson).autoVersion))throw new PilotError('PILOT_SCOPE_INVALID','候选不存在',404);
  const accepted=await trx('o_v04Decision').where({projectId:data.projectId,scriptId:data.scriptId,category:'ASSET_IMAGE_EDIT',subjectKey:job.id,status:'ACCEPTED'}).first();if(accepted)throw new PilotError('PILOT_CANDIDATE_ACCEPTED','已采用的参考不能通过放弃候选撤销',409);
  const existing=await trx('o_v04Decision').where({projectId:data.projectId,scriptId:data.scriptId,category:'ASSET_IMAGE_EDIT',subjectKey:job.id,status:'REJECTED'}).first();if(existing)return {rejected:true};
  await trx('o_v04Decision').insert({id:randomUUID(),projectId:data.projectId,scriptId:data.scriptId,category:'ASSET_IMAGE_EDIT',subjectType:'ASSET',subjectKey:job.id,content:JSON.stringify({canonicalKey:job.canonicalKey}),status:'REJECTED',sourceMessageIds:'[]',supersedesDecisionId:null,createdAt:Date.now(),acceptedAt:null});return {rejected:true};

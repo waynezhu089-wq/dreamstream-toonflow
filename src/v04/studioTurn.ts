@@ -1,4 +1,6 @@
 import {previewImageBaseline,listImageBaselines} from './assetImageBaseline';
+import {reconcileAutoAssets,autoAssetCoverage} from './autoAsset';
+import {wakeDraftWorker} from './studioDraftImage';
 import { readAgentAttachment } from "./agentAttachments";
 import { analyzeImages } from "./visionAnalyzer";
 import { enqueueAssetImageEdit, listAssetImageCandidates, previewAssetImageCandidate, rejectAssetImageCandidate } from "./assetImageEdit";
@@ -57,14 +59,25 @@ export async function answerStudioTurn(input: unknown, userMessageId?: string) {
   const ctx = data.context;
   const state = await readPilot({ projectId: ctx.projectId, scriptId: ctx.scriptId });
   const selected = ctx.selectedObject;
+  if(/把.*资产.*准备好|准备.*全部.*素材|重新做.*第一稿|怎么.*还没图|为什么.*没有图/.test(data.message)){
+    const asset=state.assets.find((a:any)=>selected?.type==='ASSET'&&a.canonicalKey===selected.key)||state.assets.find((a:any)=>data.message.includes(a.name)||data.message.includes(a.canonicalKey));
+    if(/重新做/.test(data.message)&&!asset)return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'请选中要重新准备第一稿的素材。',applied:false};
+    if(!/怎么|为什么/.test(data.message)){
+      await reconcileAutoAssets({projectId:ctx.projectId,scriptId:ctx.scriptId,...(/重新做/.test(data.message)?{regenerateKey:asset!.canonicalKey,requestId:userMessageId??randomUUID()}: {})});wakeDraftWorker();
+    }
+    const coverage=await autoAssetCoverage({projectId:ctx.projectId,scriptId:ctx.scriptId});
+    const item=asset?coverage.items.find(a=>a.canonicalKey===asset.canonicalKey):null;
+    return {mode:'DISCUSS',reply:item?`${asset.name}：${item.realRequired?'等待真实素材':({READY:'图片已准备',QUEUED:'正在排队准备',RUNNING:'正在生成',FAILED:'生成遇到问题；旧素材未改变',WAITING_PREPARATION:'视觉草案尚未准备完成'} as Record<string,string>)[item.firstDraftStatus]??'正在准备'}。`:
+      `资产图片已准备 ${coverage.firstDraftReady} 项，正在准备 ${coverage.firstDraftRunning} 项。自动图片只是草案，不会替换已确认基准。`,applied:false};
+  }
   // Explicit conversational review stays on the same Preview/Confirm boundary.
   // A model reply cannot itself promote a generated image to authority.
   const reviewText=data.message.trim().replace(/[。！!\s]+$/g,'');
-  const acceptReview=/^(这个可以|就用这张|确认用这张|用这张作为正式参考|采用此版本)$/.test(reviewText);
+  const acceptReview=/^(这个可以|用这张|就用这张|确认用这张|用这张作为正式参考|采用此版本)$/.test(reviewText);
   const rejectReview=/^(不要这个版本|放弃这个候选|不采用这张)$/.test(reviewText);
   if(acceptReview||rejectReview){
     const candidates=await listAssetImageCandidates({projectId:ctx.projectId,scriptId:ctx.scriptId});
-    const candidate=candidates.find(c=>c.status==='SUCCEEDED' && c.decision!=='REJECTED' &&
+    const candidate=candidates.find(c=>(data.parentCandidateId||!c.automatic)&&c.status==='SUCCEEDED' && c.decision!=='REJECTED' &&
       (data.parentCandidateId?c.id===data.parentCandidateId:selected?.type==='ASSET'&&c.canonicalKey===selected.key));
     if(!candidate)return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'请先选中你希望采用或放弃的图片候选。',applied:false};
     if(rejectReview){await rejectAssetImageCandidate({projectId:ctx.projectId,scriptId:ctx.scriptId,jobId:candidate.id});return {mode:'ASSET_IMAGE_REVIEW',reply:'已放弃这张候选，原有素材没有改变。',applied:false};}
