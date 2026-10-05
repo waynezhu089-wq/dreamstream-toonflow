@@ -2,6 +2,8 @@ import { z } from "zod";
 import type { AssetKind } from "./assetWorkflow";
 import { normalizeVisualSemantic, visualDetailTemplates, visualQualityWarnings, type VisualWarning } from "./visualSemanticNormalizer";
 
+import { referencePlanSchema, resolveCharacterReferencePlan } from "./characterReferencePack";
+
 const line = z.string().max(600);
 const lines = z.array(line).max(30);
 const embeddedElement = z.object({
@@ -45,7 +47,7 @@ const reference = z.object({ referenceDerived: z.literal(true), aiRedrawAllowed:
 const object = z.object({ objectType: line, structure: line, use: line }).strict();
 
 export const visualSpecSchema = z.discriminatedUnion("assetKind", [
-  z.object({ assetKind: z.literal("HUMAN_CHARACTER"), ...common, details: human }).strict(),
+  z.object({ assetKind: z.literal("HUMAN_CHARACTER"), ...common, details: human, referencePlan: referencePlanSchema.optional() }).strict(),
   z.object({ assetKind: z.literal("CREATURE"), ...common, details: creature }).strict(),
   z.object({ assetKind: z.literal("VEHICLE"), ...common, details: vehicle }).strict(),
   z.object({ assetKind: z.literal("PROP"), ...common, details: object }).strict(),
@@ -72,7 +74,7 @@ export function compileVisualSemanticWithDiagnostics(asset: { assetKind: AssetKi
   const details = referenceOnly ? { referenceDerived: true, aiRedrawAllowed: false,
     referenceAttachmentIds: confirmedReferenceIds, referenceConstraints: [...asset.mustPreserve, ...asset.forbiddenChanges], observedReferenceNotes }
     : normalized!.details;
-  const spec = visualSpecSchema.parse({ assetKind: asset.assetKind, ...common, details });
+  const spec = visualSpecSchema.parse({ assetKind: asset.assetKind, ...common, details, ...(asset.assetKind === "HUMAN_CHARACTER" ? { referencePlan: resolveCharacterReferencePlan({}) } : {}) });
   return { spec, normalizationWarnings: normalized?.warnings ?? [], qualityWarnings: visualQualityWarnings(spec) };
 }
 

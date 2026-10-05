@@ -1767,13 +1767,13 @@ test('OPT-028 draft executor persists one scoped Comfy job and private artifact 
   const http=require('node:http');
   const sharp=require('sharp');
   const png=await sharp({create:{width:32,height:32,channels:3,background:'#3659ad'}}).png().toBuffer();
-  let submissions=0;
+  let submissions=0,holdHistory=false,waitingHistory=[];
   const comfy=http.createServer((req,res)=>{
     res.setHeader('content-type',req.url.startsWith('/view')?'image/png':'application/json');
     if(req.url==='/system_stats')return res.end(JSON.stringify({system:{comfyui_version:'test'}}));
     if(req.url==='/object_info')return res.end(JSON.stringify({CheckpointLoaderSimple:{input:{required:{ckpt_name:[['test.safetensors']]}}},CLIPTextEncode:{},EmptyLatentImage:{},KSampler:{},VAEDecode:{},SaveImage:{}}));
     if(req.url==='/prompt'){submissions++;return res.end(JSON.stringify({prompt_id:'test-prompt',node_errors:{}}));}
-    if(req.url==='/history/test-prompt')return res.end(JSON.stringify({'test-prompt':{status:{completed:true},outputs:{'7':{images:[{filename:'draft.png',subfolder:'',type:'output'}]}}}}));
+    if(req.url==='/history/test-prompt'){const respond=()=>res.end(JSON.stringify({'test-prompt':{status:{completed:true},outputs:{'7':{images:[{filename:'draft.png',subfolder:'',type:'output'}]}}}}));if(holdHistory)waitingHistory.push(respond);else respond();return;}
     if(req.url.startsWith('/view'))return res.end(png);
     res.statusCode=404;res.end('{}');
   });
@@ -1802,6 +1802,11 @@ test('OPT-028 draft executor persists one scoped Comfy job and private artifact 
   }
   const row=await db('o_v04StudioAssetDraftJob').where({id:first.job.id}).first();
   assert.equal(row.status,'SUCCEEDED');
+  const legacySnapshot=JSON.parse(row.inputSnapshotJson);
+  assert.equal(row.draftHash,require('node:crypto').createHash('sha256').update(JSON.stringify([
+    legacySnapshot.visualSpecDraft,legacySnapshot.draftPromptIR,legacySnapshot.generationIntent,
+    legacySnapshot.draftPromptIR.referenceBindings,row.executorProfile,row.workflowVersion,
+    legacySnapshot.checkpoint,legacySnapshot.baseUrl])).digest('hex'),'old NULL-purpose hash bytes preserved');
   assert.equal(submissions,1);
   const artifact=JSON.parse(row.outputsJson)[0];
   assert.equal(artifact.role,'TURNAROUND_SHEET');
@@ -1828,8 +1833,73 @@ test('OPT-028 draft executor persists one scoped Comfy job and private artifact 
     if(['SUCCEEDED','FAILED','STALE'].includes(status))break;
     await new Promise(resolve=>setTimeout(resolve,50));
   }
+  // Reference purposes share the producer, but never supersede other purposes or legacy NULL.
+  const settled=async job=>{for(let i=0;i<100;i++){const r=await db('o_v04StudioAssetDraftJob').where({id:job.id}).first();if(['SUCCEEDED','FAILED','STALE'].includes(r.status))return r;await new Promise(resolve=>setTimeout(resolve,40));}assert.fail('job did not settle');};
+  const face=await image.enqueueDraftImage({...input,executionPurpose:'FACE_HERO'});
+  assert.equal((await settled(face.job)).status,'SUCCEEDED');
+  const front=await image.enqueueDraftImage({...input,executionPurpose:'FULL_BODY_FRONT'});
+  const back=await image.enqueueDraftImage({...input,executionPurpose:'FULL_BODY_BACK'});
+  assert.equal((await settled(front.job)).status,'SUCCEEDED');assert.equal((await settled(back.job)).status,'SUCCEEDED');
+  assert.equal((await db('o_v04StudioAssetDraftJob').where({id:face.job.id}).first()).status,'SUCCEEDED');
+  assert.equal((await db('o_v04StudioAssetDraftJob').where({id:retry.job.id}).first()).status,'SUCCEEDED','legacy NULL not superseded');
+  assert.equal((await db('o_v04StudioAssetDraftJob').where({id:retry.job.id}).first()).executionPurpose,null);
+  assert.notEqual(face.job.draftHash,front.job.draftHash);
+  assert.equal((await image.enqueueDraftImage({...input,executionPurpose:'FACE_HERO'})).job.id,face.job.id);
+  const face2=await image.enqueueDraftImage({...input,executionPurpose:'FACE_HERO',force:true});
+  assert.equal((await settled(face2.job)).status,'SUCCEEDED');
+  assert.equal((await db('o_v04StudioAssetDraftJob').where({id:face.job.id}).first()).status,'STALE');
+  for(const j of [front.job,back.job])assert.equal((await db('o_v04StudioAssetDraftJob').where({id:j.id}).first()).status,'SUCCEEDED');
+  for(const j of [face2.job,front.job,back.job]){const r=await db('o_v04StudioAssetDraftJob').where({id:j.id}).first();assert.equal(JSON.parse(r.outputsJson)[0].role,r.executionPurpose);}
+  holdHistory=true;
+  const late=await image.enqueueDraftImage({...input,executionPurpose:'FACE_HERO',force:true});
+  for(let i=0;i<100&&!waitingHistory.length;i++)await new Promise(resolve=>setTimeout(resolve,20));
+  assert.ok(waitingHistory.length,'producer is held after submit');
+  const replacement=await image.enqueueDraftImage({...input,executionPurpose:'FACE_HERO',force:true});
+  holdHistory=false;for(const release of waitingHistory.splice(0))release();
+  assert.equal((await settled(replacement.job)).status,'SUCCEEDED');
+  const stale=await db('o_v04StudioAssetDraftJob').where({id:late.job.id}).first();
+  assert.equal(stale.status,'STALE');assert.equal(JSON.parse(stale.outputsJson).length,1,'late output preserved, never restored success');
+  const schema=loadSource(path.join(root,'src/v04/schema.ts'),db,cache,oss);
+  await schema.initializeV04Schema(db);await schema.initializeV04Schema(db);
+  assert.equal(await db.schema.hasColumn('o_v04StudioAssetDraftJob','executionPurpose'),true);
+  assert.equal((await db('o_v04StudioAssetDraftJob').where({id:retry.job.id}).first()).executionPurpose,null,'migration never backfills legacy purposes');
+  assert.equal((await db('o_v04AssetVisualSpec')).length,0);assert.equal((await db('o_v04AssetPromptBuild')).length,0);
   await db('o_v04Asset').where({projectId:scope.projectId,canonicalKey:'CHAR-001'}).update({sourcePolicy:'REAL_REQUIRED'});
   await assert.rejects(image.enqueueDraftImage(input),error=>error.code==='PILOT_VISUAL_REFERENCE_ONLY');
+});
+
+test('Reference Pack optional spec, derived routing and unchanged turnaround',()=>{
+  const contract=loadSource(path.join(root,'src/v04/visualSpecContract.ts'),null);
+  const pack=loadSource(path.join(root,'src/v04/characterReferencePack.ts'),null);
+  const compiler=loadSource(path.join(root,'src/v04/promptCompiler.ts'),null);
+  const asset={canonicalKey:'CHAR-001',assetKind:'HUMAN_CHARACTER',name:'Boy',description:'Boy',identityAnchors:[],mustPreserve:[],forbiddenChanges:[]};
+  const spec=contract.compileVisualSemantic(asset,{});assert.deepEqual(spec.referencePlan.required,['FACE_HERO','FULL_BODY_FRONT']);
+  const old={...spec};delete old.referencePlan;const bytes=JSON.stringify(old);
+  assert.deepEqual(contract.visualSpecSchema.parse(old),old);assert.equal(JSON.stringify(old),bytes);
+  assert.equal(pack.resolveCharacterReferencePlan(old).recommended[0],'FULL_BODY_BACK');
+  assert.equal(pack.deriveCharacterReferenceIntent(old).identityAuthority,'FACE_HERO');
+  const ir=compiler.compilePromptIR(asset,old,'CHARACTER_TURNAROUND');
+  assert.deepEqual(ir.viewIntent.map(v=>v.orientation),['FRONT','LEFT_PROFILE','BACK','THREE_QUARTER']);
+  assert.match(compiler.renderGenericPrompt(ir).text,/four-view character turnaround/);
+  const refs=['FACE_HERO','FULL_BODY_FRONT','FULL_BODY_BACK'].map(role=>({role}));
+  const route=(framing,view,available=refs)=>pack.resolveCharacterReferencesForShot({framing,view},available).map(r=>r.role);
+  assert.deepEqual(route('CLOSE_UP','FRONT'),['FACE_HERO']);assert.deepEqual(route('FULL_BODY','FRONT'),['FULL_BODY_FRONT','FACE_HERO']);
+  assert.deepEqual(route('MEDIUM','BACK'),['FULL_BODY_BACK']);assert.deepEqual(route('FULL_BODY','LEFT'),['FACE_HERO','FULL_BODY_FRONT']);
+  assert.deepEqual(route('FULL_BODY','LEFT',[...refs,{role:'SIDE_SPECIAL_LEFT'}]),['SIDE_SPECIAL_LEFT','FACE_HERO']);
+  assert.deepEqual(route('FULL_BODY','RIGHT',[...refs,{role:'SIDE_SPECIAL_RIGHT'}]),['SIDE_SPECIAL_RIGHT','FACE_HERO']);
+  assert.deepEqual(route('CLOSE_UP','FRONT',[]),[]);
+});
+
+test('Reference Pack additive migration upgrades old job table without rewriting history',async t=>{
+  const {db,cache,oss}=await fixture(t);
+  await db.schema.alterTable('o_v04StudioAssetDraftJob',table=>table.dropColumn('executionPurpose'));
+  const old={id:'legacy-job',projectId:1,scriptId:2,canonicalKey:'CHAR-001',sourceAssetRevision:1,draftHash:'unchanged',
+    generationIntent:'CHARACTER_TURNAROUND',executorType:'COMFY_LOCAL',executorProfile:'LOCAL_DRAFT_V1',workflowVersion:'local-sdxl-draft-v1',status:'SUCCEEDED',
+    comfyPromptId:null,inputSnapshotJson:'{}',outputsJson:'[]',errorCode:null,errorMessage:null,attemptCount:1,createdAt:10,startedAt:10,completedAt:11,updatedAt:11};
+  await db('o_v04StudioAssetDraftJob').insert(old);
+  const schema=loadSource(path.join(root,'src/v04/schema.ts'),db,cache,oss);
+  await schema.initializeV04Schema(db);await schema.initializeV04Schema(db);
+  assert.deepEqual(await db('o_v04StudioAssetDraftJob').where({id:old.id}).first(),{...old,executionPurpose:null});
 });
 
 test('OPT-028B Z-Image subject profile compiles a short English prompt and preserves the verified workflow topology',()=>{

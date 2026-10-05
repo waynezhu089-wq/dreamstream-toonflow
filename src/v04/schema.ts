@@ -30,6 +30,8 @@ export async function initializeV04Schema(db: Knex) {
     t.index(["projectId", "scriptId", "canonicalKey", "createdAt"], "v04_draft_job_scope_idx");
     t.index(["status", "createdAt"], "v04_draft_job_queue_idx");
   });
+  if (!await db.schema.hasColumn("o_v04StudioAssetDraftJob", "executionPurpose"))
+    await db.schema.alterTable("o_v04StudioAssetDraftJob", t => { t.text("executionPurpose").nullable(); });
   if (!await db.schema.hasTable("o_v04StudioDraftArtifact")) await db.schema.createTable("o_v04StudioDraftArtifact", t => {
     t.text("artifactId").primary(); t.text("jobId").notNullable().index();
     t.integer("projectId").notNullable().index(); t.text("mimeType").notNullable();

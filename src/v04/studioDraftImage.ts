@@ -12,11 +12,13 @@ import { awaitDraft, buildDraftWorkflow, downloadDraft, DraftComfyError, draftWo
   draftProfiles, LOCAL_DRAFT_V1, localComfyOrigin, submitDraft } from "./comfyDraftClient";
 import { Z_IMAGE_SUBJECT_RENDERING_V1, Z_IMAGE_TURBO_SUBJECT_DRAFT_V1, zImageSubjectPrompt } from "./zImageSubjectProfile";
 
+import { executionPurposes, characterReferenceExecutionPrompt, CHARACTER_REFERENCE_PACK_V1, type ExecutionPurpose } from "./characterReferencePack";
+
 const q = db as Knex;
 const scope = z.object({ projectId: z.number().int().positive(), scriptId: z.number().int().positive() }).strict();
 const target = scope.extend({ canonicalKey: z.string().min(1).max(128) });
 const draftInput = target.extend({ sourceAssetRevision: z.number().int().positive(), visualSpecDraft: visualSpecSchema,
-  force: z.boolean().default(false), width: z.number().int().min(512).max(1536).multipleOf(64).optional(),
+  executionPurpose: z.enum(executionPurposes).optional(), force: z.boolean().default(false), width: z.number().int().min(512).max(1536).multipleOf(64).optional(),
   height: z.number().int().min(512).max(1536).multipleOf(64).optional(),
   seed: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional() }).strict();
 const configInput = z.object({ projectId: z.number().int().positive(), baseUrl: z.string().max(300),
@@ -79,13 +81,15 @@ async function sourceSnapshot(data: z.infer<typeof draftInput>) {
     draftRenderedPrompt: candidate.draftRenderedPrompt, generationIntent: candidate.generationIntent };
 }
 
-function snapshotHash(source: any, config: any, zOptions?: { width: number; height: number; requestedSeed?: number }) {
+function snapshotHash(source: any, config: any, zOptions?: { width: number; height: number; requestedSeed?: number; executionPurpose?: ExecutionPurpose | null }) {
   const profile = config.executorProfile ?? LOCAL_DRAFT_V1;
   const parts = [source.visualSpecDraft, source.draftPromptIR, source.generationIntent,
     source.draftPromptIR.referenceBindings, profile, draftWorkflowVersion(profile), config.checkpoint, config.baseUrl];
   // Preserve the Phase A hash bytes for existing LOCAL_DRAFT_V1 jobs.
   if (profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1) parts.push(zOptions?.width ?? 1024, zOptions?.height ?? 1024,
     zOptions?.requestedSeed ?? null, Z_IMAGE_SUBJECT_RENDERING_V1, zImageSubjectPrompt(source.draftPromptIR));
+  if (zOptions?.executionPurpose) parts.push(CHARACTER_REFERENCE_PACK_V1, zOptions.executionPurpose,
+    characterReferenceExecutionPrompt(source.draftPromptIR, zOptions.executionPurpose));
   return hash(parts);
 }
 
@@ -103,9 +107,11 @@ export async function enqueueDraftImage(input: unknown) {
     if (profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 &&
         (source.generationIntent !== "CHARACTER_TURNAROUND" || source.visualSpecDraft.assetKind !== "HUMAN_CHARACTER"))
       throw new PilotError("WORKFLOW_UNAVAILABLE", "Z-Image 实验 profile 目前仅支持人物主视图", 409);
+    if (data.executionPurpose && source.visualSpecDraft.assetKind !== "HUMAN_CHARACTER")
+      throw new PilotError("WORKFLOW_UNAVAILABLE", "人物参考用途仅支持 HUMAN_CHARACTER", 409);
     const width = profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? data.width ?? 1024 : 512;
     const height = profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? data.height ?? 1024 : 512;
-    const zOptions = { width, height, requestedSeed: data.seed };
+    const zOptions = { width, height, requestedSeed: data.seed, executionPurpose: data.executionPurpose };
     const draftHash = snapshotHash(source, config, zOptions);
     const existing = await trx("o_v04StudioAssetDraftJob").where({ projectId: data.projectId, scriptId: data.scriptId,
       canonicalKey: data.canonicalKey, sourceAssetRevision: data.sourceAssetRevision, draftHash })
@@ -115,19 +121,19 @@ export async function enqueueDraftImage(input: unknown) {
     const now = Date.now();
     const job = { id: randomUUID(), projectId: data.projectId, scriptId: data.scriptId,
       canonicalKey: data.canonicalKey, sourceAssetRevision: data.sourceAssetRevision, draftHash,
-      generationIntent: source.generationIntent, executorType: "COMFY_LOCAL", executorProfile: profile,
+      generationIntent: source.generationIntent, executionPurpose: data.executionPurpose ?? null, executorType: "COMFY_LOCAL", executorProfile: profile,
       workflowVersion: draftWorkflowVersion(profile), status: "QUEUED", comfyPromptId: null,
       inputSnapshotJson: JSON.stringify({ ...source, checkpoint: config.checkpoint, baseUrl: config.baseUrl,
         width, height, requestedSeed: data.seed ?? null, seed: data.seed ?? parseInt(draftHash.slice(0, 12), 16),
-        executionPurpose: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? "SUBJECT_MAIN_PREVIEW" : null,
+        executionPurpose: data.executionPurpose ?? (profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? "SUBJECT_MAIN_PREVIEW" : null),
         renderingLanguageVersion: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? Z_IMAGE_SUBJECT_RENDERING_V1 : null,
-        executionPrompt: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? zImageSubjectPrompt(source.draftPromptIR) : null }),
+        executionPrompt: data.executionPurpose ? characterReferenceExecutionPrompt(source.draftPromptIR, data.executionPurpose) : profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? zImageSubjectPrompt(source.draftPromptIR) : null }),
       outputsJson: "[]", errorCode: null, errorMessage: null,
       attemptCount: existing ? Number(existing.attemptCount) + 1 : 1,
       createdAt: now, startedAt: null, completedAt: null, updatedAt: now };
     await trx("o_v04StudioAssetDraftJob").insert(job);
     await trx("o_v04StudioAssetDraftJob").where({ projectId: data.projectId, scriptId: data.scriptId,
-      canonicalKey: data.canonicalKey }).whereNot({ id: job.id }).whereIn("status", ["QUEUED", "RUNNING", "SUCCEEDED"])
+      canonicalKey: data.canonicalKey }).where({ executionPurpose: data.executionPurpose ?? null }).whereNot({ id: job.id }).whereIn("status", ["QUEUED", "RUNNING", "SUCCEEDED"])
       .update({ status: "STALE", updatedAt: now });
     return { job, reused: false };
   });
@@ -138,7 +144,7 @@ export async function enqueueDraftImage(input: unknown) {
 function publicJob(job: any) {
   return { id: job.id, projectId: job.projectId, scriptId: job.scriptId, canonicalKey: job.canonicalKey,
     sourceAssetRevision: job.sourceAssetRevision, draftHash: job.draftHash, generationIntent: job.generationIntent,
-    executorProfile: job.executorProfile, executionPurpose: job.executorProfile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? "SUBJECT_MAIN_PREVIEW" : null,
+    executorProfile: job.executorProfile, executionPurpose: job.executionPurpose ?? (job.executorProfile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? "SUBJECT_MAIN_PREVIEW" : null),
     workflowVersion: job.workflowVersion, status: job.status,
     attemptCount: job.attemptCount, outputs: JSON.parse(job.outputsJson), errorCode: job.errorCode,
     errorMessage: job.errorMessage, createdAt: job.createdAt, updatedAt: job.updatedAt };
@@ -202,7 +208,7 @@ async function produce(job: any, freshClaim: boolean) {
       catch { await q("o_v04StudioAssetDraftJob").where({ id: job.id, status: "RUNNING" }).update({ status: "STALE", errorCode: "STALE_JOB", updatedAt: Date.now() }); return; }
       const config = await q("o_v04StudioImageExecutorConfig").where({ projectId: job.projectId }).first();
       if (!config?.enabled || snapshotHash(source, config, { width: snapshot.width ?? 1024,
-        height: snapshot.height ?? 1024, requestedSeed: snapshot.requestedSeed ?? undefined }) !== job.draftHash) {
+        height: snapshot.height ?? 1024, requestedSeed: snapshot.requestedSeed ?? undefined, executionPurpose: job.executionPurpose }) !== job.draftHash) {
         await q("o_v04StudioAssetDraftJob").where({ id: job.id, status: "RUNNING" }).update({ status: "STALE", errorCode: "STALE_JOB", updatedAt: Date.now() });
         return;
       }
@@ -210,11 +216,12 @@ async function produce(job: any, freshClaim: boolean) {
     const base = localComfyOrigin(snapshot.baseUrl);
     const profile = job.executorProfile ?? LOCAL_DRAFT_V1;
     const workflow = buildDraftWorkflow({ intent: job.generationIntent, checkpoint: snapshot.checkpoint,
-      positive: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? snapshot.executionPrompt : snapshot.draftRenderedPrompt.text,
+      positive: job.executionPurpose ? snapshot.executionPrompt : profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? snapshot.executionPrompt : snapshot.draftRenderedPrompt.text,
       negative: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? "" : snapshot.draftRenderedPrompt.negative || "",
       seed: snapshot.seed ?? parseInt(job.draftHash.slice(0, 12), 16), profile,
       width: snapshot.width, height: snapshot.height,
       filenamePrefix: profile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? `DreamStreamV04ZSubject_${job.id.slice(0, 8)}` : undefined });
+    if (job.executionPurpose) workflow.role = job.executionPurpose === "SUBJECT_MAIN_PREVIEW" ? "MAIN_PREVIEW" : job.executionPurpose;
     const inspection = await inspectComfy(base, profile);
     if (inspection.status === "UNAVAILABLE") throw new DraftComfyError("COMFY_OFFLINE", "本地 ComfyUI 未运行");
     if (inspection.missingNodes.length) throw new DraftComfyError("NODE_MISSING", "本地 ComfyUI 缺少草图节点");
@@ -239,7 +246,7 @@ async function produce(job: any, freshClaim: boolean) {
     const currentConfig = await q("o_v04StudioImageExecutorConfig").where({ projectId: job.projectId }).first();
     const stillFresh = source && currentConfig?.enabled && snapshotHash(source, currentConfig, {
       width: snapshot.width ?? 1024, height: snapshot.height ?? 1024,
-      requestedSeed: snapshot.requestedSeed ?? undefined }) === job.draftHash;
+      requestedSeed: snapshot.requestedSeed ?? undefined, executionPurpose: job.executionPurpose }) === job.draftHash;
     await q.transaction(async trx => {
       await trx("o_v04StudioDraftArtifact").insert({ artifactId, jobId: job.id, projectId: job.projectId,
         mimeType: downloaded.mimeType, extension: downloaded.extension, role: workflow.role,
