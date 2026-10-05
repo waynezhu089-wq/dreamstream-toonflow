@@ -74,8 +74,11 @@ export async function inspectOperations(input: unknown) {
       queue:queue?{running:queue.queue_running?.length??null,pending:queue.queue_pending?.length??null}:null};
     for(const profile of registry){
       const missingNodes=profile.requiredNodes.filter(n=>!nodes[n]);
+      const discoveredModels=profile.models.map(m=>({node:m.node,field:m.field,
+        files:Array.isArray(nodes[m.node]?.input?.required?.[m.field]?.[0])?nodes[m.node].input.required[m.field][0]:[],
+        enumerationAvailable:Array.isArray(nodes[m.node]?.input?.required?.[m.field]?.[0])}));
       const missingModels=profile.models.filter(m=>{const options=nodes[m.node]?.input?.required?.[m.field]?.[0];return !Array.isArray(options)||!options.includes(m.file);}).map(m=>m.file);
-      Object.assign(profile,{health:missingNodes.length?'MISSING_NODE':missingModels.length?'MISSING_MODEL':'READY',missingNodes,missingModels});
+      Object.assign(profile,{health:missingNodes.length?'MISSING_NODE':missingModels.length?'MISSING_MODEL':'READY',missingNodes,missingModels,discoveredModels});
     }
   }catch{for(const p of registry)Object.assign(p,{health:'UNKNOWN',missingNodes:[],missingModels:[]});}
   return {environment:'EXPERIMENTAL',stable:'PROTECTED',backend:{status:'ONLINE',commit:loadedCommit,dataDirectory:getPath()},comfy,registry:registry.map(p=>({...p,sourceCommit:loadedCommit})),
