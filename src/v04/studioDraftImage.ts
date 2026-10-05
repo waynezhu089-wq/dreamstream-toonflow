@@ -9,8 +9,10 @@ import getPath from "@/utils/getPath";
 import { PilotError } from "./service";
 import { compileStudioDraftPrompts } from "./visualSpec";
 import { visualSpecSchema } from "./visualSpecContract";
+import {submitTracedDraft,failSubmittedTrace} from './tracedDraftSubmit';
+import {settleJobTraces} from './executionTrace';
 import { awaitDraft, buildDraftWorkflow, downloadDraft, DraftComfyError, draftWorkflowVersion, inspectComfy,
-  draftProfiles, LOCAL_DRAFT_V1, localComfyOrigin, submitDraft } from "./comfyDraftClient";
+  draftProfiles, LOCAL_DRAFT_V1, localComfyOrigin } from "./comfyDraftClient";
 import { Z_IMAGE_SUBJECT_RENDERING_V1, Z_IMAGE_TURBO_SUBJECT_DRAFT_V1, zImageSubjectPrompt } from "./zImageSubjectProfile";
 
 import { executionPurposes, characterReferenceExecutionPrompt, CHARACTER_REFERENCE_PACK_V1, type ExecutionPurpose } from "./characterReferencePack";
@@ -231,8 +233,9 @@ async function produce(job: any, freshClaim: boolean) {
     if (inspection.missingNodes.length) throw new DraftComfyError("NODE_MISSING", "本地 ComfyUI 缺少草图节点");
     if (inspection.missingModels.length) throw new DraftComfyError("MODEL_MISSING", "本地 ComfyUI 缺少 Z-Image 模型文件");
     if (!inspection.checkpoints.includes(snapshot.checkpoint)) throw new DraftComfyError("MODEL_MISSING", "配置的 checkpoint 已不存在");
-    const promptId = job.comfyPromptId ?? await submitDraft(base, workflow);
+    const promptId = job.comfyPromptId ?? await submitTracedDraft(base, workflow, job);
     if (!job.comfyPromptId) await q("o_v04StudioAssetDraftJob").where({ id: job.id }).update({ comfyPromptId: promptId, updatedAt: Date.now() });
+    job.comfyPromptId = promptId;
     const image = await awaitDraft(base, promptId, workflow.outputNode);
     const downloaded = await downloadDraft(base, image);
     const artifactId = randomUUID();
@@ -264,7 +267,8 @@ async function produce(job: any, freshClaim: boolean) {
     });
   } catch (error) {
     const failure = safeFailure(error);
+    await failSubmittedTrace(job,failure.code);
     await q("o_v04StudioAssetDraftJob").where({ id: job.id, status: "RUNNING" }).update({ status: "FAILED",
       errorCode: failure.code, errorMessage: failure.message, completedAt: Date.now(), updatedAt: Date.now() });
-  }
+  } finally { await settleJobTraces(job.id); }
 }

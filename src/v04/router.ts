@@ -1,3 +1,4 @@
+import {inspectOperations,recentExecutions,executionDetail,workflowExample,previewRouting,applyRouting} from './operations';
 import {listImageBaselines,previewImageBaseline,confirmImageBaseline} from './assetImageBaseline';
 import { listAssetImageCandidates, previewAssetImageCandidate, acceptAssetImageCandidate, rejectAssetImageCandidate } from "./assetImageEdit";
 import express from "express";
@@ -51,6 +52,12 @@ function endpoint(route: string, run: (body: any, req: express.Request) => Promi
   });
 }
 endpoint("/projects", async (_body, req) => listPilotProjects(Number((req as any).user.id)));
+endpoint('/operations/status',inspectOperations);
+endpoint('/operations/executions',recentExecutions);
+endpoint('/operations/execution',executionDetail);
+endpoint('/operations/workflow/example',async input=>workflowExample(input));
+endpoint('/operations/routing/preview',input=>previewRouting(input));
+endpoint('/operations/routing/apply',(input,req)=>applyRouting(input,Number((req as any).user.id)));
 endpoint("/project/create", (body, req) => createPilotProject(body, Number((req as any).user.id)));
 endpoint("/project/read", input => readPilot(input));
 endpoint("/creative/preview", previewCreative);

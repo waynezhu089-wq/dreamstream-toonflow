@@ -39,7 +39,7 @@ $env:DS_PORT = '10589'
 $env:DS_STUDIO_OWNER_USER_ID = if ($OwnerUserId -gt 0) { [string]$OwnerUserId } else { '' }
 $env:DS_REVISION_CONFIRM_ENABLED = if ($OwnerUserId -gt 0) { 'true' } else { 'false' }
 $backend = if (-not $backendRunning) { Start-Process -FilePath 'cmd.exe' -ArgumentList '/d','/c','node_modules\.bin\tsx.cmd src\app.ts' -WorkingDirectory $backendRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir 'backend.out.log') -RedirectStandardError (Join-Path $logDir 'backend.err.log') -PassThru } else { $null }
-$frontend = if (-not $frontendRunning) { Start-Process -FilePath 'cmd.exe' -ArgumentList '/d','/c','node_modules\.bin\vite.cmd --host 127.0.0.1 --port 50189 --strictPort' -WorkingDirectory $frontendRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir 'frontend.out.log') -RedirectStandardError (Join-Path $logDir 'frontend.err.log') -PassThru } else { $null }
+$frontend = if (-not $frontendRunning) { Start-Process -FilePath 'cmd.exe' -ArgumentList '/d','/c','node_modules\.bin\vite.cmd --config vite.config.ts --host 127.0.0.1 --port 50189 --strictPort' -WorkingDirectory $frontendRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir 'frontend.out.log') -RedirectStandardError (Join-Path $logDir 'frontend.err.log') -PassThru } else { $null }
 Write-Output "Backend: $(if($backend){'started PID '+$backend.Id}else{'already running'}); Frontend: $(if($frontend){'started PID '+$frontend.Id}else{'already running'})"
 Write-Output "Studio: http://127.0.0.1:50189/#/studio"
 Write-Output "Professional: http://127.0.0.1:50189/#/professional"

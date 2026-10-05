@@ -179,6 +179,21 @@ export async function initializeV04Schema(db: Knex) {
     t.text("reuseMode").nullable(); t.integer("createdAt").notNullable(); t.integer("updatedAt").notNullable();
     t.primary(["projectId", "canonicalKey"]);
   });
+  // Experimental operations evidence only; never Project Truth.
+  if (!await db.schema.hasTable('o_v04ExecutionTrace')) await db.schema.createTable('o_v04ExecutionTrace', t => {
+    t.text('id').primary(); t.text('jobId').notNullable(); t.bigInteger('projectId').notNullable(); t.integer('scriptId');
+    for (const key of ['canonicalKey','generationIntent','executionPurpose','executorType','executorProfile','workflowVersion',
+      'workflowSourceType','workflowGraphHash','workflowGraphJson','comfyPromptId','parametersJson','modelsJson','sourcesJson',
+      'referencesJson','outputArtifactIdsJson','status','errorCode','errorDetail']) t.text(key);
+    for (const key of ['createdAt','updatedAt','submittedAt','completedAt']) t.bigInteger(key);
+    t.index(['projectId','createdAt']); t.index(['jobId','comfyPromptId']);
+  });
+  if (!await db.schema.hasTable('o_v04RoutingChange')) await db.schema.createTable('o_v04RoutingChange', t => {
+    t.bigInteger('projectId').notNullable(); t.integer('version').notNullable(); t.text('requestId').notNullable();
+    t.text('requestHash').notNullable(); t.text('previewHash').notNullable(); t.text('routesJson').notNullable();
+    t.text('disabledProfilesJson').notNullable(); t.integer('actorUserId').notNullable(); t.bigInteger('createdAt').notNullable();
+    t.primary(['projectId','version']); t.unique(['projectId','requestId']);
+  });
   // Previously confirmed experimental identities get an honest review plan on upgrade.
   // Existing media and production bindings are never changed by this backfill.
   const missingPlans = await db("o_v04AssetBinding as binding")

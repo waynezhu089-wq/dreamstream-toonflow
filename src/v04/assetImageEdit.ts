@@ -10,8 +10,11 @@ import {getDraftArtifact,wakeDraftWorker} from './studioDraftImage';
 import {getAgentAttachmentBytes} from './agentAttachments';
 import {imageEditIntent,sourceRolePriority,editExecutionPrompt,type ImageEditIntent} from './assetImageEditContract';
 import {buildKreaEditWorkflow,kreaModels,KREA_EDIT_WORKFLOW_VERSION,uploadEditInput} from './kreaImageEditProfile';
-import {localComfyOrigin,submitDraft,awaitDraft,downloadDraft,DraftComfyError} from './comfyDraftClient';
+import {localComfyOrigin,awaitDraft,downloadDraft,DraftComfyError} from './comfyDraftClient';
 import {baselinesInTransaction,suitableBaseline,recordCandidateBaseline} from './assetImageBaseline';
+import {resolveEditRouting} from './operations';
+import {submitTracedDraft,failSubmittedTrace} from './tracedDraftSubmit';
+import {settleJobTraces} from './executionTrace';
 const q=db as Knex;
 const sha=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const bytesHash=(v:Buffer)=>createHash('sha256').update(v).digest('hex');
@@ -48,15 +51,16 @@ async function capture(trx:Knex.Transaction,scope:{projectId:number;scriptId:num
  const spec=await trx('o_v04AssetVisualSpec').where({projectId:scope.projectId,canonicalKey:asset.canonicalKey,status:'CONFIRMED'}).orderBy('revision','desc').first();
  const config=await trx('o_v04StudioImageExecutorConfig').where({projectId:scope.projectId}).first();
  const baseUrl=localComfyOrigin(config?.baseUrl??'http://127.0.0.1:8188');
+ const routing=await resolveEditRouting(trx,scope.projectId,intent.editMode==='DERIVE_VIEW'?'DERIVE_VIEW':intent.referenceBindings.length?'REFERENCE_EDIT':'SOURCE_EDIT');
  return {asset:{canonicalKey:asset.canonicalKey,revision:asset.revision,category:asset.category,sourcePolicy:asset.sourcePolicy},
   sourceType:sourceAttachment?'ATTACHMENT':'ARTIFACT',sourceAttachmentId:sourceAttachment?.id??null,sourceAttachmentHash:sourceAttachment?.sha256??null,baselineVersion:baseline?.version??null,baselineRole:baseline?.role??null,
   sourceArtifactId:artifact?.artifactId??null,sourceJobId:source?.id??null,parentCandidateId:source?.generationIntent==='ASSET_IMAGE_EDIT'?source.id:null,
-  sourceSpecHash:spec?sha(spec):null,referenceBindings:refs,referenceArtifactIds:refs.map(r=>r.sourceArtifactId).filter(Boolean),uploadedReferenceIds:refs.filter(r=>r.purpose==='CONVERSATIONAL_REFERENCE').map(r=>r.attachmentId),baseUrl,intent};
+  sourceSpecHash:spec?sha(spec):null,referenceBindings:refs,referenceArtifactIds:refs.map(r=>r.sourceArtifactId).filter(Boolean),uploadedReferenceIds:refs.filter(r=>r.purpose==='CONVERSATIONAL_REFERENCE').map(r=>r.attachmentId),baseUrl,intent,routing};
 }
 export async function enqueueAssetImageEdit(scope:{projectId:number;scriptId:number},raw:unknown,userMessageId:string,parentCandidateId?:string){
  const intent=imageEditIntent.parse(raw);
  const snapshot=await q.transaction(trx=>capture(trx,scope,intent,parentCandidateId));
- const profile=intent.editMode==='DERIVE_VIEW'?'KREA2_DERIVE_CHARACTER_REFERENCE_V1':intent.referenceBindings.length?'KREA2_REFERENCE_EDIT_V1':'KREA2_SOURCE_EDIT_V1';
+ const profile=snapshot.routing.profile;
  const source=snapshot.sourceAttachmentId?await getAgentAttachmentBytes(scope.projectId,snapshot.sourceAttachmentId):await getDraftArtifact(scope.projectId,snapshot.sourceArtifactId!);
  const referenceHashes=await Promise.all(snapshot.referenceBindings.map(async r=>{const file=await getAgentAttachmentBytes(scope.projectId,r.attachmentId);if(bytesHash(file.bytes)!==r.sha256)throw new PilotError('PILOT_REFERENCE_INVALID','参考图片内容已变化',409);return r.sha256;}));
  const sourceSha256=bytesHash(source.bytes),executionPrompt=editExecutionPrompt(intent);
@@ -100,7 +104,7 @@ export async function produceAssetImageEdit(job:any,freshClaim:boolean){
    const sourceImage=await uploadEditInput(base,src.bytes,`ds-edit-${job.id}-source.png`);let referenceImage:string|undefined;
    if(snapshot.referenceBindings.length){const ref=await getAgentAttachmentBytes(job.projectId,snapshot.referenceBindings[0].attachmentId);if(bytesHash(ref.bytes)!==snapshot.referenceBindings[0].sha256)throw new DraftComfyError('SOURCE_CHANGED','参考图片内容已变化');referenceImage=await uploadEditInput(base,ref.bytes,`ds-edit-${job.id}-reference.png`);}
    workflow=buildKreaEditWorkflow({profile:job.executorProfile,prompt:snapshot.executionPrompt,seed:snapshot.seed,width:snapshot.recovery?.width??snapshot.width,height:snapshot.recovery?.height??snapshot.height,sourceImage,referenceImage,targetRole:job.executionPurpose,jobId:job.id});
-   const promptId=await submitDraft(base,workflow);await q('o_v04StudioAssetDraftJob').where({id:job.id,status:'RUNNING'}).update({comfyPromptId:promptId,updatedAt:Date.now()});job.comfyPromptId=promptId;
+   const promptId=await submitTracedDraft(base,workflow,job);await q('o_v04StudioAssetDraftJob').where({id:job.id,status:'RUNNING'}).update({comfyPromptId:promptId,updatedAt:Date.now()});job.comfyPromptId=promptId;
   }
   const image=await awaitDraft(base,job.comfyPromptId,'22',900000),output=await downloadDraft(base,image);
   const artifactId=randomUUID(),createdAt=Date.now(),file=getPath(['v04-draft-artifacts',String(job.projectId),`${artifactId}.${output.extension}`]);
@@ -114,6 +118,7 @@ export async function produceAssetImageEdit(job:any,freshClaim:boolean){
   });
  }catch(error){
   const code=error instanceof DraftComfyError?error.code:'EXECUTION_FAILED';console.error('[V04 AssetEdit]',{jobId:job.id,code,errorName:error instanceof Error?error.name:'Error'});
+  await failSubmittedTrace(job,code);
   // Only a confirmed terminal OOM may submit once more. Lost submission or
   // transport responses never authorize an automatic duplicate execution.
   if(code==='OUT_OF_MEMORY'&&!snapshot.recovery&&snapshot.fallbackPolicy?.maxAttempts===2){
@@ -123,7 +128,7 @@ export async function produceAssetImageEdit(job:any,freshClaim:boolean){
    return;
   }
   await q('o_v04StudioAssetDraftJob').where({id:job.id,status:'RUNNING'}).update({status:'FAILED',errorCode:code,errorMessage:code==='EXECUTION_UNCERTAIN'?'上次请求结果未确认，现有素材没有被替换。请先核对结果，再决定是否重试。':'这次生成没有成功，我没有替换现有资产。可以重新尝试。',completedAt:Date.now(),updatedAt:Date.now()});
- }
+ }finally{await settleJobTraces(job.id);}
 }
 export async function listAssetImageCandidates(input:unknown){const scope=scopeSchema.parse(input);return q.transaction(async trx=>{
  await assertScope(trx,scope);const rows=await trx('o_v04StudioAssetDraftJob').where({...scope,generationIntent:'ASSET_IMAGE_EDIT'}).orderBy('createdAt','desc').limit(100);
