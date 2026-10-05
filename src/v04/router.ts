@@ -120,6 +120,7 @@ endpoint("/agent/studio-turn", async input => {
   const data = studioTurnRequest.parse(input);
   await readPilot({ projectId: data.context.projectId, scriptId: data.context.scriptId });
   const attachments = await attachmentsForMessage(data.context.projectId, data.attachmentIds);
+  if(attachments.some(a=>a.scriptId!==data.context.scriptId))throw new PilotError('PILOT_ATTACHMENT_INVALID','参考图片不属于当前制作单元',409);
   const key = memoryKey(data.context.projectId);
   const userMessageId = randomUUID();
   let embedding: number[] | null = null;
@@ -127,7 +128,7 @@ endpoint("/agent/studio-turn", async input => {
   catch (error) { if (!missingLocalEmbedding(error)) throw error; }
   await db.transaction(async trx => {
     const changed = attachments.length ? await trx("o_v04AgentAttachment")
-      .where({projectId:data.context.projectId,messageId:null}).whereIn("id",attachments.map(a=>a.id))
+      .where({projectId:data.context.projectId,scriptId:data.context.scriptId,messageId:null}).whereIn("id",attachments.map(a=>a.id))
       .update({messageId:userMessageId,scriptId:data.context.scriptId,contextJson:JSON.stringify(data.context)}) : 0;
     if(changed!==attachments.length)throw new PilotError("PILOT_ATTACHMENT_INVALID","图片已在其他消息中使用",409);
     await trx("memories").insert({ id: userMessageId, isolationKey: key, type: "message", role: "user", content: data.message,
