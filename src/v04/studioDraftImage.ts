@@ -152,7 +152,7 @@ function publicJob(job: any) {
     executorProfile: job.executorProfile, executionPurpose: job.executionPurpose ?? (job.executorProfile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? "SUBJECT_MAIN_PREVIEW" : null),
     workflowVersion: job.workflowVersion, status: job.status,
     attemptCount: job.attemptCount, outputs: JSON.parse(job.outputsJson), errorCode: job.errorCode,
-    errorMessage: job.errorMessage, createdAt: job.createdAt, updatedAt: job.updatedAt };
+    errorMessage: job.errorMessage, startedAt: job.startedAt ?? null, completedAt: job.completedAt ?? null, createdAt: job.createdAt, updatedAt: job.updatedAt };
 }
 
 export async function listDraftJobs(input: unknown) {

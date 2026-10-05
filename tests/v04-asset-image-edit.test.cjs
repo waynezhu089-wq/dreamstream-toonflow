@@ -316,3 +316,12 @@ test('OPT-029B real worker with fake Comfy traces exact T2I graph and preserves 
  oom=true;await auto.reconcileAutoAssets({...input,regenerateKey:asset.canonicalKey,requestId:randomUUID()});job=await f.db('o_v04StudioAssetDraftJob').whereNot({id:job.id}).first();await f.db('o_v04StudioAssetDraftJob').where({id:job.id}).update({status:'RUNNING'});await auto.produceAutoAsset(job,true);result=await f.db('o_v04StudioAssetDraftJob').where({id:job.id}).first();assert.equal(result.status,'QUEUED');assert.equal(result.attemptCount,2);assert.equal(JSON.parse(result.inputSnapshotJson).width,512);
  await f.db('o_v04StudioAssetDraftJob').where({id:job.id}).update({status:'RUNNING'});await auto.produceAutoAsset(result,true);assert.equal((await f.db('o_v04StudioAssetDraftJob').where({id:job.id}).first()).status,'FAILED');assert.equal(prompts,3);assert.deepEqual(await f.db('o_v04Asset'),before);assert.equal((await f.db('o_v04StudioAssetDraftJob').where({status:'SUCCEEDED'})).length,1);
 });
+
+ test('02A public draft and edit candidate DTO preserve persisted timing including legacy null',async t=>{
+ const f=await editFixture(t),id=randomUUID();await f.mod.enqueueAssetImageEdit(f.scope,f.intent,id);
+ let c=(await f.mod.listAssetImageCandidates(f.scope)).find(j=>j.id===id);assert.equal(c.startedAt,null);assert.equal(c.completedAt,null);assert.equal(c.generationIntent,'ASSET_IMAGE_EDIT');assert.equal(c.automatic,false);
+ await f.db('o_v04StudioAssetDraftJob').where({id}).update({startedAt:1234,completedAt:5678,updatedAt:5678});c=(await f.mod.listAssetImageCandidates(f.scope)).find(j=>j.id===id);assert.equal(c.startedAt,1234);assert.equal(c.completedAt,5678);assert.equal(c.updatedAt,5678);
+ const cache=new Map(f.cache);cache.delete(path.join(root,'src/v04/studioDraftImage.ts'));const drafts=loadSource(path.join(root,'src/v04/studioDraftImage.ts'),f.db,cache,f.oss);
+ let main=(await drafts.listDraftJobs(f.scope)).find(j=>j.id===f.main.id);assert.equal(main.startedAt,null);assert.equal(main.completedAt,null);
+ await f.db('o_v04StudioAssetDraftJob').where({id:f.main.id}).update({startedAt:2000,completedAt:8000});main=(await drafts.listDraftJobs(f.scope)).find(j=>j.id===f.main.id);assert.equal(main.startedAt,2000);assert.equal(main.completedAt,8000);
+ });
