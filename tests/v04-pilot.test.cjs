@@ -76,7 +76,16 @@ async function fixture(t) {
   const oss = { writeFile: async (p, bytes) => { const target=path.join(dir,'oss',p.replace(/^\//,'')); fs.mkdirSync(path.dirname(target),{recursive:true}); fs.writeFileSync(target,bytes); }, getFile: async p => fs.readFileSync(path.join(dir,'oss',p.replace(/^\//,''))), deleteFile: async p => fs.rmSync(path.join(dir,'oss',p.replace(/^\//,'')),{force:true}) };
   oss.modelCalls=[]; oss.visionCalls=0; oss.visionModel='fake:vision';
   oss.testDir=dir;
-  t.after(async () => { await db.destroy(); fs.rmSync(dir, { recursive: true, force: true }); });
+  t.after(async () => {
+    // Persisted terminal status precedes the worker finally block. Do not remove
+    // its temporary lease directory before the real asynchronous release ends.
+    const lease = path.join(dir, 'v04-draft-worker.lock');
+    const deadline = Date.now() + 5000;
+    while (fs.existsSync(lease) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(fs.existsSync(lease), false, 'temporary worker lease must release before fixture cleanup');
+    await new Promise(resolve => setImmediate(resolve));
+    await db.destroy(); fs.rmSync(dir, { recursive: true, force: true });
+  });
   await db.schema.createTable('o_project', x => { x.bigInteger('id').primary(); x.string('projectType'); x.string('type'); x.string('name'); x.text('intro'); x.string('artStyle'); x.string('directorManual'); x.string('videoRatio'); x.string('imageModel'); x.string('videoModel'); x.string('imageQuality'); x.string('mode'); x.integer('userId'); x.bigInteger('createTime'); });
   await db.schema.createTable('o_script', x => { x.increments('id'); x.bigInteger('projectId'); x.string('name'); x.text('content'); x.bigInteger('createTime'); });
   await db.schema.createTable('o_storyboard', x => { x.increments('id'); x.bigInteger('projectId'); x.integer('scriptId'); x.integer('index'); x.text('prompt'); x.integer('duration'); x.text('videoDesc'); x.text('productionSpec'); x.string('state'); x.string('filePath'); x.integer('currentImageAttemptId'); x.integer('activeImageAttemptId'); x.bigInteger('retiredAt'); });
