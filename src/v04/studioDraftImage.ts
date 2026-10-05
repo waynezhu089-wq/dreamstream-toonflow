@@ -1,3 +1,4 @@
+import { produceAssetImageEdit } from "./assetImageEdit";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -154,7 +155,9 @@ export async function listDraftJobs(input: unknown) {
   const data = scope.parse(input);
   return q.transaction(async trx => {
     await assertScope(trx, data);
-    const rows = await trx("o_v04StudioAssetDraftJob").where(data).orderBy("createdAt", "desc").limit(300);
+    // Image-edit candidates have their own review surface. They must not become
+    // Reference Pack display jobs before explicit adoption.
+    const rows = await trx("o_v04StudioAssetDraftJob").where(data).whereNot("generationIntent", "ASSET_IMAGE_EDIT").orderBy("createdAt", "desc").limit(300);
     return rows.map(publicJob);
   });
 }
@@ -196,6 +199,7 @@ export function wakeDraftWorker() {
 }
 
 async function produce(job: any, freshClaim: boolean) {
+  if (job.generationIntent === "ASSET_IMAGE_EDIT") return produceAssetImageEdit(job, freshClaim);
   try {
     const snapshot = JSON.parse(job.inputSnapshotJson);
     if (!freshClaim && !job.comfyPromptId)

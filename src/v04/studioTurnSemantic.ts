@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const studioOutput = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("ASSET_IMAGE_EDIT"), reply: z.string().min(1).max(12000), imageIntent: z.record(z.string(), z.unknown()) }).strict(),
   z.object({ mode: z.literal("DISCUSS"), reply: z.string().min(1).max(12000) }).strict(),
   z.object({ mode: z.literal("NEEDS_TARGET_CONFIRMATION"), reply: z.string().min(1).max(12000) }).strict(),
   z.object({ mode: z.literal("PROPOSE_CHANGE"), reply: z.string().min(1).max(12000),
@@ -23,6 +24,7 @@ export class StudioSemanticError extends Error {
 }
 
 const modes: Record<string, StudioOutput["mode"]> = {
+  ASSET_IMAGE_EDIT: "ASSET_IMAGE_EDIT",
   DISCUSS: "DISCUSS", DISCUSSION: "DISCUSS", "讨论": "DISCUSS",
   PROPOSE_CHANGE: "PROPOSE_CHANGE", CHANGE: "PROPOSE_CHANGE", "修改": "PROPOSE_CHANGE", "修改提案": "PROPOSE_CHANGE",
   ASSET_CREATE: "ASSET_CREATE", CREATE_ASSET: "ASSET_CREATE", "新增素材": "ASSET_CREATE", "创建资产": "ASSET_CREATE",
@@ -89,6 +91,7 @@ export function parseStudioTurnSemantic(raw: unknown): StudioOutput {
 }
 
 export const studioTurnFormat = `Return exactly one JSON object, with no markdown. Modes:\n` +
+  `ASSET_IMAGE_EDIT: {"mode":"ASSET_IMAGE_EDIT","reply":"brief reply","imageIntent":{"canonicalKey":"CHAR-001","editMode":"TEXT_EDIT","targetRole":"EDIT_CANDIDATE","editPrompt":"concise English image edit instruction","preserveIntent":{},"referenceBindings":[]}}.\n` +
   `DISCUSS: {"mode":"DISCUSS","reply":"your answer"}.\n` +
   `NEEDS_TARGET_CONFIRMATION: {"mode":"NEEDS_TARGET_CONFIRMATION","reply":"your question"}.\n` +
   `PROPOSE_CHANGE: {"mode":"PROPOSE_CHANGE","reply":"your answer","summary":"brief change","rationale":"reason","patch":{}}.\n` +

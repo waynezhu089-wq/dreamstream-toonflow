@@ -1,3 +1,4 @@
+import { listAssetImageCandidates, previewAssetImageCandidate, acceptAssetImageCandidate, rejectAssetImageCandidate } from "./assetImageEdit";
 import express from "express";
 import { createHash, randomUUID } from "node:crypto";
 import { z, ZodError } from "zod";
@@ -63,6 +64,10 @@ endpoint("/studio/executor/comfy/test", testDraftExecutor);
 endpoint("/studio/executor/comfy/configure", configureDraftExecutor);
 endpoint("/studio/executor/comfy/current", readDraftExecutor);
 endpoint("/studio/draft-image/enqueue", enqueueDraftImage);
+endpoint("/studio/image-edit/candidates", listAssetImageCandidates);
+endpoint("/studio/image-edit/preview", previewAssetImageCandidate);
+endpoint("/studio/image-edit/accept", acceptAssetImageCandidate);
+endpoint("/studio/image-edit/reject", rejectAssetImageCandidate);
 endpoint("/studio/draft-image/jobs", listDraftJobs);
 router.get("/studio/artifact/:projectId/:artifactId", async (req, res) => {
   try {
@@ -92,7 +97,7 @@ function studioAssistantId(userMessageId: string) {
 }
 async function completeStudioTurn(input: z.infer<typeof studioTurnRequest>, userMessageId: string) {
   let result: Awaited<ReturnType<typeof answerStudioTurn>>;
-  try { result = await answerStudioTurn(input); }
+  try { result = await answerStudioTurn(input, userMessageId); }
   catch (error) {
     if (error instanceof StudioTurnFailure) { error.userMessageId = userMessageId; throw error; }
     const correlationId = randomUUID();
@@ -114,13 +119,20 @@ async function completeStudioTurn(input: z.infer<typeof studioTurnRequest>, user
 endpoint("/agent/studio-turn", async input => {
   const data = studioTurnRequest.parse(input);
   await readPilot({ projectId: data.context.projectId, scriptId: data.context.scriptId });
+  const attachments = await attachmentsForMessage(data.context.projectId, data.attachmentIds);
   const key = memoryKey(data.context.projectId);
   const userMessageId = randomUUID();
   let embedding: number[] | null = null;
   try { embedding = await getEmbedding(data.message); }
   catch (error) { if (!missingLocalEmbedding(error)) throw error; }
-  await db("memories").insert({ id: userMessageId, isolationKey: key, type: "message", role: "user", content: data.message,
-    embedding: embedding ? JSON.stringify(embedding) : null, summarized: 0, createTime: Date.now() });
+  await db.transaction(async trx => {
+    const changed = attachments.length ? await trx("o_v04AgentAttachment")
+      .where({projectId:data.context.projectId,messageId:null}).whereIn("id",attachments.map(a=>a.id))
+      .update({messageId:userMessageId,scriptId:data.context.scriptId,contextJson:JSON.stringify(data.context)}) : 0;
+    if(changed!==attachments.length)throw new PilotError("PILOT_ATTACHMENT_INVALID","图片已在其他消息中使用",409);
+    await trx("memories").insert({ id: userMessageId, isolationKey: key, type: "message", role: "user", content: data.message,
+      embedding: embedding ? JSON.stringify(embedding) : null, summarized: 0, createTime: Date.now() });
+  });
   return completeStudioTurn(data, userMessageId);
 });
 const studioRetries = new Set<string>();
@@ -131,6 +143,7 @@ endpoint("/agent/studio-turn/retry", async input => {
   const user = await db("memories").where({ id: data.userMessageId, isolationKey: key, type: "message", role: "user" })
     .select("id", "content", "createTime", db.raw("rowid as sqliteRowId")).first();
   if (!user) throw new PilotError("PILOT_STUDIO_MESSAGE_NOT_FOUND", "原消息不存在于当前项目", 404);
+  if(data.attachmentIds.length){const refs=await db("o_v04AgentAttachment").where({projectId:data.context.projectId,scriptId:data.context.scriptId,messageId:user.id}).whereIn("id",data.attachmentIds);if(refs.length!==data.attachmentIds.length)throw new PilotError("PILOT_ATTACHMENT_INVALID","参考图不属于原消息",409);}
   const existing = await db("memories").where({ id: studioAssistantId(user.id), isolationKey: key, role: "assistant" }).first();
   const next = await db("memories").where({ isolationKey: key, type: "message" })
     .whereRaw("rowid > ?", [user.sqliteRowId]).orderByRaw("rowid asc").first();
@@ -138,7 +151,7 @@ endpoint("/agent/studio-turn/retry", async input => {
     throw new PilotError("PILOT_STUDIO_ALREADY_ANSWERED", "这条消息已有回复，请刷新对话", 409);
   if (studioRetries.has(user.id)) throw new PilotError("PILOT_STUDIO_RETRY_IN_PROGRESS", "这条消息正在重试，请稍后查看对话", 409);
   studioRetries.add(user.id);
-  try { return await completeStudioTurn({ context: data.context, message: user.content,
+  try { return await completeStudioTurn({ context: data.context, message: user.content, attachmentIds:data.attachmentIds, ...(data.parentCandidateId?{parentCandidateId:data.parentCandidateId}:{}),
     ...(data.optionalDraft ? { optionalDraft: data.optionalDraft } : {}) }, user.id); }
   catch (error: any) {
     if (error?.code === "SQLITE_CONSTRAINT_PRIMARYKEY" || error?.code === "SQLITE_CONSTRAINT_UNIQUE")

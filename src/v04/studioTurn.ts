@@ -1,6 +1,10 @@
+import { readAgentAttachment } from "./agentAttachments";
+import { analyzeImages } from "./visionAnalyzer";
+import { enqueueAssetImageEdit, listAssetImageCandidates, previewAssetImageCandidate, rejectAssetImageCandidate } from "./assetImageEdit";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import u from "@/utils";
+import { db } from "@/utils/db";
 import { ModelConfigError, requireModel } from "@/services/modelPreset";
 import { PilotError, readPilot } from "./service";
 import { buildProjectAgentContext, renderProjectAgentSystem } from "./agentContext";
@@ -15,6 +19,8 @@ const contextSchema = z.object({
 export const studioTurnRequest = z.object({
   context: contextSchema, message: z.string().trim().min(1).max(8000),
   optionalDraft: agentActionRequest.shape.optionalDraft,
+  attachmentIds: z.array(z.string().uuid()).max(4).default([]),
+  parentCandidateId: z.string().uuid().optional(),
 }).strict();
 export class StudioTurnFailure extends PilotError {
   readonly terminal = true;
@@ -45,23 +51,41 @@ function studioFailure(ctx: z.infer<typeof contextSchema>, stage: string, error?
     stage, correlationId, stage === "STRICT_VALIDATION_FAILED" || stage === "SEMANTIC_NORMALIZATION_FAILED" ? 422 : 502);
 }
 
-export async function answerStudioTurn(input: unknown) {
+export async function answerStudioTurn(input: unknown, userMessageId?: string) {
   const data = studioTurnRequest.parse(input);
   const ctx = data.context;
   const state = await readPilot({ projectId: ctx.projectId, scriptId: ctx.scriptId });
   const selected = ctx.selectedObject;
+  // Explicit conversational review stays on the same Preview/Confirm boundary.
+  // A model reply cannot itself promote a generated image to authority.
+  const reviewText=data.message.trim().replace(/[。！!\s]+$/g,'');
+  const acceptReview=/^(这个可以|就用这张|确认用这张|用这张作为正式参考|采用此版本)$/.test(reviewText);
+  const rejectReview=/^(不要这个版本|放弃这个候选|不采用这张)$/.test(reviewText);
+  if(acceptReview||rejectReview){
+    const candidates=await listAssetImageCandidates({projectId:ctx.projectId,scriptId:ctx.scriptId});
+    const candidate=candidates.find(c=>c.status==='SUCCEEDED' && c.decision!=='REJECTED' &&
+      (data.parentCandidateId?c.id===data.parentCandidateId:selected?.type==='ASSET'&&c.canonicalKey===selected.key));
+    if(!candidate)return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'请先选中你希望采用或放弃的图片候选。',applied:false};
+    if(rejectReview){await rejectAssetImageCandidate({projectId:ctx.projectId,scriptId:ctx.scriptId,jobId:candidate.id});return {mode:'ASSET_IMAGE_REVIEW',reply:'已放弃这张候选，原有素材没有改变。',applied:false};}
+    const preview=await previewAssetImageCandidate({projectId:ctx.projectId,scriptId:ctx.scriptId,jobId:candidate.id});
+    return {mode:'ASSET_IMAGE_REVIEW',reply:'请在下方确认采用这张候选；现在还没有改变正式参考。',candidatePreview:{...preview,jobId:candidate.id},applied:false};
+  }
   const actionData = agentActionRequest.parse({ projectId: ctx.projectId, scriptId: ctx.scriptId,
     instruction: data.message, scope: selected ? { type: selected.type, key: selected.key } : { type: "PROJECT" },
     ...(data.optionalDraft ? { optionalDraft: data.optionalDraft } : {}) });
   const createIntent = explicitAssetCreateRequest(data.message);
   const prepared = createIntent ? null : prepareAgentAction(state, actionData);
   const agentContext = await buildProjectAgentContext(ctx, data.message);
+  const availableReferences=await db('o_v04AgentAttachment').where({projectId:ctx.projectId,scriptId:ctx.scriptId}).whereNotNull('messageId').orderBy('createdAt','desc').limit(12).select('id','originalName','purpose');
+  let referenceObservations:unknown[]=[];
+  if(data.attachmentIds.length){try{const rows=await Promise.all(data.attachmentIds.map(id=>readAgentAttachment(ctx.projectId,id)));referenceObservations=await analyzeImages(ctx.projectId,rows);}catch(error){console.warn('[V04 AssetEdit][ReferenceObservationUnavailable]',{projectId:ctx.projectId,errorName:error instanceof Error?error.name:'Error'});}}
   const source = createIntent ? { selectedAsset: ctx.selectedObject?.type === "ASSET"
     ? state.assets.find((asset: any) => asset.status === "ACTIVE" && asset.canonicalKey === ctx.selectedObject?.key) ?? null : null,
     activeAssets: state.assets.filter((asset: any) => asset.status === "ACTIVE").map((asset: any) => ({ canonicalKey: asset.canonicalKey, name: asset.name, category: asset.category, assetKind: asset.assetKind })) }
     : prepared && "early" in prepared ? null : prepared?.source;
   const system = `${renderProjectAgentSystem(agentContext)}\n你是同一个 Project Agent 的 Studio 对话模式。${studioTurnFormat}` +
-    `mode 必须是 DISCUSS、PROPOSE_CHANGE、ASSET_CREATE 或 NEEDS_TARGET_CONFIRMATION；reply 是自然、简洁的中文回答。` +
+    `mode 必须是 DISCUSS、PROPOSE_CHANGE、ASSET_CREATE、ASSET_IMAGE_EDIT 或 NEEDS_TARGET_CONFIRMATION；reply 是自然、简洁的中文回答。` +
+    `用户要求修改现有图片、重做风格或派生大头照/背面时，使用 ASSET_IMAGE_EDIT 而不是 PROPOSE_CHANGE。它生成图片候选，不改变 Visual Spec。imageIntent 的 editMode 为 TEXT_EDIT/REFERENCE_EDIT/DERIVE_VIEW/STYLE_VARIANT；targetRole 为 EDIT_CANDIDATE/STYLE_VARIANT/FACE_HERO/FULL_BODY_FRONT/FULL_BODY_BACK/SIDE_SPECIAL_LEFT/SIDE_SPECIAL_RIGHT/DETAIL_REFERENCE。sourceFocus 为 FACE/BODY/BACK，按实际要修改的部位选择；仅说保留脸不代表 FACE 修改，默认 BODY。preserveIntent 的 identity/face/hairstyle/costume/palette/silhouette/proportions/material/composition 只能为 HIGH/MEDIUM/LOW，默认 HIGH。referenceBindings 只可引用这次给出的真实 attachmentId，role 只能为 STYLE_REFERENCE/COSTUME_REFERENCE/LIGHTING_REFERENCE/MATERIAL_REFERENCE/POSE_REFERENCE/COMPOSITION_REFERENCE/DETAIL_REFERENCE；图用途不明先自然语言追问。没有上传图时为空。canonicalKey 必须是当前选中或用户明确提到的有效素材。不要虚构图片执行成功，reply 只说已提交候选制作。` +
     `疑问、解释、对比和建议用 DISCUSS；只有用户明确要求改变当前对象，才用 PROPOSE_CHANGE，并填写 summary、rationale、patch。` +
     `目标含糊或涉及素材身份的改名、归属、退休等身份级修改时用 NEEDS_TARGET_CONFIRMATION。` +
     `只有用户明确请求新建独立素材时才用 ASSET_CREATE；普通外观细节继续留在现有 Visual Spec。` +
@@ -83,7 +107,7 @@ export async function answerStudioTurn(input: unknown) {
       messages: [{ role: "user", content: [{ type: "text", text: userText }] }] })).text; }
     catch (error) { studioFailure(ctx, "PROVIDER_FAILED", error, repairAttempt); }
   };
-  const raw = await invoke(system, JSON.stringify({ message: data.message, selectedObject: selected, source }));
+  const raw = await invoke(system, JSON.stringify({ message: data.message, selectedObject: selected, source, attachmentIds: data.attachmentIds, availableReferenceImages:availableReferences, referenceObservations, activeAssets: state.assets.filter((a:any)=>a.status==="ACTIVE").map((a:any)=>({canonicalKey:a.canonicalKey,name:a.name,sourcePolicy:a.sourcePolicy})) }));
   let turn: ReturnType<typeof parseStudioTurnSemantic>;
   try { turn = parseStudioTurnSemantic(raw); }
   catch (error) {
@@ -99,6 +123,24 @@ export async function answerStudioTurn(input: unknown) {
     catch (repairError) {
       studioFailure(ctx, repairError instanceof StudioSemanticError ? repairError.stage : "STRICT_VALIDATION_FAILED", repairError, 1);
     }
+  }
+  if (turn.mode === "ASSET_IMAGE_EDIT") {
+    const intent = turn.imageIntent as any;
+    const target = state.assets.find((a:any)=>a.status==='ACTIVE' && a.canonicalKey===intent.canonicalKey);
+    const mentioned = state.assets.filter((a:any)=>a.status==='ACTIVE' && (data.message.includes(a.canonicalKey)||data.message.includes(a.name)));
+    const explicit = target && (mentioned.length===1 ? mentioned[0].canonicalKey===target.canonicalKey : mentioned.length===0 && selected?.type==='ASSET' && selected.key===target.canonicalKey);
+    if (!explicit) return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'你希望修改哪项素材？请先选中它。',applied:false};
+    if (!userMessageId) throw new PilotError('PILOT_MESSAGE_REQUIRED','图片修改必须关联原始对话消息',409);
+    const allowedRefs=new Set([...data.attachmentIds,...availableReferences.map((r:any)=>r.id)]);
+    if ((intent.referenceBindings??[]).some((r:any)=>!allowedRefs.has(r.attachmentId))) throw new PilotError('PILOT_REFERENCE_INVALID','引用的图片不属于当前对话',409);
+    if(data.attachmentIds.length && !(intent.referenceBindings??[]).length)return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'你主要希望参考这张图的长相，还是风格和光影？',applied:false};
+    let imageCandidate:Awaited<ReturnType<typeof enqueueAssetImageEdit>>;
+    try{imageCandidate=await enqueueAssetImageEdit({projectId:ctx.projectId,scriptId:ctx.scriptId},intent,userMessageId,data.parentCandidateId);}
+    catch(error){
+      if(error instanceof PilotError){const correlationId=randomUUID();console.error('[V04 AssetEdit][PreparationFailure]',{correlationId,projectId:ctx.projectId,code:error.code});throw new StudioTurnFailure(error.code,error.message,'IMAGE_EDIT_PREPARATION_FAILED',correlationId,error.status);}
+      studioFailure(ctx,'ACTION_FINALIZATION_FAILED',error);
+    }
+    return {mode:'ASSET_IMAGE_EDIT',reply:'我已开始准备新的图片候选；现有资产没有被替换。完成后你可以查看、继续修改或采用。',imageCandidate,applied:false};
   }
   if (turn.mode === "DISCUSS") return { mode: turn.mode, reply: turn.reply, applied: false };
   if (turn.mode === "NEEDS_TARGET_CONFIRMATION" || prepared && "early" in prepared) {
