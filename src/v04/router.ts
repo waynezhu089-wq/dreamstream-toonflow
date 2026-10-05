@@ -1,3 +1,4 @@
+import {listImageBaselines,previewImageBaseline,confirmImageBaseline} from './assetImageBaseline';
 import { listAssetImageCandidates, previewAssetImageCandidate, acceptAssetImageCandidate, rejectAssetImageCandidate } from "./assetImageEdit";
 import express from "express";
 import { createHash, randomUUID } from "node:crypto";
@@ -64,6 +65,9 @@ endpoint("/studio/executor/comfy/test", testDraftExecutor);
 endpoint("/studio/executor/comfy/configure", configureDraftExecutor);
 endpoint("/studio/executor/comfy/current", readDraftExecutor);
 endpoint("/studio/draft-image/enqueue", enqueueDraftImage);
+endpoint('/studio/image-baseline/current', listImageBaselines);
+endpoint('/studio/image-baseline/preview', previewImageBaseline);
+endpoint('/studio/image-baseline/confirm', confirmImageBaseline);
 endpoint("/studio/image-edit/candidates", listAssetImageCandidates);
 endpoint("/studio/image-edit/preview", previewAssetImageCandidate);
 endpoint("/studio/image-edit/accept", acceptAssetImageCandidate);

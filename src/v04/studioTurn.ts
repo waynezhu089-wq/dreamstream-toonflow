@@ -1,3 +1,4 @@
+import {previewImageBaseline,listImageBaselines} from './assetImageBaseline';
 import { readAgentAttachment } from "./agentAttachments";
 import { analyzeImages } from "./visionAnalyzer";
 import { enqueueAssetImageEdit, listAssetImageCandidates, previewAssetImageCandidate, rejectAssetImageCandidate } from "./assetImageEdit";
@@ -70,12 +71,24 @@ export async function answerStudioTurn(input: unknown, userMessageId?: string) {
     const preview=await previewAssetImageCandidate({projectId:ctx.projectId,scriptId:ctx.scriptId,jobId:candidate.id});
     return {mode:'ASSET_IMAGE_REVIEW',reply:'请在下方确认采用这张候选；现在还没有改变正式参考。',candidatePreview:{...preview,jobId:candidate.id},applied:false};
   }
+  if(data.attachmentIds.length&&data.message==='[图片参考]')return {mode:'DISCUSS',reply:'图片已保存为对话参考；尚未设为基准，也没有发起改图。你可以告诉我希望怎样使用它。',applied:false};
+  // Explicit uploaded-baseline binding is independent of optional vision.
+  const baselineIntent=/(以后|设为|作为|换成|使用).*(基准|脸部参考|面部参考|全身参考|背面参考)/.test(data.message);
+  if(baselineIntent){
+    const mentioned=state.assets.filter((a:any)=>a.status==='ACTIVE'&&(data.message.includes(a.canonicalKey)||data.message.includes(a.name)));
+    const targetKey=mentioned.length===1?mentioned[0].canonicalKey:mentioned.length===0&&selected?.type==='ASSET'?selected.key:null;
+    if(!targetKey||data.attachmentIds.length!==1)return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'请选中要关联的素材并上传一张基准图片。',applied:false};
+    const role=/脸部|面部/.test(data.message)?'FACE_HERO':/背面/.test(data.message)?'FULL_BODY_BACK':/全身参考/.test(data.message)?'FULL_BODY_FRONT':'GENERAL';
+    const baselinePreview=await previewImageBaseline({projectId:ctx.projectId,scriptId:ctx.scriptId,canonicalKey:targetKey,attachmentId:data.attachmentIds[0],role});
+    return {mode:'ASSET_IMAGE_BASELINE',reply:'请看图后确认使用；尚未改变当前基准。',baselinePreview,applied:false};
+  }
   const actionData = agentActionRequest.parse({ projectId: ctx.projectId, scriptId: ctx.scriptId,
     instruction: data.message, scope: selected ? { type: selected.type, key: selected.key } : { type: "PROJECT" },
     ...(data.optionalDraft ? { optionalDraft: data.optionalDraft } : {}) });
   const createIntent = explicitAssetCreateRequest(data.message);
   const prepared = createIntent ? null : prepareAgentAction(state, actionData);
   const agentContext = await buildProjectAgentContext(ctx, data.message);
+  const currentImageBaselines=await listImageBaselines({projectId:ctx.projectId,scriptId:ctx.scriptId});
   const availableReferences=await db('o_v04AgentAttachment').where({projectId:ctx.projectId,scriptId:ctx.scriptId}).whereNotNull('messageId').orderBy('createdAt','desc').limit(12).select('id','originalName','purpose');
   let referenceObservations:unknown[]=[];
   if(data.attachmentIds.length){try{const rows=await Promise.all(data.attachmentIds.map(id=>readAgentAttachment(ctx.projectId,id)));referenceObservations=await analyzeImages(ctx.projectId,rows);}catch(error){console.warn('[V04 AssetEdit][ReferenceObservationUnavailable]',{projectId:ctx.projectId,errorName:error instanceof Error?error.name:'Error'});}}
@@ -85,7 +98,7 @@ export async function answerStudioTurn(input: unknown, userMessageId?: string) {
     : prepared && "early" in prepared ? null : prepared?.source;
   const system = `${renderProjectAgentSystem(agentContext)}\n你是同一个 Project Agent 的 Studio 对话模式。${studioTurnFormat}` +
     `mode 必须是 DISCUSS、PROPOSE_CHANGE、ASSET_CREATE、ASSET_IMAGE_EDIT 或 NEEDS_TARGET_CONFIRMATION；reply 是自然、简洁的中文回答。` +
-    `用户要求修改现有图片、重做风格或派生大头照/背面时，使用 ASSET_IMAGE_EDIT 而不是 PROPOSE_CHANGE。它生成图片候选，不改变 Visual Spec。imageIntent 的 editMode 为 TEXT_EDIT/REFERENCE_EDIT/DERIVE_VIEW/STYLE_VARIANT；targetRole 为 EDIT_CANDIDATE/STYLE_VARIANT/FACE_HERO/FULL_BODY_FRONT/FULL_BODY_BACK/SIDE_SPECIAL_LEFT/SIDE_SPECIAL_RIGHT/DETAIL_REFERENCE。sourceFocus 为 FACE/BODY/BACK，按实际要修改的部位选择；仅说保留脸不代表 FACE 修改，默认 BODY。preserveIntent 的 identity/face/hairstyle/costume/palette/silhouette/proportions/material/composition 只能为 HIGH/MEDIUM/LOW，默认 HIGH。referenceBindings 只可引用这次给出的真实 attachmentId，role 只能为 STYLE_REFERENCE/COSTUME_REFERENCE/LIGHTING_REFERENCE/MATERIAL_REFERENCE/POSE_REFERENCE/COMPOSITION_REFERENCE/DETAIL_REFERENCE；图用途不明先自然语言追问。仅在用户明确引用历史图片时使用 availableReferenceImages 中的真实 ID；没有本次上传或明确历史引用时为空。canonicalKey 必须是当前选中或用户明确提到的有效素材。不要虚构图片执行成功，reply 只说已提交候选制作。` +
+    `本次明确要求用上传图片本身来改图时，imageIntent.sourceAttachmentId 使用真实附件 ID，referenceBindings 为空；只参考风格/光影时，主体仍取资产基准，上传图只放 referenceBindings。仅讨论或称赞图片不能重绘或设基准。用户要求修改现有图片、重做风格或派生大头照/背面时，使用 ASSET_IMAGE_EDIT 而不是 PROPOSE_CHANGE。它生成图片候选，不改变 Visual Spec。imageIntent 的 editMode 为 TEXT_EDIT/REFERENCE_EDIT/DERIVE_VIEW/STYLE_VARIANT；targetRole 为 EDIT_CANDIDATE/STYLE_VARIANT/FACE_HERO/FULL_BODY_FRONT/FULL_BODY_BACK/SIDE_SPECIAL_LEFT/SIDE_SPECIAL_RIGHT/DETAIL_REFERENCE。sourceFocus 为 FACE/BODY/BACK，按实际要修改的部位选择；仅说保留脸不代表 FACE 修改，默认 BODY。preserveIntent 的 identity/face/hairstyle/costume/palette/silhouette/proportions/material/composition 只能为 HIGH/MEDIUM/LOW，默认 HIGH。referenceBindings 只可引用这次给出的真实 attachmentId，role 只能为 STYLE_REFERENCE/COSTUME_REFERENCE/LIGHTING_REFERENCE/MATERIAL_REFERENCE/POSE_REFERENCE/COMPOSITION_REFERENCE/DETAIL_REFERENCE；图用途不明先自然语言追问。仅在用户明确引用历史图片时使用 availableReferenceImages 中的真实 ID；没有本次上传或明确历史引用时为空。canonicalKey 必须是当前选中或用户明确提到的有效素材。不要虚构图片执行成功，reply 只说已提交候选制作。` +
     `疑问、解释、对比和建议用 DISCUSS；只有用户明确要求改变当前对象，才用 PROPOSE_CHANGE，并填写 summary、rationale、patch。` +
     `目标含糊或涉及素材身份的改名、归属、退休等身份级修改时用 NEEDS_TARGET_CONFIRMATION。` +
     `只有用户明确请求新建独立素材时才用 ASSET_CREATE；普通外观细节继续留在现有 Visual Spec。` +
@@ -107,7 +120,7 @@ export async function answerStudioTurn(input: unknown, userMessageId?: string) {
       messages: [{ role: "user", content: [{ type: "text", text: userText }] }] })).text; }
     catch (error) { studioFailure(ctx, "PROVIDER_FAILED", error, repairAttempt); }
   };
-  const raw = await invoke(system, JSON.stringify({ message: data.message, selectedObject: selected, source, attachmentIds: data.attachmentIds, availableReferenceImages:availableReferences, referenceObservations, activeAssets: state.assets.filter((a:any)=>a.status==="ACTIVE").map((a:any)=>({canonicalKey:a.canonicalKey,name:a.name,sourcePolicy:a.sourcePolicy})) }));
+  const raw = await invoke(system, JSON.stringify({ message: data.message, selectedObject: selected, source, currentImageBaselines:currentImageBaselines.map((b:any)=>({canonicalKey:b.canonicalKey,role:b.role,attachmentId:b.attachmentId,sourceType:b.sourceType,originalName:b.originalName})), attachmentIds: data.attachmentIds, availableReferenceImages:availableReferences, referenceObservations, activeAssets: state.assets.filter((a:any)=>a.status==="ACTIVE").map((a:any)=>({canonicalKey:a.canonicalKey,name:a.name,sourcePolicy:a.sourcePolicy})) }));
   let turn: ReturnType<typeof parseStudioTurnSemantic>;
   try { turn = parseStudioTurnSemantic(raw); }
   catch (error) {
@@ -125,15 +138,18 @@ export async function answerStudioTurn(input: unknown, userMessageId?: string) {
     }
   }
   if (turn.mode === "ASSET_IMAGE_EDIT") {
+    if(/你觉得|你认为|怎么样|分析这张|这张不错/.test(data.message)&&!/帮我|请.*(?:改|生成)|改得|修改成|重绘|生成/.test(data.message))return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'这次只讨论图片，没有修改或设置基准。你希望换成这张图中的人物，还是只参考它的画风？',applied:false};
     const intent = turn.imageIntent as any;
     const target = state.assets.find((a:any)=>a.status==='ACTIVE' && a.canonicalKey===intent.canonicalKey);
     const mentioned = state.assets.filter((a:any)=>a.status==='ACTIVE' && (data.message.includes(a.canonicalKey)||data.message.includes(a.name)));
     const explicit = target && (mentioned.length===1 ? mentioned[0].canonicalKey===target.canonicalKey : mentioned.length===0 && selected?.type==='ASSET' && selected.key===target.canonicalKey);
     if (!explicit) return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'你希望修改哪项素材？请先选中它。',applied:false};
     if (!userMessageId) throw new PilotError('PILOT_MESSAGE_REQUIRED','图片修改必须关联原始对话消息',409);
+    if(/回到基准|从基准|基于基准/.test(data.message))intent.useBaseline=true;
     const allowedRefs=new Set([...data.attachmentIds,...availableReferences.map((r:any)=>r.id)]);
+    if(intent.sourceAttachmentId&&!allowedRefs.has(intent.sourceAttachmentId))throw new PilotError('PILOT_REFERENCE_INVALID','本次来源图片不属于当前对话',409);
     if ((intent.referenceBindings??[]).some((r:any)=>!allowedRefs.has(r.attachmentId))) throw new PilotError('PILOT_REFERENCE_INVALID','引用的图片不属于当前对话',409);
-    if(data.attachmentIds.length && !(intent.referenceBindings??[]).length)return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'你主要希望参考这张图的长相，还是风格和光影？',applied:false};
+    if(data.attachmentIds.length && !intent.sourceAttachmentId && !(intent.referenceBindings??[]).length)return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'你主要希望参考这张图的长相，还是风格和光影？',applied:false};
     let imageCandidate:Awaited<ReturnType<typeof enqueueAssetImageEdit>>;
     try{imageCandidate=await enqueueAssetImageEdit({projectId:ctx.projectId,scriptId:ctx.scriptId},intent,userMessageId,data.parentCandidateId);}
     catch(error){

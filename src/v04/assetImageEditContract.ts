@@ -3,6 +3,8 @@ export const imageEditIntent = z.object({
   canonicalKey: z.string().min(1).max(128),
   editMode: z.enum(['TEXT_EDIT','REFERENCE_EDIT','DERIVE_VIEW','STYLE_VARIANT']),
   targetRole: z.enum(['EDIT_CANDIDATE','STYLE_VARIANT','FACE_HERO','FULL_BODY_FRONT','FULL_BODY_BACK','SIDE_SPECIAL_LEFT','SIDE_SPECIAL_RIGHT','DETAIL_REFERENCE']),
+  sourceAttachmentId: z.string().uuid().optional(),
+  useBaseline: z.boolean().default(false),
   sourceFocus: z.enum(['FACE','BODY','BACK']).default('BODY'),
   editPrompt: z.string().min(1).max(4000),
   preserveIntent: z.object(Object.fromEntries(['identity','face','hairstyle','costume','palette','silhouette','proportions','material','composition'].map(k=>[k,z.enum(['HIGH','MEDIUM','LOW']).default('HIGH')]))).default({}),
