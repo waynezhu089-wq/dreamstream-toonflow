@@ -15,6 +15,7 @@ import {graphFacts} from './operationsRegistry';
 import {localComfyOrigin,awaitDraft,downloadDraft,DraftComfyError} from './comfyDraftClient';
 import {submitTracedDraft} from './tracedDraftSubmit';
 import {acquireDraftWorkerLease} from './draftWorkerLease';
+import {DIRECTOR_RENDERING_BRIEF_VERSION} from './directorRenderingBrief';
 import {ASSET_DNA_PROJECTION_VERSION} from './directorAssetVisualDNA';
 import {abHash,compileDirectorABAssetInput,DIRECTOR_AB_COMPILER} from './directorAssetABCompiler';
 const q=db as Knex, table='o_v04DirectorAssetAB';
@@ -65,6 +66,7 @@ async function checked(trx:Knex.Transaction,s:z.infer<typeof command>,actor:numb
   return row;
 }
 async function fresh(trx:Knex.Transaction,row:any){
+  if(JSON.parse(row.compiledJson).B.renderingBrief?.version!==DIRECTOR_RENDERING_BRIEF_VERSION)return false;
   if(JSON.parse(row.compiledJson).B.directorContext.assetVisualDNA?.projectionVersion!==ASSET_DNA_PROJECTION_VERSION)return false;
   try{return (await captureDirectorABSource(trx,{projectId:row.projectId,scriptId:row.scriptId})).sourceHash===JSON.parse(row.compiledJson).sourceHash;}
   catch(e){if(e instanceof PilotError)return false;throw e;}
@@ -91,7 +93,7 @@ export async function readDirectorAB(input:unknown,actor:number){
   return q.transaction(async trx=>{await authorize(trx,s,actor);const rows=await trx(table).where(s).orderBy('createdAt','desc').orderBy('id','desc').limit(20);
     let currentHash:string|null=null;
     try{if(rows.length)currentHash=(await captureDirectorABSource(trx,s)).sourceHash;}catch(e){if(!(e instanceof PilotError))throw e;}
-    return rows.map(row=>{const p=present(row);if(p.sourceHash!==currentHash||p.B.directorContext.assetVisualDNA?.projectionVersion!==ASSET_DNA_PROJECTION_VERSION)p.status='STALE';return p;});});
+    return rows.map(row=>{const p=present(row);if(p.B.renderingBrief?.version!==DIRECTOR_RENDERING_BRIEF_VERSION||p.sourceHash!==currentHash||p.B.directorContext.assetVisualDNA?.projectionVersion!==ASSET_DNA_PROJECTION_VERSION)p.status='STALE';return p;});});
 }
 // No startup worker and no Auto Asset World job admission. Explicit human render is the only entry.
 let rendering=false;

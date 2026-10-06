@@ -124,10 +124,10 @@ test('DIR032A current A fidelity, bounded relevant B projection, fair frozen gra
  const {db,oss,load,scope,ab,truth}=await abFixture(t),before=await truth(),calls=oss.modelCalls.length,c=await ab.compileDirectorAB(scope,7);
  assert.equal(c.status,'COMPILED');assert.equal(c.evidence.confirmedVisualSpecRevision,null);assert.equal(c.evidence.visualSpecSource,'PERSISTED_DRAFT');
  assert.equal(c.A.renderedPrompt,load('autoAssetPrompt').autoAssetPrompt(c.A.semanticInput.asset,c.A.semanticInput.spec,c.A.semanticInput.creative,'ASSET_MAIN_PREVIEW'));
- assert.deepEqual(c.B.semanticInput,c.A.semanticInput);assert.ok(c.B.renderedPrompt.startsWith(c.A.renderedPrompt));assert.match(c.B.renderedPrompt,/awe first|sublime colossus/);
+ assert.deepEqual(c.B.semanticInput,c.A.semanticInput);assert.ok(c.B.renderingBrief);assert.match(c.B.renderedPrompt,/awe first|sublime colossus/);
  assert.deepEqual(c.A.semanticInput.legacyCompilation,c.evidence.legacyCompilation);assert.ok(c.A.semanticInput.legacyCompilation.draftPromptIR);
  assert.equal(c.B.directorContext.relevantScaleRelations.length,1);assert.equal(c.B.directorContext.relevantTransformationLineage.length,0);assert.doesNotMatch(JSON.stringify(c.B.directorContext),/Pegasus/);
- assert.match(c.B.renderedPrompt,/do not render the related assets/);assert.match(c.B.renderedPrompt,/living creature remains a living creature/);
+ assert.match(c.B.renderedPrompt,/no scale-reference objects/);assert.match(c.B.renderedPrompt,/living biological creature/);
  const a=structuredClone(c.workflows.A.graph),b=structuredClone(c.workflows.B.graph);delete a['5'].inputs.text;delete b['5'].inputs.text;assert.deepEqual(a,b);assert.equal(c.workflows.A.graph['20'].inputs.seed,c.workflows.B.graph['20'].inputs.seed);
  assert.deepEqual(await truth(),before);assert.equal(oss.modelCalls.length,calls);assert.equal((await db('o_v04ExecutionTrace')).length,0);
  await assert.rejects(db('o_v04DirectorAssetAB').where({id:c.id}).update({compiledJson:'{}'}),/IMMUTABLE/);
@@ -2399,4 +2399,20 @@ test('DIRH2 related concurrent confirms admit only one current version and obsol
  const {db,cache,oss,service:s}=await fixture(t),scope=await s.createPilotProject({name:'Concurrent lineage',brief:'Still life',targetDuration:20,aspectRatio:'16:9'},7),load=f=>loadSource(path.join(root,'src/v04/'+f+'.ts'),db,cache,oss);await load('directorSchema').initializeDirectorSchema(db);const d=load('directorBible'),intent=load('directorContract').emptyDirectorIntent(),propose=async base=>{oss.studioResponses=[JSON.stringify(intent)];return d.proposeDirector({...scope,...(base?{baseProposalId:base}: {})},7);};
  const p1=await propose(),p2=await propose(p1.id),v1=await d.previewDirector({...scope,proposalId:p1.id},7),v2=await d.previewDirector({...scope,proposalId:p2.id},7),results=await Promise.allSettled([d.confirmDirector({...scope,proposalId:p1.id,previewHash:v1.previewHash},7),d.confirmDirector({...scope,proposalId:p2.id,previewHash:v2.previewHash},7)]);
  assert.equal(results.filter(r=>r.status==='fulfilled').length,1);assert.ok(['DIRECTOR_PREVIEW_STALE','DIRECTOR_PROPOSAL_TERMINAL','DIRECTOR_CONCURRENT_UPDATE'].includes(results.find(r=>r.status==='rejected').reason.code));assert.equal((await db('o_v04DirectorVersion').where({status:'CURRENT'})).length,1);assert.equal((await db('o_v04DirectorVersion')).length,1);assert.equal((await db('o_v04StudioAssetDraftJob')).length,0);
+});
+test('DIR032AH3 compact deterministic visual brief preserves visual meaning without raw narrative or schema',async t=>{
+ const {db,oss,cache}=await fixture(t),load=n=>loadSource(path.join(root,'src/v04/'+n+'.ts'),db,cache,oss),intent=load('directorContract').emptyDirectorIntent();
+ intent.narrativeVisualRoles=[{canonicalKey:'CHAR-003',narrativeFunction:'sublime colossus 古老庄严的巨物',emotionalRead:'awe first 敬畏先于恐惧',scaleFunction:'巨大鲸鱼吞船，像地质和天象，不带攻击性',requiredAudiencePerception:['majestic'],forbiddenInterpretations:['cute','horror']}];
+ intent.globalVisualDNA.artStyle='电影级梦幻写实';intent.globalVisualDNA.colorLanguage=['深夜蓝、蓝紫环境'];intent.globalVisualDNA.lightingLanguage=['月光与冷蓝环境光，体积光，暗部细节'];
+ const asset={canonicalKey:'CHAR-003',assetKind:'CREATURE',name:'鲸鱼',description:'巨大鲸鱼吞船，喷嚏喷出男孩与潜水艇'},spec={visualIdentitySummary:'living whale',materials:['dark natural skin']};
+ const c=load('directorAssetABCompiler').compileDirectorABAssetInput(asset,spec,null,intent,2);
+ for(const phrase of ['mature biological whale','sublime colossus','ancient','majestic','awe before fear','monumental scale','cinematic dream realism','night-blue','blue-violet','moonlight','volumetric illumination','physical skin','single subject','one complete isolated whale','no text','no typography','no labels','no annotations','no infographic','no diagram'])assert.ok(c.B.renderedPrompt.includes(phrase),phrase);
+ assert.doesNotMatch(c.B.renderedPrompt,/[{}\[\]\u3400-\u9fff]|canonicalKey|directorVersion|narrativeRole|requirement|storyboard|CHAR-|PROP-|FX-|boy|submarine|pirate ship|sneez|Dream Matter/);
+ assert.ok(c.B.renderedPrompt.split(/\s+/).length<=250);assert.deepEqual(c,load('directorAssetABCompiler').compileDirectorABAssetInput(asset,spec,null,intent,2));
+ intent.narrativeVisualRoles[0].narrativeFunction+='鲸鱼喷嚏男孩潜水艇 '.repeat(10000);const long=load('directorAssetABCompiler').compileDirectorABAssetInput(asset,spec,null,intent,2);assert.ok(long.B.renderedPrompt.split(/\s+/).length<=250);assert.doesNotMatch(long.B.renderedPrompt,/[{}\[\]\u3400-\u9fff]/);assert.equal(oss.modelCalls.length,0);
+});
+test('DIR032AH3 old compiler record stays immutable historical while original artifacts remain readable',async t=>{
+ const {db,scope,ab}=await abFixture(t),c=await ab.compileDirectorAB(scope,7),old=structuredClone(c),id=require('crypto').randomUUID();delete old.B.renderingBrief;old.evidence.compilerVersion='director.asset-ab.1';old.id=id;
+ const record={id,...scope,status:'COMPLETED',compiledJson:JSON.stringify(old),executionJson:JSON.stringify({A:{status:'SUCCEEDED',artifact:{artifactId:'original-a'}},B:{status:'SUCCEEDED',artifact:{artifactId:'original-b'}}}),createdAt:c.createdAt+1,updatedAt:c.createdAt+1};await db('o_v04DirectorAssetAB').insert(record);
+ const before=await db('o_v04DirectorAssetAB').where({id}).first(),read=(await ab.readDirectorAB(scope,7)).find(x=>x.id===id);assert.equal(read.status,'STALE');assert.equal(read.execution.A.artifact.artifactId,'original-a');assert.equal(read.execution.B.artifact.artifactId,'original-b');assert.deepEqual(await db('o_v04DirectorAssetAB').where({id}).first(),before);
 });
