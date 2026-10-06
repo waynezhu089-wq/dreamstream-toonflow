@@ -105,6 +105,93 @@ async function fixture(t) {
 }
 const asset = (name='Dreamer', category='CHAR', sourcePolicy='AI_ALLOWED') => ({ name, category, description:'calm', identityAnchors:['left eyebrow scar'], mustPreserve:['scar'], forbiddenChanges:['redraw brand text'], ownerKey:null, variantOf:null, sourcePolicy, prompt:'' });
 
+async function abFixture(t){
+ const f=await fixture(t),{db,oss,cache,service:s}=f,load=n=>loadSource(path.join(root,'src/v04/'+n+'.ts'),db,cache,oss);
+ await load('directorSchema').initializeDirectorSchema(db);await load('directorAssetABSchema').initializeDirectorABSchema(db);
+ const scope=await s.createPilotProject({name:'Whale A/B',brief:'A dream at night',targetDuration:40,aspectRatio:'16:9'},7);
+ for(const [canonicalKey,name,assetKind,category] of [['CHAR-003','Whale','CREATURE','CHAR'],['PROP-001','Pirate Ship','VEHICLE','PROP'],['CHAR-002','Pegasus','CREATURE','CHAR']])
+  await db('o_v04Asset').insert({projectId:scope.projectId,canonicalKey,name,category,assetKind,sourcePolicy:'AI_ALLOWED',description:'living creature',identityAnchors:'[]',mustPreserve:'[]',forbiddenChanges:'[]',status:'ACTIVE',revision:1,createdAt:1,updatedAt:1});
+ const a=await db('o_v04Asset').where({projectId:scope.projectId,canonicalKey:'CHAR-003'}).first(),spec=load('visualSpecContract').compileVisualSemantic({...a,identityAnchors:[],mustPreserve:[],forbiddenChanges:[]},{visualIdentitySummary:'A mature living whale',details:{speciesOrForm:'whale'}});
+ await db('o_v04StudioAssetDraftJob').insert({id:require('crypto').randomUUID(),...scope,canonicalKey:'CHAR-003',sourceAssetRevision:1,draftHash:'a'.repeat(64),generationIntent:'SUBJECT_MAIN_PREVIEW',executionPurpose:'ASSET_MAIN_PREVIEW',executorType:'COMFY_LOCAL',executorProfile:'KREA2_T2I_ASSET_V1',workflowVersion:'old',status:'SUCCEEDED',inputSnapshotJson:JSON.stringify({visualSpecDraft:spec}),outputsJson:'[]',attemptCount:1,createdAt:1,updatedAt:1});
+ const intent=load('directorContract').emptyDirectorIntent();intent.globalVisualDNA.artStyle='cinematic stylized realism';intent.globalVisualDNA.materialLanguage=['luminous Dream Matter where applicable'];
+ const role=(canonicalKey,emotionalRead)=>({canonicalKey,narrativeFunction:'threshold creature and living dream-space',emotionalRead,dramaticImportance:'major',scaleFunction:'whole-ship swallowing scale',requiredAudiencePerception:['ancient majestic sublime colossus','awe first, danger second'],forbiddenInterpretations:['cute','mascot','evil monster','gore horror']});
+ intent.narrativeVisualRoles=[role('CHAR-003','awe first'),role('CHAR-002','unrelated Pegasus role')];intent.scaleRelations=[{smaller:'PROP-001',larger:'CHAR-003',kind:'DRAMATIC',shotRef:null,requirement:'ship toy-sized beside whale; can swallow whole ship'}];
+ oss.studioResponses=[JSON.stringify(intent)];const d=load('directorBible'),p=await d.proposeDirector(scope,7),v=await d.previewDirector({...scope,proposalId:p.id},7);await d.confirmDirector({...scope,proposalId:p.id,previewHash:v.previewHash},7);
+ const truth=async()=>{const names=(await db('sqlite_master').where({type:'table'}).pluck('name')).filter(n=>!['sqlite_sequence','o_v04DirectorAssetAB','o_v04ExecutionTrace'].includes(n)).sort(),out={};for(const n of names)out[n]=(await db(n)).map(load('directorCompiler').directorCanonical).sort();return out;};
+ return {...f,load,scope,ab:load('directorAssetAB'),truth};
+}
+test('DIR032A current A fidelity, bounded relevant B projection, fair frozen graphs and compile-only truth isolation',async t=>{
+ const {db,oss,load,scope,ab,truth}=await abFixture(t),before=await truth(),calls=oss.modelCalls.length,c=await ab.compileDirectorAB(scope,7);
+ assert.equal(c.status,'COMPILED');assert.equal(c.evidence.confirmedVisualSpecRevision,null);assert.equal(c.evidence.visualSpecSource,'PERSISTED_DRAFT');
+ assert.equal(c.A.renderedPrompt,load('autoAssetPrompt').autoAssetPrompt(c.A.semanticInput.asset,c.A.semanticInput.spec,c.A.semanticInput.creative,'ASSET_MAIN_PREVIEW'));
+ assert.deepEqual(c.B.semanticInput,c.A.semanticInput);assert.ok(c.B.renderedPrompt.startsWith(c.A.renderedPrompt));assert.match(c.B.renderedPrompt,/awe first|sublime colossus/);
+ assert.equal(c.B.directorContext.relevantScaleRelations.length,1);assert.equal(c.B.directorContext.relevantTransformationLineage.length,0);assert.doesNotMatch(JSON.stringify(c.B.directorContext),/Pegasus/);
+ assert.match(c.B.renderedPrompt,/do not render the related assets/);assert.match(c.B.renderedPrompt,/living creature remains a living creature/);
+ const a=structuredClone(c.workflows.A.graph),b=structuredClone(c.workflows.B.graph);delete a['5'].inputs.text;delete b['5'].inputs.text;assert.deepEqual(a,b);assert.equal(c.workflows.A.graph['20'].inputs.seed,c.workflows.B.graph['20'].inputs.seed);
+ assert.deepEqual(await truth(),before);assert.equal(oss.modelCalls.length,calls);assert.equal((await db('o_v04ExecutionTrace')).length,0);
+ await assert.rejects(db('o_v04DirectorAssetAB').where({id:c.id}).update({compiledJson:'{}'}),/IMMUTABLE/);
+ assert.equal((await ab.readDirectorAB(scope,7))[0].id,c.id);
+ await assert.rejects(ab.compileDirectorAB(scope,8),e=>e.code==='PILOT_FORBIDDEN');
+ await assert.rejects(ab.renderDirectorAB({...scope,experimentId:c.id,pairHash:c.pairHash,confirmRender:false},7));
+ assert.deepEqual(await truth(),before);
+ await db('o_v04Creative').where(scope).update({version:2});assert.equal((await ab.readDirectorAB(scope,7))[0].status,'STALE');
+ await assert.rejects(ab.compileDirectorAB(scope,7),e=>e.code==='DIRECTOR_AB_NOT_READY');
+ await assert.rejects(ab.renderDirectorAB({...scope,experimentId:c.id,pairHash:c.pairHash,confirmRender:true},7),e=>e.code==='DIRECTOR_AB_NOT_READY');
+});
+test('DIR032A missing/current scope gates and baseline drift stay fail-closed',async t=>{
+ const {db,scope,ab,service:s}=await abFixture(t),other=await s.createPilotProject({name:'Other project',brief:'No director',targetDuration:40,aspectRatio:'16:9'},7);
+ await assert.rejects(ab.compileDirectorAB(other,7),e=>e.code==='DIRECTOR_AB_NOT_READY');assert.deepEqual(await ab.readDirectorAB(other,7),[]);
+ const unit=await db('o_script').insert({projectId:scope.projectId,name:'Other unit'});await assert.rejects(ab.compileDirectorAB({...scope,scriptId:unit[0]},7),e=>e.code==='DIRECTOR_AB_NOT_READY');
+ const c=await ab.compileDirectorAB(scope,7);await db('o_v04StudioAssetDraftJob').where(scope).update({outputsJson:JSON.stringify([{role:'MAIN_PREVIEW',artifactId:'changed'}])});assert.equal((await ab.readDirectorAB(scope,7))[0].status,'STALE');
+ await assert.rejects(ab.directorABArtifact({...other,experimentId:c.id,side:'A'},7),e=>e.code==='DIRECTOR_AB_NOT_FOUND');
+});
+for(const failSide of [null,'A','B'])test('DIR032A controlled sequential render '+(failSide?'failure '+failSide:'completion')+' retains truth and exact traces',async t=>{
+ const {db,oss,scope,ab,truth,load}=await abFixture(t),http=require('http'),graphs=[],png=await require('sharp')({create:{width:768,height:1024,channels:3,background:'#334455'}}).png().toBuffer();
+ const server=http.createServer(async(req,res)=>{res.setHeader('content-type','application/json');if(req.url==='/queue')return res.end(JSON.stringify({queue_running:[],queue_pending:[]}));
+  if(req.url==='/prompt'){let text='';for await(const chunk of req)text+=chunk;graphs.push(JSON.parse(text).prompt);return res.end(JSON.stringify({prompt_id:'p'+graphs.length}));}
+  if(req.url.startsWith('/history/')){const id=req.url.split('/').at(-1),side=id==='p1'?'A':'B';return res.end(JSON.stringify({[id]:failSide===side?{status:{status_str:'error',messages:['CUDA out of memory']}}:{status:{completed:true},outputs:{22:{images:[{filename:id+'.png',subfolder:'',type:'output'}]}}}}));}
+  if(req.url.startsWith('/view')){res.setHeader('content-type','image/png');return res.end(png);}res.statusCode=404;res.end('{}');});
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
+ await db('o_v04StudioImageExecutorConfig').insert({projectId:scope.projectId,baseUrl:'http://127.0.0.1:'+server.address().port,enabled:1,checkpoint:'unused',updatedAt:1});
+ const c=await ab.compileDirectorAB(scope,7),before=await truth(),cmd={...scope,experimentId:c.id,pairHash:c.pairHash,confirmRender:true};
+ await ab.renderDirectorAB(cmd,7);await ab.renderDirectorAB(cmd,7);
+ let result;const deadline=Date.now()+6000;do{result=(await ab.readDirectorAB(scope,7))[0];if(['COMPLETED','FAILED'].includes(result.status))break;await new Promise(r=>setTimeout(r,15));}while(Date.now()<deadline);
+ assert.equal(result.status,failSide?'FAILED':'COMPLETED');assert.equal(graphs.length,failSide==='A'?1:2);assert.deepEqual(await truth(),before);
+ const traces=await db('o_v04ExecutionTrace').orderBy('createdAt');assert.equal(traces.length,graphs.length);for(let i=0;i<graphs.length;i++)assert.deepEqual(JSON.parse(traces[i].workflowGraphJson),graphs[i]);
+ assert.ok(traces.every(x=>x.executionPurpose==='EXPERIMENTAL_CANDIDATE'));if(failSide==='B')assert.equal(result.execution.A.artifact.role,'EXPERIMENTAL_CANDIDATE');
+ if(!failSide){assert.equal(result.execution.A.artifact.width,result.execution.B.artifact.width);assert.equal((await ab.directorABArtifact({...scope,experimentId:c.id,side:'A'},7)).bytes.length,png.length);
+  const evaluation=await ab.evaluateDirectorAB({...scope,experimentId:c.id,choices:['B','B','A','Same','B','B'],conclusion:'PARTIAL_WIN',why:'human judgment'},7);assert.equal(evaluation.conclusion,'PARTIAL_WIN');assert.equal((await ab.readDirectorAB(scope,7))[0].evaluation.why,'human judgment');
+ }else await assert.rejects(ab.evaluateDirectorAB({...scope,experimentId:c.id,choices:Array(6).fill('Same'),conclusion:'NO_IMPROVEMENT'},7));
+ assert.equal(oss.visionCalls,0);await new Promise(r=>setImmediate(r));await load('directorAssetABSchema').initializeDirectorABSchema(db);assert.deepEqual(await truth(),before);
+});
+test('DIR032A restart preserves A artifact and never retries uncertain execution',async t=>{
+ const {db,scope,load,ab}=await abFixture(t),c=await ab.compileDirectorAB(scope,7),execution={A:{status:'SUCCEEDED',artifact:{artifactId:'evidence'}},B:{status:'RUNNING'}};
+ await db('o_v04DirectorAssetAB').where({id:c.id}).update({status:'RENDERING_B',executionJson:JSON.stringify(execution)});await load('directorAssetABSchema').initializeDirectorABSchema(db);
+ const row=(await ab.readDirectorAB(scope,7))[0];assert.equal(row.status,'FAILED');assert.equal(row.execution.errorCode,'EXECUTION_UNCERTAIN');assert.equal(row.execution.A.artifact.artifactId,'evidence');
+ await ab.renderDirectorAB({...scope,experimentId:c.id,pairHash:c.pairHash,confirmRender:true},7);assert.equal((await db('o_v04ExecutionTrace')).length,0);
+});
+test('DIR032A actual HTTP compile/read authorization; no producer admission without explicit confirmation',async t=>{
+ const {db,scope,load,truth}=await abFixture(t),before=await truth();let actor=7;
+ const app=require('express')();app.use(require('express').json());app.use((req,res,next)=>{req.user={id:actor};next();});app.use('/api/v04',load('router').default);
+ const server=await new Promise(r=>{const x=app.listen(0,'127.0.0.1',()=>r(x));});t.after(()=>new Promise(r=>server.close(r)));
+ const post=async(path,body)=>{const r=await fetch(`http://127.0.0.1:${server.address().port}/api/v04/director/asset-ab/${path}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});return {status:r.status,body:await r.json()};};
+ actor=0;assert.equal((await post('compile',scope)).status,401);actor=8;assert.equal((await post('compile',scope)).status,403);actor=7;
+ const r=await post('compile',scope);assert.equal(r.status,200,JSON.stringify(r));const c=r.body.data;assert.equal((await post('current',scope)).body.data[0].id,c.id);
+ assert.equal((await post('render',{...scope,experimentId:c.id,pairHash:c.pairHash})).status,400);
+ assert.equal((await post('render',{...scope,experimentId:c.id,pairHash:'0'.repeat(64),confirmRender:true})).status,409);
+ const original=await db('o_v04StudioAssetDraftJob').where(scope).first();await db('o_v04StudioAssetDraftJob').where({id:original.id}).update({status:'RUNNING'});
+ const busy=await post('render',{...scope,experimentId:c.id,pairHash:c.pairHash,confirmRender:true});assert.equal(busy.status,409);assert.ok(['DIRECTOR_AB_NOT_READY','DIRECTOR_AB_GPU_BUSY'].includes(busy.body.code));
+ await db('o_v04StudioAssetDraftJob').where({id:original.id}).update({status:original.status});assert.deepEqual(await truth(),before);assert.equal((await db('o_v04ExecutionTrace')).length,0);
+});
+test('DIR032A shared GPU lease prevents any prompt when a different draft worker owns GPU',async t=>{
+ const {db,scope,load,ab}=await abFixture(t),release=await load('draftWorkerLease').acquireDraftWorkerLease(path.join((await fixtureDirectory(db)),'v04-draft-worker.lock'));
+ t.after(()=>release());const c=await ab.compileDirectorAB(scope,7);await ab.renderDirectorAB({...scope,experimentId:c.id,pairHash:c.pairHash,confirmRender:true},7);
+ const deadline=Date.now()+4000;let row;do{row=(await ab.readDirectorAB(scope,7))[0];if(row.status==='FAILED')break;await new Promise(r=>setTimeout(r,10));}while(Date.now()<deadline);
+ assert.equal(row.status,'FAILED');assert.equal(row.execution.errorCode,'DIRECTOR_AB_GPU_BUSY');assert.equal((await db('o_v04ExecutionTrace')).length,0);
+ await release();
+});
+async function fixtureDirectory(db){return path.dirname(db.client.config.connection.filename);}
+
 test('Studio semantic ingress accepts one lightweight object and rejects ambiguous or unsafe action output', () => {
   const {parseStudioTurnSemantic:parse}=loadSource(path.join(root,'src/v04/studioTurnSemantic.ts'),null);
   for(const raw of [

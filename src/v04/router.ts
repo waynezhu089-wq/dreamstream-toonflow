@@ -1,5 +1,6 @@
 import {proposeDirector,previewDirector,confirmDirector,readDirector,directorHistory,rejectDirector} from "./directorBible";
 import {directorDryRun} from './directorDryRun';
+import {compileDirectorAB,readDirectorAB,renderDirectorAB,evaluateDirectorAB,directorABArtifact} from './directorAssetAB';
 import {inspectOperations,recentExecutions,executionDetail,workflowExample,previewRouting,applyRouting} from './operations';
 import {reconcileAutoAssets,autoAssetCoverage} from './autoAsset';
 import {wakeDraftWorker} from './studioDraftImage';
@@ -67,6 +68,12 @@ endpoint('/operations/routing/apply',(input,req)=>applyRouting(input,Number((req
 endpoint("/project/create", (body, req) => createPilotProject(body, Number((req as any).user.id)));
 endpoint("/project/read", input => readPilot(input));
 endpoint("/director/dry-run",directorDryRun);
+for(const [path,handler] of Object.entries({compile:compileDirectorAB,current:readDirectorAB,render:renderDirectorAB,evaluate:evaluateDirectorAB}))
+  endpoint('/director/asset-ab/'+path,(input,req)=>handler(input,Number((req as any).user.id)));
+router.post('/director/asset-ab/artifact',async(req,res)=>{
+  try{const image=await directorABArtifact(req.body,Number((req as any).user.id));res.setHeader('Content-Type',image.mimeType);res.setHeader('Cache-Control','private, max-age=60');res.send(image.bytes);}
+  catch(e){res.status(e instanceof PilotError?e.status:404).json({code:'DIRECTOR_AB_ARTIFACT_MISSING',message:'实验图片不可用'});}
+});
 for(const [path,handler] of Object.entries({propose:proposeDirector,preview:previewDirector,confirm:confirmDirector,current:readDirector,history:directorHistory,reject:rejectDirector})) endpoint("/director/"+path,(input,req)=>handler(input,Number((req as any).user.id)));
 endpoint("/creative/preview", previewCreative);
 endpoint("/creative/apply", applyCreative);

@@ -47,7 +47,7 @@ function mainSource(state:Awaited<ReturnType<typeof captureAutoAssetReadContext>
   return {sourceArtifactId:JSON.parse(job.outputsJson).find((o:any)=>o.role==='MAIN_PREVIEW').artifactId,
     sourceAttachmentId:null,sourceHash:job.draftHash,sourceJobId:job.id,baselineVersion:null};
 }
-function preparedSpec(state:Awaited<ReturnType<typeof captureAutoAssetReadContext>>,asset:any,items:any[]){
+export function preparedSpec(state:Awaited<ReturnType<typeof captureAutoAssetReadContext>>,asset:any,items:any[]){
   const provided=items.find(i=>i.canonicalKey===asset.canonicalKey&&i.sourceAssetRevision===asset.revision);
   if(provided)return provided.spec;
   const confirmed=state.specs.find(s=>s.canonicalKey===asset.canonicalKey&&s.sourceAssetRevision===asset.revision);

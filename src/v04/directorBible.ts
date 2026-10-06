@@ -178,6 +178,16 @@ async function latest(trx: Knex.Transaction, projectId: number) {
     .orderBy("directorVersion", "desc")
     .first();
 }
+// Read-only seam: experiment capture shares its caller's SQLite snapshot.
+export async function captureCurrentDirectorForExperiment(trx: Knex.Transaction, scope: Scope) {
+  const current = await latest(trx, scope.projectId);
+  if (!current || current.scriptId !== scope.scriptId || current.status !== "CURRENT")
+    deny("DIRECTOR_AB_NOT_READY", "需要当前制作单元已确认的导演版本");
+  const captured = await capture(trx, scope);
+  if (current.sourceHash !== captured.sourceHash)
+    deny("DIRECTOR_AB_NOT_READY", "导演来源已变化，请先审阅导演版本");
+  return { current, intent: directorIntentSchema.parse(content(current)) };
+}
 async function checkedProposal(
   trx: Knex.Transaction,
   scope: Scope,
