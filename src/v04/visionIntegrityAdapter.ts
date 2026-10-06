@@ -1,14 +1,17 @@
 import {createHash,randomUUID} from 'node:crypto';
 import {z} from 'zod';
 import u from '@/utils';
-import {requireModel} from '@/services/modelPreset';
+import {requireModel,resolveModels} from '@/services/modelPreset';
 import {inspection,integrityIssue} from './assetIntegrity';
 import {db} from '@/utils/db';
-import {inspectionDerivatives,strictVisionJson,visionError,visionTimeouts,VISION_TRANSPORT_VERSION} from './visionCapability';
+import {inspectionDerivatives,strictVisionJson,visionError,visionTimeouts,VISION_TRANSPORT_VERSION,VISION_PREFLIGHT_VERSION} from './visionCapability';
+export async function integrityVisionConfiguration(projectId:number){
+ const {models}=await resolveModels(projectId),model=models.vision;if(!model)throw Error('VISION_CONFIG_MISSING');const id=model.split(':')[0];
+ const signature=async()=>{const config=await db('o_vendorConfig').where({id}).first();if(!config||config.enable!==1)throw Error('VISION_CONFIG_MISSING');return hash({model,config,code:u.vendor.getCode(id),version:VISION_TRANSPORT_VERSION,preflightVersion:VISION_PREFLIGHT_VERSION});};
+ return {model,signature:await signature()};
+}
 export async function prepareIntegrityVision(projectId:number){
- const model=await requireModel(projectId,'vision'),id=model.split(':')[0];
- const signature=async()=>{const config=await db('o_vendorConfig').where({id}).first();if(!config)throw Error('VISION_CONFIG_MISSING');return hash({model,config,code:u.vendor.getCode(id),version:VISION_TRANSPORT_VERSION});};
- const before=await signature(),session=await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).trackedSession();if(before!==await signature())throw Error('VISION_CONFIG_CHANGED');
+ await requireModel(projectId,'vision');const {model,signature:before}=await integrityVisionConfiguration(projectId),session=await u.Ai.Text(model as Parameters<typeof u.Ai.Text>[0]).trackedSession();if(before!==(await integrityVisionConfiguration(projectId)).signature)throw Error('VISION_CONFIG_CHANGED');
  return {model,session,signature:before};
 }
 export const VISION_INTEGRITY_VERSION='integrity.vision-adapter.1';

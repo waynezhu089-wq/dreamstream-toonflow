@@ -1,6 +1,7 @@
 import sharp from 'sharp';
 import {createHash} from 'node:crypto';
 import {z} from 'zod';
+export const VISION_PREFLIGHT_VERSION='integrity.vision-capability.2';
 export const VISION_TRANSPORT_VERSION='integrity.vision-transport.1';
 export const visionTimeouts={single:30000,multi:45000,inspection:60000};
 export type InspectionImage={view:string;bytes:Buffer;mimeType:string};
@@ -22,7 +23,7 @@ export function visionError(error:any,stage:'single'|'structured'|'multi'|'inspe
 }
 const messages=(question:string,images:InspectionImage[])=>[{role:'user' as const,content:[{type:'text' as const,text:question},...images.flatMap(i=>[{type:'text' as const,text:`Image ${i.view}`},{type:'image' as const,image:i.bytes,mediaType:i.mimeType}])]}];
 export async function probeVisionCapability(session:any,images:InspectionImage[],mode:'NATIVE'|'JSON_TEXT'='NATIVE'){
- const report:any={version:'integrity.vision-capability.1',state:'UNAVAILABLE',imageInput:'NOT_RUN',structuredOutput:'NOT_RUN',multiImage:'NOT_RUN',recommendedMode:'UNSUPPORTED',transportMode:mode,testedAt:Date.now(),stages:[],apiCallCount:0};
+ const report:any={version:VISION_PREFLIGHT_VERSION,state:'UNAVAILABLE',imageInput:'NOT_RUN',structuredOutput:'NOT_RUN',multiImage:'NOT_RUN',recommendedMode:'UNSUPPORTED',transportMode:mode,testedAt:Date.now(),stages:[],apiCallCount:0};
  for(const stage of ['single','structured','multi'] as const){const started=Date.now();try{
   const shape=stage==='multi'?multiProbe:imageProbe,question=stage==='single'?'How many primary people are visible? Reply with only one integer between 0 and 20.':stage==='structured'?'Return only JSON: {"subjectCount":number,"confidence":"HIGH"|"MEDIUM"|"LOW"}. Count visible primary people.':'Return only JSON: {"sameSubject":boolean,"obviousStructuralAnomaly":boolean,"uncertain":boolean}. Compare the supplied views conservatively.';
   const opts={maxRetries:0,abortSignal:AbortSignal.timeout(stage==='multi'?visionTimeouts.multi:visionTimeouts.single),maxOutputTokens:300,system:'VISION_CAPABILITY_PREFLIGHT. Answer the small image question only. No repair or asset mutation.',messages:messages(question,stage==='multi'?images:images.slice(0,1))};report.apiCallCount++;

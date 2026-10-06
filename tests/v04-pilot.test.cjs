@@ -2644,18 +2644,18 @@ test('QA034 guard profiles, rear orientation, compact framing and confirmed-only
 
 test('QA034 conservative Fast states and bounded decisions never invoke an API',async()=>{
  const f=loadSource(path.join(root,'src/v04/fastIntegrityGate.ts'),null),d=loadSource(path.join(root,'src/v04/integrityDecisionEngine.ts'),null),pass={reviewed:true,identity:'PASS',view:'PASS',contamination:'PASS',issues:[]};let calls=0;
- const adapter={state:'AVAILABLE',inspect:async()=>{calls++;return {checks:[...f.requiredVisualChecks],confidence:'HIGH',report:pass};}};
+ const adapter={state:'AVAILABLE',capabilityClass:'FINE_STRUCTURE_VALIDATED',inspect:async()=>{calls++;return {checks:[...f.requiredVisualChecks],confidence:'HIGH',report:pass};}};
  assert.equal((await f.fastIntegrityGate([{name:'HASH',pass:false}],{},adapter)).status,'CLEAR_GLOBAL_DEFECT');assert.equal(calls,0);
  const unknown=await f.fastIntegrityGate([{name:'HASH',pass:true}],{});assert.equal(unknown.status,'SUSPECT');assert.equal(d.integrityDecision(unknown).result,'HUMAN_REVIEW');
  const clean=await f.fastIntegrityGate([{name:'HASH',pass:true}],{},adapter);assert.equal(clean.status,'PASS');assert.equal(clean.escalationRequired,false);assert.equal(d.integrityDecision(clean).decisionAuthority,'FAST_VISION');
  adapter.inspect=async()=>({checks:[...f.requiredVisualChecks],confidence:'LOW',report:pass});assert.equal((await f.fastIntegrityGate([],{},adapter)).status,'SUSPECT');
  adapter.inspect=async()=>{throw Error('local failure');};assert.equal((await f.fastIntegrityGate([],{},adapter)).status,'UNAVAILABLE');
- for(const status of ['PASS','CLEAR_LOCAL_DEFECT','CLEAR_GLOBAL_DEFECT'])assert.notEqual(d.integrityDecision({status,localVisionState:'AVAILABLE'}).result,'HUMAN_REVIEW');
+ for(const status of ['PASS','CLEAR_LOCAL_DEFECT','CLEAR_GLOBAL_DEFECT'])assert.notEqual(d.integrityDecision({status,localVisionState:'AVAILABLE',capabilityClass:'FINE_STRUCTURE_VALIDATED'}).result,'HUMAN_REVIEW');
  assert.equal(d.integrityDecision(unknown,{confidence:'LOW',report:pass}).result,'HUMAN_REVIEW');assert.equal(d.retryPolicy.automaticExecutionEnabled,false);
 });
 
 async function qaFixture(t){
- const f=await mvFixture(t);await f.db.schema.createTable('o_vendorConfig',t=>{t.text('id').primary();t.text('inputValues');});await f.db('o_vendorConfig').insert({id:'fake',inputValues:'{}'});const c=await f.mv.compileMultiView(f.scope,7),execution={},crypto=require('crypto');
+ const f=await mvFixture(t);await f.db.schema.createTable('o_vendorConfig',t=>{t.text('id').primary();t.text('inputValues');t.integer('enable');});await f.db('o_vendorConfig').insert({id:'fake',inputValues:'{}',enable:1});const c=await f.mv.compileMultiView(f.scope,7),execution={},crypto=require('crypto');
  const png=await require('sharp')({create:{width:c.sharedExecution.width,height:c.sharedExecution.height,channels:3,background:'#abc'}}).png().toBuffer();
  for(const side of ['SIDE','BACK']){const a={artifactId:crypto.randomUUID(),extension:'png',sha256:crypto.createHash('sha256').update(png).digest('hex'),mimeType:'image/png',width:c.sharedExecution.width,height:c.sharedExecution.height};const dir=path.join(f.oss.testDir,'v04-multiview',String(f.scope.projectId),c.id);fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,a.artifactId+'.png'),png);execution[side]={status:'SUCCEEDED',artifact:a};}
  await f.db('o_v04MultiViewExperiment').where({id:c.id}).update({status:'COMPLETED',executionJson:JSON.stringify(execution)});return {...f,c,execution,cmd:{...f.scope,experimentId:c.id}};
@@ -2677,8 +2677,8 @@ test('QA034 Vision timeout/malformed/low confidence fail closed without regenera
  const {mv,cmd,oss,truth,db}=await qaFixture(t),before=await truth();oss.visionModel='fake:vision';
  for(const mode of ['timeout','malformed','low']){
   const fast=await mv.fastMultiViewQuality(cmd,7);await mv.preflightMultiViewVision({...cmd,fastReportId:fast.id,confirmExternalInspection:true},7);oss.visionFailure=mode==='timeout'?Object.assign(Error('secret not logged'),{name:'TimeoutError'}):null;
-  const pass={reviewed:true,identity:'PASS',view:'PASS',contamination:'PASS',issues:[],confidence:'LOW'};oss.visionResult=mode==='malformed'?{invalid:true}:{SIDE:pass,BACK:pass,CROSS_VIEW:pass};
-  const r=await mv.visionMultiViewQuality({...cmd,fastReportId:fast.id,confirmExternalInspection:true},7);assert.equal(r.pipeline.decisions.BACK,'HUMAN_REVIEW');assert.equal(r.automaticAcceptance,false);assert.equal(r.pipeline.retryPolicy.automaticExecutionEnabled,false);
+  const pass={reviewed:true,identity:'PASS',view:'PASS',contamination:'PASS',issues:[],confidence:'LOW'};oss.visionResult=mode==='malformed'?{invalid:true}:mode==='low'?{SIDE:pass}:{SIDE:pass,BACK:pass,CROSS_VIEW:pass};
+  const r=await mv.visionMultiViewQuality({...cmd,fastReportId:fast.id,targetView:mode==='timeout'?'ALL':mode==='malformed'?'BACK':'SIDE',confirmExternalInspection:true},7);assert.equal(r.pipeline.decisions.BACK,'HUMAN_REVIEW');assert.equal(r.automaticAcceptance,false);assert.equal(r.pipeline.retryPolicy.automaticExecutionEnabled,false);
   if(mode!=='low')assert.equal(r.pipeline.visionEscalation,'FAILED');
  }
  assert.deepEqual(await truth(),before);assert.equal(oss.visionCalls,3);assert.equal((await db('o_v04AssetIntegrity')).length,11);
@@ -2686,7 +2686,7 @@ test('QA034 Vision timeout/malformed/low confidence fail closed without regenera
 
 test('QA034 explicit escalation denies clear Fast verdict and changed artifact before any provider call',async t=>{
  const {mv,cmd,db,oss,execution}=await qaFixture(t),fast=await mv.fastMultiViewQuality(cmd,7),crypto=require('crypto');
- const row=await db('o_v04AssetIntegrity').where({id:fast.id}).first(),report=JSON.parse(row.reportJson);for(const view of ['SIDE','BACK'])report.pipeline.fast[view].status='PASS';
+ const row=await db('o_v04AssetIntegrity').where({id:fast.id}).first(),report=JSON.parse(row.reportJson);for(const view of ['SIDE','BACK'])report.pipeline.fast[view]={...report.pipeline.fast[view],status:'PASS',coarseStatus:'PASS',capabilityClass:'FINE_STRUCTURE_VALIDATED',escalationRequired:false};
  const id=crypto.randomUUID();await db('o_v04AssetIntegrity').insert({...row,id,reportJson:JSON.stringify(report)});
  await assert.rejects(mv.visionMultiViewQuality({...cmd,fastReportId:id,confirmExternalInspection:true},7),e=>e.code==='INTEGRITY_ESCALATION_NOT_NEEDED');assert.equal(oss.modelCalls.length,0);
  fs.writeFileSync(path.join(oss.testDir,'v04-multiview',String(cmd.projectId),cmd.experimentId,execution.BACK.artifact.artifactId+'.png'),'broken');
@@ -2714,11 +2714,36 @@ test('QA034H1 derivatives are bounded JPEG and preserve original bytes; config c
 test('QA034H2 local six-question compiler is conservative for clean/duplicate/local defect/occlusion/fantasy/vehicle',async()=>{
  const local=loadSource(path.join(root,'src/v04/localFastVision.ts'),null),fast=loadSource(path.join(root,'src/v04/fastIntegrityGate.ts'),null),base={checks:Object.fromEntries(fast.requiredVisualChecks.map(k=>[k,'PASS'])),confidence:'HIGH',localizedDefects:[]};
  const check=async dto=>(await fast.fastIntegrityGate([],{}, {state:'AVAILABLE',inspect:async()=>local.compileLocalObservation(dto,'BACK')})).status;
- assert.equal(await check(base),'PASS');assert.equal(await check({...base,checks:{...base.checks,SUBJECT_COUNT:'FAIL'}}),'CLEAR_GLOBAL_DEFECT');assert.equal(await check({...base,checks:{...base.checks,VIEW:'FAIL'}}),'CLEAR_GLOBAL_DEFECT');assert.equal(await check({...base,checks:{...base.checks,CONTAMINATION:'FAIL'}}),'CLEAR_GLOBAL_DEFECT');
+ assert.equal(await check(base),'SUSPECT_FINE_DETAIL');assert.equal(await check({...base,checks:{...base.checks,SUBJECT_COUNT:'FAIL'}}),'CLEAR_GLOBAL_DEFECT');assert.equal(await check({...base,checks:{...base.checks,VIEW:'FAIL'}}),'CLEAR_GLOBAL_DEFECT');assert.equal(await check({...base,checks:{...base.checks,CONTAMINATION:'FAIL'}}),'CLEAR_GLOBAL_DEFECT');
  assert.equal(await check({...base,checks:{...base.checks,PART_STRUCTURE:'FAIL'},localizedDefects:[{check:'PART_STRUCTURE',region:'hand',description:'obvious localized malformed hand'}]}),'CLEAR_LOCAL_DEFECT');
  assert.equal(await check({...base,confidence:'MEDIUM'}),'SUSPECT');assert.equal(await check({...base,checks:{...base.checks,PART_STRUCTURE:'UNKNOWN'}}),'SUSPECT');assert.equal(await check({...base,checks:{SUBJECT_COUNT:'PASS'}}),'SUSPECT');assert.equal(local.localInspectorConfiguration(),null,'test runtime is not silently AVAILABLE');
  // Known fantasy appendages and occluded limbs are policy evidence, not fabricated observations.
- assert.equal(await check(base),'PASS');assert.equal(await check({...base,checks:{...base.checks,PART_STRUCTURE:'FAIL'}}),'CLEAR_GLOBAL_DEFECT');
- assert.equal(await check({checks:base.checks,confidence:'high',LocalizedDefects:[]}),'PASS');
+ assert.equal(await check(base),'SUSPECT_FINE_DETAIL');assert.equal(await check({...base,checks:{...base.checks,PART_STRUCTURE:'FAIL'}}),'CLEAR_GLOBAL_DEFECT');
+ assert.equal(await check({checks:base.checks,confidence:'high',LocalizedDefects:[]}),'SUSPECT_FINE_DETAIL');
  assert.throws(()=>local.compileLocalObservation({...base,localizedDefects:[{check:'ATTACHMENT',region:'foot',description:'detached'}]},'BACK'),/CONTRADICTORY/);
+});
+
+test('QA034H3 coarse false PASS, human contradiction and fine validated authority are distinct',async()=>{
+ const d=loadSource(path.join(root,'src/v04/integrityDecisionEngine.ts'),null),raw={status:'PASS',confidence:'HIGH',localVisionState:'AVAILABLE',escalationRequired:false};
+ const coarse=d.fastAuthority(raw,'HUMAN','BACK');assert.equal(coarse.status,'SUSPECT_FINE_DETAIL');assert.equal(coarse.coarseStatus,'PASS');assert.deepEqual(coarse.unverifiedFor,['FINE_EXTREMITY_STRUCTURE']);assert.equal(d.integrityDecision(coarse).result,'HUMAN_REVIEW');
+ const conflict=d.fastAuthority({...raw,capabilityClass:'FINE_STRUCTURE_VALIDATED'},'HUMAN','BACK','REPAIRABLE');assert.equal(conflict.humanConflict,'FAST_HUMAN_CONFLICT');assert.equal(conflict.escalationRequired,true);assert.equal(d.integrityDecision(conflict).result,'HUMAN_REVIEW');
+ const validated=d.fastAuthority({...raw,capabilityClass:'FINE_STRUCTURE_VALIDATED'},'HUMAN','SIDE');assert.equal(d.integrityDecision(validated).result,'PASS');assert.deepEqual(validated.unverifiedFor,[]);assert.equal(validated.escalationRequired,false);
+ assert.deepEqual(d.requiredCheckPolicy('VEHICLE','BACK'),['COARSE','FINE_STRUCTURAL_CONNECTION']);assert.deepEqual(d.requiredCheckPolicy('FANTASY_CREATURE','SIDE'),['COARSE','FINE_ATTACHMENT_TOPOLOGY']);assert.equal(raw.status,'PASS');
+});
+
+test('QA034H3 model preflight is independent of Fast and config read never invokes provider',async t=>{
+ const {db,mv,cmd,oss}=await qaFixture(t);const read=await mv.readMultiViewIntegrity(cmd,7);assert.equal(read.externalVision.state,'UNKNOWN');assert.equal(oss.modelCalls.length,0);assert.equal(oss.sessionCount??0,0);
+ const body={...cmd,confirmExternalInspection:true};const p=await mv.preflightMultiViewVision(body,7);assert.equal(p.pipeline.capability.state,'INTEGRITY_VISION_READY');assert.equal((await mv.readMultiViewIntegrity(cmd,7)).externalVision.state,'READY');assert.equal((await mv.preflightMultiViewVision(body,7)).id,p.id);assert.equal(oss.probeCalls,3);
+ await db('o_vendorConfig').where({id:'fake'}).update({inputValues:'{"changed":true}'});assert.equal((await mv.readMultiViewIntegrity(cmd,7)).externalVision.state,'STALE');assert.equal(oss.probeCalls,3);
+});
+
+test('QA034H3 historical false PASS projection preserves human record and force shadow deduplicates by input',async t=>{
+ const {db,mv,cmd,oss}=await qaFixture(t),original=await mv.fastMultiViewQuality(cmd,7),fast={...original,id:require('crypto').randomUUID()};const pass={status:'PASS',confidence:'HIGH',localVisionState:'AVAILABLE',capabilityClass:'FINE_STRUCTURE_VALIDATED',escalationRequired:false};
+ const row=await db('o_v04AssetIntegrity').where({id:original.id}).first(),report=JSON.parse(row.reportJson);report.pipeline.fast={SIDE:pass,BACK:pass};await db('o_v04AssetIntegrity').insert({...row,id:fast.id,reportJson:JSON.stringify(report)});
+ const current=await mv.readMultiViewIntegrity(cmd,7),human={reviewed:true,identity:'PASS',view:'PASS',contamination:'PASS',issues:[]};const bad={...human,issues:[{id:require('crypto').randomUUID(),category:'ORIENTATION',affectedRegion:'foot',description:'wrong direction',severity:'MODERATE',confidence:'HIGH',localizable:true,repairability:'LOCAL_REPAIR',evidenceViews:['BACK']}]};
+ await mv.recordMultiViewIntegrity({...cmd,expectedInput:current.input,reports:{SIDE:human,BACK:bad,CROSS_VIEW:{...human,reviewed:false}}},7);
+ const projected=await mv.readMultiViewIntegrity(cmd,7),f=projected.history.find(r=>r.id===fast.id);assert.equal(f.effectiveFast.BACK.humanConflict,'FAST_HUMAN_CONFLICT');assert.equal(f.effectiveFast.BACK.humanDecision,'REPAIRABLE');assert.equal(f.effectiveDecisions.BACK,'HUMAN_REVIEW');assert.equal((await db('o_v04AssetIntegrity').where({id:fast.id}).first()).reportJson,JSON.stringify(report));
+ await mv.preflightMultiViewVision({...cmd,confirmExternalInspection:true},7);await assert.rejects(mv.visionMultiViewQuality({...cmd,fastReportId:fast.id,targetView:'SIDE',confirmExternalInspection:true},7),e=>e.code==='INTEGRITY_ESCALATION_NOT_NEEDED');
+ oss.visionResult={SIDE:{...human,confidence:'HIGH'}};const body={...cmd,fastReportId:fast.id,targetView:'SIDE',forceShadow:true,confirmExternalInspection:true};const v=await mv.visionMultiViewQuality(body,7);assert.equal(v.pipeline.phase,'COMPLETED');assert.equal(oss.visionCalls,1);assert.equal((await mv.visionMultiViewQuality(body,7)).id,v.id);assert.equal(oss.visionCalls,1);
+ const another=await mv.fastMultiViewQuality(cmd,7);assert.equal((await mv.visionMultiViewQuality({...body,fastReportId:another.id},7)).id,v.id);assert.equal(oss.visionCalls,1);
 });
