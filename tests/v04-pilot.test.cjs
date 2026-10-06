@@ -125,6 +125,7 @@ test('DIR032A current A fidelity, bounded relevant B projection, fair frozen gra
  assert.equal(c.status,'COMPILED');assert.equal(c.evidence.confirmedVisualSpecRevision,null);assert.equal(c.evidence.visualSpecSource,'PERSISTED_DRAFT');
  assert.equal(c.A.renderedPrompt,load('autoAssetPrompt').autoAssetPrompt(c.A.semanticInput.asset,c.A.semanticInput.spec,c.A.semanticInput.creative,'ASSET_MAIN_PREVIEW'));
  assert.deepEqual(c.B.semanticInput,c.A.semanticInput);assert.ok(c.B.renderedPrompt.startsWith(c.A.renderedPrompt));assert.match(c.B.renderedPrompt,/awe first|sublime colossus/);
+ assert.deepEqual(c.A.semanticInput.legacyCompilation,c.evidence.legacyCompilation);assert.ok(c.A.semanticInput.legacyCompilation.draftPromptIR);
  assert.equal(c.B.directorContext.relevantScaleRelations.length,1);assert.equal(c.B.directorContext.relevantTransformationLineage.length,0);assert.doesNotMatch(JSON.stringify(c.B.directorContext),/Pegasus/);
  assert.match(c.B.renderedPrompt,/do not render the related assets/);assert.match(c.B.renderedPrompt,/living creature remains a living creature/);
  const a=structuredClone(c.workflows.A.graph),b=structuredClone(c.workflows.B.graph);delete a['5'].inputs.text;delete b['5'].inputs.text;assert.deepEqual(a,b);assert.equal(c.workflows.A.graph['20'].inputs.seed,c.workflows.B.graph['20'].inputs.seed);
@@ -168,6 +169,7 @@ test('DIR032A restart preserves A artifact and never retries uncertain execution
  const {db,scope,load,ab}=await abFixture(t),c=await ab.compileDirectorAB(scope,7),execution={A:{status:'SUCCEEDED',artifact:{artifactId:'evidence'}},B:{status:'RUNNING'}};
  await db('o_v04DirectorAssetAB').where({id:c.id}).update({status:'RENDERING_B',executionJson:JSON.stringify(execution)});await load('directorAssetABSchema').initializeDirectorABSchema(db);
  const row=(await ab.readDirectorAB(scope,7))[0];assert.equal(row.status,'FAILED');assert.equal(row.execution.errorCode,'EXECUTION_UNCERTAIN');assert.equal(row.execution.A.artifact.artifactId,'evidence');
+ assert.equal(row.execution.B.status,'FAILED');
  await ab.renderDirectorAB({...scope,experimentId:c.id,pairHash:c.pairHash,confirmRender:true},7);assert.equal((await db('o_v04ExecutionTrace')).length,0);
 });
 test('DIR032A actual HTTP compile/read authorization; no producer admission without explicit confirmation',async t=>{

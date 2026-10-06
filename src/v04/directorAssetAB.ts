@@ -45,7 +45,7 @@ export async function captureDirectorABSource(trx:Knex.Transaction,s:z.infer<typ
   if(refs.length>200)deny('DIRECTOR_AB_NOT_READY','参考来源超过安全上限');
   const evidence={...s,canonicalKey:asset.canonicalKey,assetRevision:asset.revision,
     confirmedVisualSpecRevision:confirmed?.revision??null,visualSpecSource:confirmed?'CONFIRMED':'PERSISTED_DRAFT',
-    asset,spec,creative:state.creative,baseline:state.baselines.filter(b=>b.canonicalKey===asset.canonicalKey),references:refs,jobs,
+    asset,spec,creative:state.creative,legacyCompilation:compiled.candidates[0],baseline:state.baselines.filter(b=>b.canonicalKey===asset.canonicalKey),references:refs,jobs,
     acceptedDirectorVersion:director.current.directorVersion,acceptedDirectorId:director.current.id,
     directorSourceHash:director.current.sourceHash,directorCandidateHash:director.current.candidateHash,
     directorIntent:director.intent,route,executorConfiguration:state.config,
@@ -71,7 +71,7 @@ export async function compileDirectorAB(input:unknown,actor:number){
   const s=scope.parse(input);
   return q.transaction(async trx=>{
     await authorize(trx,s,actor);const c=await captureDirectorABSource(trx,s),id=randomUUID(),createdAt=Date.now();
-    const pair=compileDirectorABAssetInput(c.asset,c.spec,c.creative,c.director.intent,c.director.current.directorVersion);
+    const pair=compileDirectorABAssetInput(c.asset,c.spec,c.creative,c.director.intent,c.director.current.directorVersion,c.evidence.legacyCompilation);
     if(!pair.B.directorContext.narrativeRole)deny('DIRECTOR_AB_NOT_READY','当前导演版本缺少鲸鱼叙事角色');
     const seed=parseInt(c.sourceHash.slice(0,12),16),resolution=autoAssetResolution(c.asset.assetKind);
     const build=(prompt:string)=>buildKreaEditWorkflow({profile:c.evidence.route.profile,prompt,seed,...resolution,targetRole:'EXPERIMENTAL_CANDIDATE',jobId:id});
@@ -130,7 +130,7 @@ async function runPair(row:any){
       if(!await q.transaction(trx=>fresh(trx,row))) {execution[side].status='NOT_RUN';await save('STALE');return;}
       execution[side].status='RUNNING';await save('RENDERING_'+side);
       const job={id:execution[side].id,projectId:row.projectId,scriptId:row.scriptId,canonicalKey:'CHAR-003',sourceAssetRevision:c.evidence.assetRevision,
-        generationIntent:'SUBJECT_MAIN_PREVIEW',executionPurpose:'EXPERIMENTAL_CANDIDATE',executorType:'COMFY_LOCAL',executorProfile:c.sharedExecution.profile,
+        generationIntent:c.evidence.legacyCompilation.generationIntent,executionPurpose:'EXPERIMENTAL_CANDIDATE',executorType:'COMFY_LOCAL',executorProfile:c.sharedExecution.profile,
         inputSnapshotJson:JSON.stringify({sourceType:'DIRECTOR_AB_EXPERIMENT',sourceAssetRevision:c.evidence.assetRevision})};
       const promptId=await submitTracedDraft(base,c.workflows[side],job);execution[side].promptId=promptId;await save('RENDERING_'+side);
       const image=await downloadDraft(base,await awaitDraft(base,promptId,c.workflows[side].outputNode,900000));

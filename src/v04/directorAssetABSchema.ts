@@ -11,10 +11,14 @@ export async function initializeDirectorABSchema(db: Knex) {
   // Restart never resubmits a possibly accepted Comfy prompt.
   const interrupted=await db('o_v04DirectorAssetAB').whereIn('status',['RENDERING_A','RENDERING_B']);
   for(const row of interrupted){const e=JSON.parse(row.executionJson);
-    for(const side of ['A','B'])if(e[side]?.id&&await db.schema.hasTable('o_v04ExecutionTrace'))
-      await db('o_v04ExecutionTrace').where({jobId:e[side].id}).whereIn('status',['QUEUED','RUNNING']).update({
-        status:'FAILED',errorCode:'EXECUTION_UNCERTAIN',errorDetail:'EXECUTION_UNCERTAIN',completedAt:Date.now(),updatedAt:Date.now()});
+    for(const side of ['A','B']){
+      if(e[side]?.id&&await db.schema.hasTable('o_v04ExecutionTrace'))
+        await db('o_v04ExecutionTrace').where({jobId:e[side].id}).whereIn('status',['QUEUED','RUNNING']).update({
+          status:'FAILED',errorCode:'EXECUTION_UNCERTAIN',errorDetail:'EXECUTION_UNCERTAIN',completedAt:Date.now(),updatedAt:Date.now()});
+      if(e[side]?.status==='RUNNING')e[side]={...e[side],status:'FAILED',errorCode:'EXECUTION_UNCERTAIN'};
+      else if(e[side]?.status==='QUEUED')e[side]={...e[side],status:'NOT_RUN'};
+    }
+    e.errorCode='EXECUTION_UNCERTAIN';
+    await db('o_v04DirectorAssetAB').where({id:row.id}).update({status:'FAILED',executionJson:JSON.stringify(e),updatedAt:Date.now()});
   }
-  await db('o_v04DirectorAssetAB').whereIn('status',['RENDERING_A','RENDERING_B']).update({
-    status:'FAILED',executionJson:db.raw("json_set(executionJson, '$.errorCode', 'EXECUTION_UNCERTAIN')"),updatedAt:Date.now()});
 }

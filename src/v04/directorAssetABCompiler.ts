@@ -4,14 +4,14 @@ import { autoAssetPrompt } from './autoAssetPrompt';
 import { directorCanonical } from './directorCompiler';
 export const abHash = (x:unknown) => createHash('sha256').update(directorCanonical(x)).digest('hex');
 export const DIRECTOR_AB_COMPILER='director.asset-ab.1';
-export function compileDirectorABAssetInput(asset:any,spec:any,creative:any,intent:DirectorIntent,directorVersion:number) {
+export function compileDirectorABAssetInput(asset:any,spec:any,creative:any,intent:DirectorIntent,directorVersion:number,legacyCompilation:unknown=null) {
   const key=asset.canonicalKey;
   const directorContext={generationMode:'ASSET',canonicalKey:key,directorVersion,
     narrativeRole:intent.narrativeVisualRoles.find(r=>r.canonicalKey===key)??null,
     globalVisualDNA:intent.globalVisualDNA,
     relevantScaleRelations:intent.scaleRelations.filter(r=>r.kind!=='SHOT_SPECIFIC'&&(r.smaller===key||r.larger===key)),
     relevantTransformationLineage:intent.transformationLineage.filter(r=>r.from===key||r.to===key)};
-  const semanticInput={asset,spec,creative};
+  const semanticInput={asset,spec,creative,legacyCompilation};
   const renderedPrompt=autoAssetPrompt(asset,spec,creative,'ASSET_MAIN_PREVIEW');
   // Execution-layer adapter only. Relations describe scale/continuity, not additional image subjects.
   const augmentation=[

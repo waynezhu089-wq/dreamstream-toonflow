@@ -27,14 +27,14 @@ No accepted image baseline decision. Successful jobs remain:
 - SIDE_PROFILE `81311adf-3a26-4d35-8ee2-b15ac8922138`
 - BACK_3Q `e40f821f-0bf5-4382-acf4-d81bf50ebbf3`
 
-Read-only live capture succeeded with source hash `de629eff7b98f6fe5822593bcdbce3cb1d39f41b92cf9d284020894bdd4b53b1`.
+Read-only live capture succeeded with source hash `26d0e7a8c725383cd1396a4dd58480c61a019b4342c766c06bf6991e18233c56`.
 Actual route: KREA2_T2I_ASSET_V1. Director role carries immense/ancient/awe-first/ship-swallowing scale and anti-mascot/anti-horror constraints. Current accepted `scaleRelations` is empty: the compiler does not fabricate edges. Source facts take precedence over ticket examples.
 
 ## Compiler fidelity and projection
 
 One SQLite snapshot captures exact accepted Director freshness, current asset, Creative, persisted/confirmed spec, baseline/reference metadata, current-revision job metadata, route and executor configuration. No model, image-byte read or Comfy request during compilation.
 
-A reuses `compileStudioDraftPromptsInTransaction` for existing validation and `autoAssetPrompt(..., ASSET_MAIN_PREVIEW)` verbatim for the current execution prompt. `preparedSpec` is exported without algorithm changes. A is not an old frozen historical prompt and is not deliberately weakened.
+A reuses `compileStudioDraftPromptsInTransaction` for existing validation and `autoAssetPrompt(..., ASSET_MAIN_PREVIEW)` verbatim for the current execution prompt. Its exact draft Prompt IR, preview plan and generationIntent are also frozen as legacyCompilation evidence; Review Plan compiler changes therefore invalidate source freshness. Execution traces use that captured actual generationIntent. `preparedSpec` is exported without algorithm changes. A is not an old frozen historical prompt and is not deliberately weakened.
 
 B shares the exact semantic input and A prompt prefix. A dedicated model-independent DirectorAssetContext selects only the asset's role, global Visual DNA, touching non-shot scale relations and touching transformation lineage. Its execution-layer augmentation protects isolated-subject composition and identity/materials. Scale references are not additional rendered subjects; film material motifs do not turn a living creature into Dream Matter. No Pegasus role or shot context is dumped into B.
 
