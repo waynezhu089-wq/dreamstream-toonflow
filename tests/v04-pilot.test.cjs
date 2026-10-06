@@ -105,6 +105,107 @@ async function fixture(t) {
 }
 const asset = (name='Dreamer', category='CHAR', sourcePolicy='AI_ALLOWED') => ({ name, category, description:'calm', identityAnchors:['left eyebrow scar'], mustPreserve:['scar'], forbiddenChanges:['redraw brand text'], ownerKey:null, variantOf:null, sourcePolicy, prompt:'' });
 
+async function mvFixture(t){
+ const f=await fixture(t),{db,oss,cache,service}=f,load=n=>loadSource(path.join(root,'src/v04/'+n+'.ts'),db,cache,oss);
+ await load('directorAssetABSchema').initializeDirectorABSchema(db);await load('multiViewSchema').initializeMultiViewSchema(db);
+ const scope=await service.createPilotProject({name:'Multi View test',brief:'boy',targetDuration:40,aspectRatio:'16:9'},7);
+ await db('o_v04Asset').insert({projectId:scope.projectId,canonicalKey:'CHAR-007',name:'Boy',category:'CHAR',assetKind:'HUMAN_CHARACTER',sourcePolicy:'AI_ALLOWED',description:'old long-sleeve pajamas; image authority wins',identityAnchors:JSON.stringify(['white short-sleeve top']),mustPreserve:JSON.stringify(['white shorts','barefoot']),forbiddenChanges:JSON.stringify(['shoes']),status:'ACTIVE',revision:2,createdAt:1,updatedAt:1});
+ const png=await require('sharp')({create:{width:768,height:768,channels:3,background:'#aabbcc'}}).png().toBuffer(),crypto=require('crypto');
+ const attachmentId=crypto.randomUUID(),sha256=crypto.createHash('sha256').update(png).digest('hex'),baselineVersion=crypto.randomUUID();
+ const dir=path.join(oss.testDir,'v04-conversation',String(scope.projectId));fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,attachmentId+'.png'),png);
+ await db('o_v04AgentAttachment').insert({id:attachmentId,...scope,messageId:crypto.randomUUID(),originalName:'boy.png',mimeType:'image/png',bytes:png.length,sha256,purpose:'CONVERSATIONAL_REFERENCE',contextJson:'{}',filePath:'/unused-test.png',createdAt:1});
+ await db('o_v04Decision').insert({id:baselineVersion,...scope,category:'ASSET_EDIT_BASELINE',subjectType:'ASSET',subjectKey:'CHAR-007',content:JSON.stringify({canonicalKey:'CHAR-007',sourceAssetRevision:2,role:'GENERAL',attachmentId,sha256}),status:'ACCEPTED',sourceMessageIds:'[]',createdAt:1,acceptedAt:1});
+ await db('o_v04StudioImageExecutorConfig').insert({projectId:scope.projectId,baseUrl:'http://127.0.0.1:8188',enabled:1,checkpoint:'unused',updatedAt:1});
+ const truth=async()=>{const out={};for(const {name} of await db('sqlite_master').where({type:'table'}).orderBy('name')){if(['sqlite_sequence','o_v04MultiViewExperiment','o_v04ExecutionTrace'].includes(name))continue;out[name]=(await db(name)).map(r=>JSON.stringify(r)).sort();}return out;};
+ return {...f,load,scope,png,attachmentId,sha256,baselineVersion,truth,mv:load('multiView')};
+}
+test('MV033A compile locks accepted image, STAR graph, prompts, metadata and zero production/truth writes',async t=>{
+ const {mv,scope,truth,db,load,oss,attachmentId,sha256}=await mvFixture(t),before=await truth();
+ const fetchBefore=global.fetch;global.fetch=async()=>{throw Error('compile must not call external services');};t.after(()=>global.fetch=fetchBefore);
+ const c=await mv.compileMultiView(scope,7);assert.equal(c.canonicalKey,'CHAR-007');assert.equal(c.status,'COMPILED');assert.equal(c.source.attachmentId,attachmentId);assert.equal(c.source.sourceHash,sha256);
+ assert.equal(c.topology,'STAR');assert.equal(c.anglePolicy,'TOLERANT');assert.equal(c.sourceQualityGate,'HUMAN_REVIEW_REQUIRED');assert.equal(c.fallback.status,'NOT_AUTHORIZED');
+ assert.equal(c.SIDE.sourceHash,sha256);assert.equal(c.BACK.sourceHash,sha256);assert.match(c.SIDE.prompt,/side-oriented|Change viewpoint only/i);assert.match(c.BACK.prompt,/primarily from behind|back-side information|conservatively/);
+ for(const side of ['SIDE','BACK']){assert.match(c[side].prompt,/same subject|subject identity/);assert.match(c[side].prompt,/footwear state/);assert.doesNotMatch(c[side].prompt,/pajamas|long-sleeve|moon|awe|sublime|Director|Dream Matter|exactly 90|exactly 180/);assert.match(c[side].prompt,/no props or new accessories/);assert.match(c[side].prompt,/contact sheet or multi-view sheet/);assert.ok(c[side].prompt.split(/\s+/).length<=140);assert.equal(c[side].workflow.graph['7'].inputs.image,'multiview-identity.png');}
+ assert.match(JSON.stringify(c.identityLock),/white short-sleeve top|white shorts|barefoot/);
+ const a=structuredClone(c.SIDE.workflow.graph),b=structuredClone(c.BACK.workflow.graph);delete a['5'].inputs.prompt;delete b['5'].inputs.prompt;assert.deepEqual(a,b);assert.equal(a['12'].class_type,'Krea2EditModelPatch');assert.deepEqual(a['5'].inputs.image,['7',0]);assert.deepEqual(a['12'].inputs.source_image,['7',0]);
+ assert.deepEqual(await truth(),before);assert.equal((await db('o_v04ExecutionTrace')).length,0);assert.equal(oss.modelCalls.length,0);
+ await assert.rejects(db('o_v04MultiViewExperiment').where({id:c.id}).update({compiledJson:'{}'}),/IMMUTABLE/);assert.equal((await mv.readMultiView(scope,7))[0].id,c.id);
+ await load('multiViewSchema').initializeMultiViewSchema(db);assert.deepEqual(await truth(),before);
+});
+test('MV033A source priority uses BODY before GENERAL, ambiguity and wrong scope fail closed',async t=>{
+ const {db,scope,mv,baselineVersion,attachmentId,sha256,truth}=await mvFixture(t);
+ await db('o_v04Decision').insert({id:require('crypto').randomUUID(),...scope,category:'ASSET_EDIT_BASELINE',subjectType:'ASSET',subjectKey:'CHAR-007',content:JSON.stringify({canonicalKey:'CHAR-007',sourceAssetRevision:2,role:'FULL_BODY_FRONT',attachmentId,sha256}),status:'ACCEPTED',sourceMessageIds:'[]',createdAt:0,acceptedAt:0});
+ const c=await mv.compileMultiView(scope,7);assert.equal(c.source.role,'FULL_BODY_FRONT');assert.notEqual(c.source.baselineVersion,baselineVersion);
+ const before=await truth();await assert.rejects(mv.compileMultiView(scope,8),e=>e.code==='PILOT_FORBIDDEN');await assert.rejects(mv.compileMultiView({...scope,scriptId:999},7),e=>e.code==='PILOT_SCOPE_INVALID');assert.deepEqual(await truth(),before);
+ const a=await db('o_v04Asset').where({projectId:scope.projectId}).first();await db('o_v04Asset').insert({...a,canonicalKey:'CHAR-008'});await assert.rejects(mv.compileMultiView(scope,7),e=>e.code==='MULTIVIEW_TARGET_AMBIGUOUS');
+});
+test('MV033A baseline revision/file/spec/route drift blocks render and preserves all records',async t=>{
+ const {db,scope,mv,attachmentId,oss,truth}=await mvFixture(t),c=await mv.compileMultiView(scope,7),cmd={...scope,experimentId:c.id,experimentHash:c.experimentHash,confirmRender:true,sourceQualityConfirmed:true};
+ await assert.rejects(mv.renderMultiView({...cmd,confirmRender:false},7));await assert.rejects(mv.renderMultiView({...cmd,sourceQualityConfirmed:false},7));
+ await db('o_v04Asset').where({projectId:scope.projectId}).update({revision:3});assert.equal((await mv.readMultiView(scope,7))[0].status,'STALE');await assert.rejects(mv.renderMultiView(cmd,7),e=>e.code==='MULTIVIEW_SOURCE_NOT_READY');
+ await db('o_v04Asset').where({projectId:scope.projectId}).update({revision:2});fs.writeFileSync(path.join(oss.testDir,'v04-conversation',String(scope.projectId),attachmentId+'.png'),'changed');
+ const before=await truth();await assert.rejects(mv.compileMultiView(scope,7),e=>e.code==='MULTIVIEW_SOURCE_NOT_READY');assert.deepEqual(await truth(),before);
+});
+test('MV033A only source-fresh successful MAIN_PREVIEW fallback, no purpose/STALE/cross-project substitute',async t=>{
+ const {db,scope,mv,png,load,oss}=await mvFixture(t);await db('o_v04Decision').where({projectId:scope.projectId}).delete();
+ const state=await db.transaction(trx=>load('autoAsset').captureAutoAssetReadContext(trx,scope)),a=state.assets[0],h=load('multiViewCompiler').multiViewHash,id=require('crypto').randomUUID(),artifactId=require('crypto').randomUUID();
+ await db('o_v04StudioAssetDraftJob').insert({id,...scope,canonicalKey:a.canonicalKey,sourceAssetRevision:2,draftHash:'a'.repeat(64),generationIntent:'SUBJECT_MAIN_PREVIEW',executionPurpose:'ASSET_MAIN_PREVIEW',executorType:'COMFY_LOCAL',executorProfile:'KREA2_T2I_ASSET_V1',workflowVersion:'test',status:'SUCCEEDED',inputSnapshotJson:JSON.stringify({autoVersion:'test',assetEvidence:h(a),creativeEvidence:h(state.creative),confirmedSpecEvidence:null}),outputsJson:JSON.stringify([{artifactId,role:'MAIN_PREVIEW'}]),attemptCount:1,createdAt:1,updatedAt:1});
+ await db('o_v04StudioDraftArtifact').insert({artifactId,jobId:id,projectId:scope.projectId,mimeType:'image/png',extension:'png',role:'MAIN_PREVIEW',width:768,height:768,createdAt:1});const dir=path.join(oss.testDir,'v04-draft-artifacts',String(scope.projectId));fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,artifactId+'.png'),png);
+ assert.equal((await mv.compileMultiView(scope,7)).source.artifactId,artifactId);
+ for(const patch of [{status:'STALE'},{status:'SUCCEEDED',executionPurpose:'FACE_HERO'},{executionPurpose:'FULL_BODY_FRONT'},{executionPurpose:'ASSET_MAIN_PREVIEW',sourceAssetRevision:1},{sourceAssetRevision:2,projectId:999}]){await db('o_v04StudioAssetDraftJob').where({id}).update(patch);await assert.rejects(mv.compileMultiView(scope,7),e=>e.code==='MULTIVIEW_SOURCE_NOT_READY');}
+});
+test('MV033A actual HTTP routes authenticate, compile-only, Blob image and strict confirmation',async t=>{
+ const {db,scope,load,truth}=await mvFixture(t),before=await truth();let actor=7;
+ const app=require('express')();app.use(require('express').json());app.use((req,res,next)=>{req.user={id:actor};next();});app.use('/api/v04',load('router').default);
+ const server=await new Promise(r=>{const s=app.listen(0,'127.0.0.1',()=>r(s));});t.after(()=>new Promise(r=>server.close(r)));
+ const post=(route,body)=>fetch(`http://127.0.0.1:${server.address().port}/api/v04/multiview/${route}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+ const r=await post('compile',scope);assert.equal(r.status,200);const c=(await r.json()).data;assert.deepEqual(await truth(),before);
+ const img=await post('artifact',{...scope,experimentId:c.id,side:'MAIN'});assert.equal(img.status,200);assert.equal(img.headers.get('content-type'),'image/png');assert.ok((await img.arrayBuffer()).byteLength);
+ assert.equal((await post('render',{...scope,experimentId:c.id,experimentHash:c.experimentHash,confirmRender:false})).status,400);
+ actor=8;assert.equal((await post('current',scope)).status,403);assert.equal((await post('artifact',{...scope,experimentId:c.id,side:'MAIN'})).status,403);
+ assert.equal((await db('o_v04ExecutionTrace')).length,0);assert.deepEqual(await truth(),before);
+});
+for(const failedSide of [null,'SIDE','BACK'])test('MV033A mock-only serial STAR render '+(failedSide||'success')+' persists independent artifacts without adoption/retry',async t=>{
+ const {db,scope,mv,png,truth,load,oss}=await mvFixture(t),http=require('http'),graphs=[],sequence=[];
+ const server=http.createServer(async(req,res)=>{res.setHeader('content-type','application/json');if(req.url==='/queue')return res.end(JSON.stringify({queue_running:[],queue_pending:[]}));
+  if(req.url==='/upload/image'){for await(const _ of req){}return res.end(JSON.stringify({name:'identity.png',type:'input',subfolder:''}));}
+  if(req.url==='/prompt'){let text='';for await(const chunk of req)text+=chunk;graphs.push(JSON.parse(text).prompt);sequence.push('submit'+graphs.length);return res.end(JSON.stringify({prompt_id:'p'+graphs.length}));}
+  if(req.url.startsWith('/history/')){const id=req.url.split('/').at(-1);return res.end(JSON.stringify({[id]:failedSide===(id==='p1'?'SIDE':'BACK')?{status:{status_str:'error',messages:['mock failure']}}:{status:{completed:true},outputs:{22:{images:[{filename:id+'.png',subfolder:'',type:'output'}]}}}}));}
+  if(req.url.startsWith('/view')){sequence.push('download'+graphs.length);res.setHeader('content-type','image/png');return res.end(png);}res.statusCode=404;res.end('{}');});
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));await db('o_v04StudioImageExecutorConfig').where({projectId:scope.projectId}).update({baseUrl:'http://127.0.0.1:'+server.address().port});
+ const c=await mv.compileMultiView(scope,7),before=await truth(),cmd={...scope,experimentId:c.id,experimentHash:c.experimentHash,confirmRender:true,sourceQualityConfirmed:true};await mv.renderMultiView(cmd,7);await mv.renderMultiView(cmd,7);
+ let result;const deadline=Date.now()+6000;do{result=(await mv.readMultiView(scope,7))[0];if(['COMPLETED','PARTIAL','FAILED'].includes(result.status))break;await new Promise(r=>setTimeout(r,15));}while(Date.now()<deadline);
+ assert.equal(result.status,failedSide==='SIDE'?'FAILED':failedSide==='BACK'?'PARTIAL':'COMPLETED');assert.equal(graphs.length,failedSide==='SIDE'?1:2);assert.deepEqual(await truth(),before);assert.equal(oss.modelCalls.length,0);
+ for(const graph of graphs)assert.equal(graph['7'].inputs.image,'identity.png');if(!failedSide){assert.deepEqual(sequence,['submit1','download1','submit2','download2']);const a=structuredClone(graphs[0]),b=structuredClone(graphs[1]);delete a['5'].inputs.prompt;delete b['5'].inputs.prompt;assert.deepEqual(a,b);}
+ const traces=await db('o_v04ExecutionTrace').orderBy('createdAt');assert.equal(traces.length,graphs.length);assert.ok(traces.every(x=>x.executionPurpose.startsWith('EXPERIMENTAL_MULTIVIEW_')));
+ await load('multiViewSchema').initializeMultiViewSchema(db);const restored=(await mv.readMultiView(scope,7))[0];assert.deepEqual(restored.execution,result.execution);
+ for(const side of ['SIDE','BACK'])if(result.execution[side]?.artifact){assert.equal((await mv.multiViewArtifact({...scope,experimentId:c.id,side},7)).bytes.length,png.length);assert.equal(result.execution[side].artifact.role,'EXPERIMENTAL_MULTIVIEW_'+side);}
+ if(failedSide!=='SIDE'){const e=await mv.evaluateMultiView({...scope,experimentId:c.id,SIDE:'PARTIAL_PASS',BACK:failedSide?'FAIL':'PASS'},7);assert.equal(e.SIDE,'PARTIAL_PASS');}
+ await mv.renderMultiView(cmd,7);assert.equal(graphs.length,failedSide==='SIDE'?1:2);
+});
+test('MV033A restart marks uncertain run terminal, preserves succeeded artifact, never rerenders',async t=>{
+ const {db,scope,mv,load}=await mvFixture(t),c=await mv.compileMultiView(scope,7);
+ await db('o_v04MultiViewExperiment').where({id:c.id}).update({status:'RENDERING_BACK',executionJson:JSON.stringify({SIDE:{status:'SUCCEEDED',artifact:{artifactId:'retained'}},BACK:{id:require('crypto').randomUUID(),status:'RUNNING'}})});
+ await load('multiViewSchema').initializeMultiViewSchema(db);const r=(await mv.readMultiView(scope,7))[0];assert.equal(r.status,'PARTIAL');assert.equal(r.execution.SIDE.artifact.artifactId,'retained');assert.equal(r.execution.BACK.errorCode,'EXECUTION_UNCERTAIN');
+});
+test('MV033A Visual Spec and accepted baseline version drift are fenced before any execution',async t=>{
+ const {db,scope,mv,attachmentId,sha256,load}=await mvFixture(t),c=await mv.compileMultiView(scope,7);
+ const a=await db('o_v04Asset').where({projectId:scope.projectId}).first(),spec=load('visualSpecContract').compileVisualSemantic({...a,identityAnchors:[],mustPreserve:[],forbiddenChanges:[]},{visualIdentitySummary:'boy',details:{}});
+ await db('o_v04AssetVisualSpec').insert({projectId:scope.projectId,canonicalKey:a.canonicalKey,revision:1,status:'CONFIRMED',sourceAssetRevision:2,specJson:JSON.stringify(spec),createdAt:1,updatedAt:1});
+ assert.equal((await mv.readMultiView(scope,7))[0].status,'STALE');await assert.rejects(mv.renderMultiView({...scope,experimentId:c.id,experimentHash:c.experimentHash,confirmRender:true,sourceQualityConfirmed:true},7),e=>e.code==='MULTIVIEW_SOURCE_NOT_READY');
+ const next=await mv.compileMultiView(scope,7);await db('o_v04Decision').insert({id:require('crypto').randomUUID(),...scope,category:'ASSET_EDIT_BASELINE',subjectType:'ASSET',subjectKey:a.canonicalKey,content:JSON.stringify({canonicalKey:a.canonicalKey,sourceAssetRevision:2,role:'GENERAL',attachmentId,sha256}),status:'ACCEPTED',sourceMessageIds:'[]',createdAt:2,acceptedAt:2});
+ assert.equal((await mv.readMultiView(scope,7)).find(r=>r.id===next.id).status,'STALE');assert.equal((await db('o_v04ExecutionTrace')).length,0);
+});
+test('MV033A derive route unsupported or disabled is fail-closed, no T2I fallback',async t=>{
+ const {db,scope,mv,load,truth}=await mvFixture(t),operations=load('operations');
+ const change=async(patch)=>{const body={projectId:scope.projectId,requestId:require('crypto').randomUUID(),...patch},p=await operations.previewRouting(body);return operations.applyRouting({...body,previewHash:p.previewHash,confirmed:true},7);};
+ await change({routes:{DERIVE_VIEW:'KREA2_DERIVE_ASSET_REFERENCE_V1'}});
+ let before=await truth();await assert.rejects(mv.compileMultiView(scope,7),e=>e.code==='MULTIVIEW_ROUTE_UNSUPPORTED');assert.deepEqual(await truth(),before);
+ await change({reset:true});
+ await change({disabledProfiles:['KREA2_DERIVE_CHARACTER_REFERENCE_V1']});
+ before=await truth();await assert.rejects(mv.compileMultiView(scope,7),e=>e.code==='MULTIVIEW_ROUTE_UNSUPPORTED');assert.deepEqual(await truth(),before);assert.equal((await db('o_v04ExecutionTrace')).length,0);
+});
+
 async function abFixture(t){
  const f=await fixture(t),{db,oss,cache,service:s}=f,load=n=>loadSource(path.join(root,'src/v04/'+n+'.ts'),db,cache,oss);
  await load('directorSchema').initializeDirectorSchema(db);await load('directorAssetABSchema').initializeDirectorABSchema(db);
