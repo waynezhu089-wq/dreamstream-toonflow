@@ -194,6 +194,43 @@ test('DIR032A shared GPU lease prevents any prompt when a different draft worker
 });
 async function fixtureDirectory(db){return path.dirname(db.client.config.connection.filename);}
 
+test('DIR032AH1 relevant visual DNA excludes foreign material/motion/motifs from B execution, not merely a negative guard',async t=>{
+ const {db,oss,cache}=await fixture(t),load=n=>loadSource(path.join(root,'src/v04/'+n+'.ts'),db,cache,oss),intent=load('directorContract').emptyDirectorIntent();
+ intent.globalVisualDNA={artStyle:'cinematic stylized realism, dreamlike but grounded',colorLanguage:['night blue / blue-violet environment'],lightingLanguage:['filmic moonlight and volumetric illumination'],realismLevel:'grounded anatomy',atmosphere:'sublime awe',forbiddenStyleDrift:['no chibi cartoon mascot drift','no horror monster'],
+ materialLanguage:['semi-transparent Dream Matter luminous solid body'],motionLanguage:['mist → particle → contour → solid transformation cycle'],recurringVisualMotifs:['reaching hand','moon destination','Pegasus / Logo graphic match','night-blue dream atmosphere']};
+ const a={canonicalKey:'CHAR-003',assetKind:'CREATURE',name:'Whale',description:'living whale',identityAnchors:[],mustPreserve:[],forbiddenChanges:[]},spec={visualIdentitySummary:'mature whale',materials:['rough gray-black biological skin']};
+ const c=load('directorAssetABCompiler').compileDirectorABAssetInput(a,spec,null,intent,1),dna=c.B.directorContext.assetVisualDNA;
+ for(const k of ['artStyle','colorLanguage','lightingLanguage','realismLevel','atmosphere'])assert.deepEqual(dna.inherited[k],intent.globalVisualDNA[k]);
+ assert.deepEqual(dna.inherited.materialLanguage,[]);assert.deepEqual(dna.inherited.motionLanguage,[]);assert.deepEqual(dna.inherited.recurringVisualMotifs,['night-blue dream atmosphere']);
+ assert.deepEqual(dna.excluded.materialLanguage,intent.globalVisualDNA.materialLanguage);assert.equal(dna.excluded.recurringVisualMotifs.length,3);assert.equal(dna.materialIdentity,'LIVING_BIOLOGICAL_CREATURE');assert.equal(c.B.directorContext.globalVisualDNA,undefined);
+ for(const phrase of [...dna.excluded.materialLanguage,...dna.excluded.motionLanguage,...dna.excluded.recurringVisualMotifs])assert.ok(!c.B.renderedPrompt.includes(phrase));
+ assert.match(c.B.renderedPrompt,/physical skin.*grounded anatomy/);assert.ok(dna.projectionReasons.length);assert.equal(oss.modelCalls.length,0);
+});
+test('DIR032AH1 material inheritance follows incoming MATERIAL_TRANSFORMATION, not kind or merely touching lineage',async t=>{
+ const {db,oss,cache}=await fixture(t),load=n=>loadSource(path.join(root,'src/v04/'+n+'.ts'),db,cache,oss),g=load('directorContract').emptyDirectorIntent().globalVisualDNA;
+ g.materialLanguage=['Dream Matter material'];g.motionLanguage=['condense and reform'];g.recurringVisualMotifs=['Dream Matter flow','Logo graphic match'];
+ const project=load('directorAssetVisualDNA').projectGlobalVisualDNAForAsset,input={asset:{canonicalKey:'PROP-001',assetKind:'VEHICLE'},visualSpec:{},narrativeRole:null,globalVisualDNA:g,relevantScale:[],relevantLineage:[{from:'FX-001',to:'PROP-001',relationType:'MATERIAL_TRANSFORMATION'}]};
+ const vehicle=project(input);assert.deepEqual(vehicle.inherited.materialLanguage,g.materialLanguage);assert.deepEqual(vehicle.inherited.motionLanguage,g.motionLanguage);assert.deepEqual(vehicle.inherited.recurringVisualMotifs,['Dream Matter flow']);
+ for(const other of [{...input,asset:{canonicalKey:'CHAR-003',assetKind:'CREATURE'}},{...input,relevantLineage:[{from:'PROP-001',to:'FX-001',relationType:'MATERIAL_TRANSFORMATION'}]},{...input,relevantLineage:[{from:'FX-001',to:'PROP-001',relationType:'COMPOSITION_RESOLUTION'}]}])assert.deepEqual(project(other).inherited.materialLanguage,[]);
+ assert.deepEqual(project({...input,visualSpec:{visualIdentitySummary:'not made of Dream Matter'}}).inherited.materialLanguage,[]);
+ assert.deepEqual(project({...input,relevantLineage:[],asset:{canonicalKey:'PROP-002',assetKind:'PROP',description:'made of Dream Matter'}}).inherited.materialLanguage,g.materialLanguage);
+});
+test('DIR032AH1 pre-hotfix A is byte identical and unchanged seed/graph controls accompany new B only',async t=>{
+ const {scope,ab,load}=await abFixture(t),c=await ab.compileDirectorAB(scope,7),ts=require('typescript');
+ const oldText=require('child_process').execFileSync('git',['-c','safe.directory='+root,'show','fc04a90bc2a621c80444747effdef4dafedd3f9d:src/v04/directorAssetABCompiler.ts'],{cwd:root,encoding:'utf8'});
+ const old={exports:{}};new Function('require','module','exports',ts.transpileModule(oldText,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText)(name=>name.startsWith('./')?load(name.slice(2)):require(name),old,old.exports);
+ const base=c.A.semanticInput,before=old.exports.compileDirectorABAssetInput(base.asset,base.spec,base.creative,c.evidence.directorIntent,1,base.legacyCompilation);
+ assert.deepEqual(c.A,before.A);assert.notEqual(c.B.inputHash,before.B.inputHash);
+ const graph=load('kreaImageEditProfile').buildKreaEditWorkflow({profile:c.sharedExecution.profile,prompt:before.A.renderedPrompt,seed:parseInt(c.sourceHash.slice(0,12),16),width:768,height:1024,targetRole:'EXPERIMENTAL_CANDIDATE',jobId:c.id});assert.deepEqual(c.workflows.A,graph);
+ const a=structuredClone(c.workflows.A),b=structuredClone(c.workflows.B);delete a.graph['5'].inputs.text;delete b.graph['5'].inputs.text;assert.deepEqual(a,b);
+});
+test('DIR032AH1 old full-DNA experiment is read-only STALE and cannot render without recompilation',async t=>{
+ const {db,scope,ab,truth}=await abFixture(t),c=await ab.compileDirectorAB(scope,7),old=structuredClone(c);delete old.B.directorContext.assetVisualDNA;old.B.directorContext.globalVisualDNA={materialLanguage:['unsafe global DNA']};
+ await db('o_v04DirectorAssetAB').insert({id:require('crypto').randomUUID(),...scope,status:'COMPILED',compiledJson:JSON.stringify(old),executionJson:'{}',createdAt:c.createdAt+1,updatedAt:c.createdAt+1});
+ const row=await db('o_v04DirectorAssetAB').orderBy('createdAt','desc').first(),before=await truth();assert.equal((await ab.readDirectorAB(scope,7))[0].status,'STALE');
+ await assert.rejects(ab.renderDirectorAB({...scope,experimentId:row.id,pairHash:c.pairHash,confirmRender:true},7),e=>e.code==='DIRECTOR_AB_NOT_READY');assert.deepEqual(await truth(),before);assert.equal((await db('o_v04DirectorAssetAB').where({id:row.id}).first()).status,'COMPILED');
+});
+
 test('Studio semantic ingress accepts one lightweight object and rejects ambiguous or unsafe action output', () => {
   const {parseStudioTurnSemantic:parse}=loadSource(path.join(root,'src/v04/studioTurnSemantic.ts'),null);
   for(const raw of [
