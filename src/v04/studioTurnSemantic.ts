@@ -41,7 +41,7 @@ export function studioModeHint(raw: string): StudioOutput["mode"] | null {
 
 // The model may wrap one object in a short explanation or a markdown fence. It
 // may not supply several objects and leave Dream Stream to guess which is true.
-function oneObject(text: string): string {
+export function oneObject(text: string): string {
   const trimmed = text.trim();
   const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
   const source = fenced ? fenced[1].trim() : trimmed;

@@ -1,3 +1,4 @@
+import {proposeDirector,previewDirector,confirmDirector,readDirector,directorHistory,rejectDirector} from "./directorBible";
 import {directorDryRun} from './directorDryRun';
 import {inspectOperations,recentExecutions,executionDetail,workflowExample,previewRouting,applyRouting} from './operations';
 import {reconcileAutoAssets,autoAssetCoverage} from './autoAsset';
@@ -66,6 +67,7 @@ endpoint('/operations/routing/apply',(input,req)=>applyRouting(input,Number((req
 endpoint("/project/create", (body, req) => createPilotProject(body, Number((req as any).user.id)));
 endpoint("/project/read", input => readPilot(input));
 endpoint("/director/dry-run",directorDryRun);
+for(const [path,handler] of Object.entries({propose:proposeDirector,preview:previewDirector,confirm:confirmDirector,current:readDirector,history:directorHistory,reject:rejectDirector})) endpoint("/director/"+path,(input,req)=>handler(input,Number((req as any).user.id)));
 endpoint("/creative/preview", previewCreative);
 endpoint("/creative/apply", applyCreative);
 endpoint("/assets/preview", previewAssets);
@@ -112,9 +114,9 @@ function studioAssistantId(userMessageId: string) {
   const hash = createHash("sha256").update(`v04-studio-assistant:${userMessageId}`).digest("hex");
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
 }
-async function completeStudioTurn(input: z.infer<typeof studioTurnRequest>, userMessageId: string) {
+async function completeStudioTurn(input: z.infer<typeof studioTurnRequest>, userMessageId: string, actorUserId: number) {
   let result: Awaited<ReturnType<typeof answerStudioTurn>>;
-  try { result = await answerStudioTurn(input, userMessageId); }
+  try { result = await answerStudioTurn(input, userMessageId, actorUserId); }
   catch (error) {
     if (error instanceof StudioTurnFailure) { error.userMessageId = userMessageId; throw error; }
     const correlationId = randomUUID();
@@ -133,7 +135,7 @@ async function completeStudioTurn(input: z.infer<typeof studioTurnRequest>, user
   return { ...result, isolationKey: memoryKey(input.context.projectId), userMessageId, assistantMessageId };
 }
 
-endpoint("/agent/studio-turn", async input => {
+endpoint("/agent/studio-turn", async (input,req) => {
   const data = studioTurnRequest.parse(input);
   await readPilot({ projectId: data.context.projectId, scriptId: data.context.scriptId });
   const attachments = await attachmentsForMessage(data.context.projectId, data.attachmentIds);
@@ -151,10 +153,10 @@ endpoint("/agent/studio-turn", async input => {
     await trx("memories").insert({ id: userMessageId, isolationKey: key, type: "message", role: "user", content: data.message,
       embedding: embedding ? JSON.stringify(embedding) : null, summarized: 0, createTime: Date.now() });
   });
-  return completeStudioTurn(data, userMessageId);
+  return completeStudioTurn(data, userMessageId, Number((req as any).user.id));
 });
 const studioRetries = new Set<string>();
-endpoint("/agent/studio-turn/retry", async input => {
+endpoint("/agent/studio-turn/retry", async (input,req) => {
   const data = studioTurnRequest.omit({ message: true }).extend({ userMessageId: z.string().uuid() }).parse(input);
   await readPilot({ projectId: data.context.projectId, scriptId: data.context.scriptId });
   const key = memoryKey(data.context.projectId);
@@ -170,7 +172,7 @@ endpoint("/agent/studio-turn/retry", async input => {
   if (studioRetries.has(user.id)) throw new PilotError("PILOT_STUDIO_RETRY_IN_PROGRESS", "这条消息正在重试，请稍后查看对话", 409);
   studioRetries.add(user.id);
   try { return await completeStudioTurn({ context: data.context, message: user.content, attachmentIds:data.attachmentIds, ...(data.parentCandidateId?{parentCandidateId:data.parentCandidateId}:{}),
-    ...(data.optionalDraft ? { optionalDraft: data.optionalDraft } : {}) }, user.id); }
+    ...(data.optionalDraft ? { optionalDraft: data.optionalDraft } : {}) }, user.id, Number((req as any).user.id)); }
   catch (error: any) {
     if (error?.code === "SQLITE_CONSTRAINT_PRIMARYKEY" || error?.code === "SQLITE_CONSTRAINT_UNIQUE")
       throw new PilotError("PILOT_STUDIO_ALREADY_ANSWERED", "这条消息已有回复，请刷新对话", 409);

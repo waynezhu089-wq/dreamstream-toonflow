@@ -1,3 +1,4 @@
+import {proposeDirector,readDirector} from "./directorBible";
 import {previewImageBaseline,listImageBaselines} from './assetImageBaseline';
 import {reconcileAutoAssets,autoAssetCoverage} from './autoAsset';
 import {wakeDraftWorker} from './studioDraftImage';
@@ -54,11 +55,16 @@ function studioFailure(ctx: z.infer<typeof contextSchema>, stage: string, error?
     stage, correlationId, stage === "STRICT_VALIDATION_FAILED" || stage === "SEMANTIC_NORMALIZATION_FAILED" ? 422 : 502);
 }
 
-export async function answerStudioTurn(input: unknown, userMessageId?: string) {
+export async function answerStudioTurn(input: unknown, userMessageId?: string, actorUserId?: number) {
   const data = studioTurnRequest.parse(input);
   const ctx = data.context;
   const state = await readPilot({ projectId: ctx.projectId, scriptId: ctx.scriptId });
   const selected = ctx.selectedObject;
+  if(/导演(方向|方案|视觉)|整部片.*视觉方向|全片.*视觉|鲸鱼.*(恐怖|怪兽|敬畏)|飞马.*神圣|蓝色物质.*贯穿|不要.*赛博|不要.*游戏.*电影/.test(data.message)){
+    const scope={projectId:ctx.projectId,scriptId:ctx.scriptId};const current=await readDirector(scope,actorUserId??0);
+    const proposal=await proposeDirector({...scope,userInstruction:data.message,...(current.proposal&&current.proposal.status!=='STALE'?{baseProposalId:current.proposal.id}:{} )},actorUserId??0);
+    return {mode:'DIRECTOR_PROPOSAL',reply:'导演方向候选已准备，请审阅变化后人工确认。当前图片不会自动改变。',directorProposal:proposal,applied:false};
+  }
   if(/把.*资产.*准备好|准备.*全部.*素材|重新做.*第一稿|怎么.*还没图|为什么.*没有图/.test(data.message)){
     const asset=state.assets.find((a:any)=>selected?.type==='ASSET'&&a.canonicalKey===selected.key)||state.assets.find((a:any)=>data.message.includes(a.name)||data.message.includes(a.canonicalKey));
     if(/重新做/.test(data.message)&&!asset)return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'请选中要重新准备第一稿的素材。',applied:false};

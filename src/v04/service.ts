@@ -69,9 +69,9 @@ export async function listPilotProjects(actorUserId: number) {
   return q("o_v04Creative as c").join("o_project as p", "p.id", "c.projectId")
     .where("p.userId", actorUserId).select("c.projectId", "c.scriptId", "c.targetDuration", "c.aspectRatio", "p.name").orderBy("p.createTime", "desc").limit(100);
 }
-export async function readPilot(input: unknown, allowProjectCreativeFallback = false) {
+export async function readPilot(input: unknown, allowProjectCreativeFallback = false, transaction?: Knex.Transaction) {
   const parsed = scope.parse(input);
-  return q.transaction(async trx => {
+  const read = async (trx: Knex.Transaction) => {
     const { project } = await checkedScope(trx, parsed);
     const creative = await trx("o_v04Creative").where(parsed).first() || (allowProjectCreativeFallback ? await trx("o_v04Creative").where({ projectId: parsed.projectId }).orderBy("scriptId").first() : null);
     if (!creative) throw new PilotError("PILOT_NOT_FOUND", "该项目没有 V0.4 工作空间", 404);
@@ -108,7 +108,8 @@ export async function readPilot(input: unknown, allowProjectCreativeFallback = f
     const promptBuilds = promptRows.map(row => ({ ...row, promptIr: JSON.parse(row.promptIrJson), renderedPrompt: JSON.parse(row.renderedPromptJson),
       effectiveStatus: row.status === "READY" && row.compilerVersion === compilerVersionForIntent(row.generationIntent as GenerationIntent) && currentSpecRevision.get(row.canonicalKey) === row.visualSpecRevision ? "READY" : "STALE" }));
     return { project: { id: project.id, name: project.name }, creative, storyboards, assets: assets.map(a => ({ ...a, identityAnchors: JSON.parse(a.identityAnchors), mustPreserve: JSON.parse(a.mustPreserve), forbiddenChanges: JSON.parse(a.forbiddenChanges), relatedKeys: JSON.parse(a.relatedKeys) })), bindings, assetPlan, visualSpecs, promptBuilds, libraryBindings, reviewPlans: reviewPlans.map(p => ({ ...p, turnaroundFilePaths: JSON.parse(p.turnaroundFilePaths), previewSpec: JSON.parse(p.previewSpec), turnaroundSpec: JSON.parse(p.turnaroundSpec) })), coverage: { sourceCreativeVersion: coverageRows[0]?.creativeVersion ?? null, items: coverage, stale: coverageRows.length > 0 && coverageRows[0].creativeVersion !== creative.version }, agentReferences, decisions: decisions.map(d => ({ ...d, sourceMessageIds: JSON.parse(d.sourceMessageIds) })) };
-  });
+  };
+  return transaction ? read(transaction) : q.transaction(read);
 }
 function creativePlan(current: any, data: z.infer<typeof creativeRequest>) {
   if (current.version !== data.expectedVersion) throw new PilotError("PILOT_PREVIEW_STALE", "创意内容已更新，请重新预览", 409);

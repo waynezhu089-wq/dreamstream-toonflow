@@ -43,6 +43,7 @@ import supervisor from "@/routes/supervisor";
 import validateAcceptedVideoMaterialRoute from "@/routes/production/workbench/validateAcceptedVideoMaterial";
 import { initializeV04Schema, initializeV04Profile } from "@/v04/schema";
 import { wakeDraftWorker } from "@/v04/studioDraftImage";
+import { initializeDirectorSchema } from "@/v04/directorSchema";
 import v04Pilot from "@/v04/router";
 
 const app = express();
@@ -87,6 +88,7 @@ export default async function startServe(randomPort: Boolean = false) {
   await initializeRevisionSchema(u.db);
   await initializeVideoProductionSchema(u.db);
   await initializeV04Schema(db);
+  if (process.env.DS_V04_PILOT === "1") await initializeDirectorSchema(db);
   if (process.env.DS_V04_PILOT === "1") await initializeV04Profile(db);
   if (process.env.DS_V04_PILOT === "1") wakeDraftWorker();
 
