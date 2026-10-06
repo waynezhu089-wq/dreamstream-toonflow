@@ -2756,9 +2756,9 @@ test('QA034H5 target-only brief and image transport preserve Fast and original i
  const images=['MAIN','SIDE','BACK'].map(view=>({view,bytes:png,mimeType:'image/png'}));
  for(const target of ['BACK','SIDE'])for(const transportMode of ['NATIVE','JSON_TEXT']){
   const brief=adapter.minimalEscalationBrief({integrityProfile:'HUMAN',mustPreserve:['barefoot'],details:'DO_NOT_SEND'},fast,target);let request,calls=0;
-  const reply={result:'PASS',confidence:'HIGH',issues:[]},capture=async r=>{request=r;calls++;return transportMode==='NATIVE'?{object:reply}:{text:JSON.stringify(reply)};};
+  const reply=target==='BACK'?qaFinePass():{result:'PASS',confidence:'HIGH',issues:[]},capture=async r=>{request=r;calls++;return transportMode==='NATIVE'?{object:reply}:{text:JSON.stringify(reply)};};
   const result=await adapter.inspectIntegrityVision(1,brief,images,{prepared:{model:'fake:qwen3.8-flash',signature:'test',session:{invokeObject:capture,invoke:capture}},transportMode,targetView:target});
-  assert.equal(result.status,'SUCCEEDED');assert.equal(calls,1);assert.deepEqual(result.audit.imageViewsSent,['MAIN',target]);assert.equal(request.messages[0].content.filter(i=>i.type==='image').length,2);assert.equal(request.maxRetries,0);
+  assert.equal(result.status,'SUCCEEDED');assert.equal(calls,1);assert.deepEqual(result.audit.imageViewsSent,target==='BACK'?['BACK_FULL','BACK_DETAIL']:['MAIN',target]);assert.equal(request.messages[0].content.filter(i=>i.type==='image').length,2);assert.equal(request.maxRetries,0);
   const text=request.messages[0].content[0].text;assert.ok(!/DO_NOT_SEND|CROSS_VIEW|metadata|SUBJECT_COUNT/.test(text));assert.ok(!text.includes(target==='BACK'?'SIDE':'BACK'));assert.deepEqual(Object.keys(result.reports),[target]);
   assert.equal(result.audit.targetView,target);assert.deepEqual(result.audit.requestedCheckClasses,brief.requestedCheckClasses);assert.equal(result.audit.transportMode,transportMode);assert.match(result.audit.briefHash,/^[a-f0-9]{64}$/);assert.match(result.audit.responseHash,/^[a-f0-9]{64}$/);assert.ok(result.audit.latencyMs>=0);assert.equal(result.audit.modelName,'qwen3.8-flash');
  }
@@ -2780,7 +2780,7 @@ test('QA034H5 timeout is terminal human review with unchanged 60 second budget a
  const adapter=loadSource(path.join(root,'src/v04/visionIntegrityAdapter.ts'),null,new Map(),{}),capability=loadSource(path.join(root,'src/v04/visionCapability.ts'),null),engine=loadSource(path.join(root,'src/v04/integrityDecisionEngine.ts'),null);
  assert.equal(capability.visionTimeouts.inspection,60000);const png=await require('sharp')({create:{width:32,height:32,channels:3,background:'#abc'}}).png().toBuffer(),fast={status:'SUSPECT_FINE_DETAIL',coarseStatus:'PASS',confidence:'HIGH'},brief=adapter.minimalEscalationBrief({integrityProfile:'HUMAN'},{BACK:fast},'BACK');let calls=0;
  const result=await adapter.inspectIntegrityVision(1,brief,['MAIN','SIDE','BACK'].map(view=>({view,bytes:png,mimeType:'image/png'})),{prepared:{model:'fake:qwen3.8-flash',signature:'test',session:{invokeObject:async()=>{calls++;throw Object.assign(Error('timed out'),{name:'TimeoutError'});}}},transportMode:'NATIVE',targetView:'BACK'});
- assert.equal(calls,1);assert.equal(result.status,'FAILED');assert.equal(result.reports,null);assert.equal(result.audit.errorCode,'VISION_PROVIDER_TIMEOUT');assert.deepEqual(result.audit.imageViewsSent,['MAIN','BACK']);assert.equal(engine.integrityDecision(fast).result,'HUMAN_REVIEW');
+ assert.equal(calls,1);assert.equal(result.status,'FAILED');assert.equal(result.reports,null);assert.equal(result.audit.errorCode,'VISION_PROVIDER_TIMEOUT');assert.deepEqual(result.audit.imageViewsSent,['BACK_FULL','BACK_DETAIL']);assert.equal(engine.integrityDecision(fast).result,'HUMAN_REVIEW');
 });
 
 
@@ -2792,8 +2792,8 @@ test('QA034H5A old brief FAILED records cannot replay minimal brief; current res
   const old={...row,id:crypto.randomUUID(),reportJson:JSON.stringify({...fast,pipeline:{...fast.pipeline,kind:'VISION',phase:'COMPLETED',targetView:'BACK',configSignature,inspectionKey:crypto.createHash('sha256').update(JSON.stringify({binding:fast.input,targetView:'BACK',configSignature,briefVersion})).digest('hex'),visionEscalation:'FAILED',visionAudit:{errorCode:'VISION_PROVIDER_TIMEOUT'}}})};
   await db('o_v04AssetIntegrity').insert(old);oldRows.push(await db('o_v04AssetIntegrity').where({id:old.id}).first());
  }
- const body={...cmd,fastReportId:fast.id,targetView:'BACK',confirmExternalInspection:true};oss.visionResult={result:'PASS',confidence:'HIGH',issues:[]};
- const result=await mv.visionMultiViewQuality(body,7);assert.equal(oss.visionCalls,1);assert.equal(result.pipeline.visionEscalation,'USED');assert.equal(result.pipeline.inspectionBrief.version,'integrity.fine-brief.1');
+ const body={...cmd,fastReportId:fast.id,targetView:'BACK',confirmExternalInspection:true};oss.visionResult=qaFinePass();
+ const result=await mv.visionMultiViewQuality(body,7);assert.equal(oss.visionCalls,1);assert.equal(result.pipeline.visionEscalation,'USED');assert.equal(result.pipeline.inspectionBrief.version,'integrity.fine-brief.2');
  for(const row of oldRows){assert.notEqual(result.id,row.id);assert.notEqual(result.pipeline.inspectionKey,JSON.parse(row.reportJson).pipeline.inspectionKey);assert.deepEqual(await db('o_v04AssetIntegrity').where({id:row.id}).first(),row);}
  const count=(await db('o_v04AssetIntegrity')).length,replay=await mv.visionMultiViewQuality(body,7);assert.equal(replay.id,result.id);assert.equal(oss.visionCalls,1);assert.equal((await db('o_v04AssetIntegrity')).length,count);assert.deepEqual(await truth(),before);
  await assert.rejects(db('o_v04AssetIntegrity').where({id:oldRows[0].id}).update({createdAt:0}),/IMMUTABLE/);
@@ -2805,4 +2805,50 @@ test('QA034H5A same minimal brief FAILED result is replay protected without a se
  const failed=await mv.visionMultiViewQuality(body,7);assert.equal(failed.pipeline.visionAudit.errorCode,'VISION_PROVIDER_TIMEOUT');assert.equal(oss.visionCalls,1);
  const rows=await db('o_v04AssetIntegrity').orderBy('id');oss.visionFailure=null;oss.visionResult={result:'PASS',confidence:'HIGH',issues:[]};
  const replay=await mv.visionMultiViewQuality(body,7);assert.equal(replay.id,failed.id);assert.equal(oss.visionCalls,1);assert.deepEqual(await db('o_v04AssetIntegrity').orderBy('id'),rows);
+});
+
+
+function qaFinePass(){return {checks:['HAND_ANATOMY_ORIENTATION','FOOT_TOE_HEEL_ORIENTATION','REAR_LIMB_JOINT_COHERENCE'].map(checkClass=>({checkClass,result:'PASS',confidence:'HIGH',issues:[]}))};}
+
+test('QA034H6 original BACK detail crops are deterministic aspect-preserving and source-hash bound',async()=>{
+ const adapter=loadSource(path.join(root,'src/v04/visionIntegrityAdapter.ts'),null,new Map(),{}),sharp=require('sharp'),crypto=require('crypto');
+ const bytes=await sharp({create:{width:1024,height:1024,channels:3,background:'#235'}}).composite([{input:await sharp({create:{width:200,height:200,channels:3,background:'#e83'}}).png().toBuffer(),left:600,top:800}]).png().toBuffer();
+ const hash=crypto.createHash('sha256').update(bytes).digest('hex'),first=await adapter.humanBackDerivatives({bytes,mimeType:'image/png'}),again=await adapter.humanBackDerivatives({bytes,mimeType:'image/png'});
+ assert.equal(first.audit.sourceTargetHash,hash);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),hash);assert.deepEqual(first.audit,again.audit);assert.deepEqual(first.images.map(i=>i.bytes),again.images.map(i=>i.bytes));
+ assert.deepEqual(first.audit.imageInputs,['BACK_FULL','BACK_DETAIL']);assert.deepEqual(first.images.map(i=>[i.audit.width,i.audit.height]),[[768,768],[1536,1536]]);
+ for(const crop of first.audit.detailCrops){assert.equal(crop.sourceTargetHash,hash);assert.ok(crop.sourceRect.width<=1024&&crop.sourceRect.height<=1024);assert.match(crop.outputHash,/^[a-f0-9]{64}$/);}
+ // Recompute a crop directly from ORIGINAL bytes, proving source rect/hash are reproducible.
+ const crop=first.audit.detailCrops[2],recomputed=await sharp(bytes).rotate().flatten({background:'#ededed'}).png().toBuffer().then(original=>sharp(original).extract(crop.sourceRect).resize(crop.outputDimensions.width,crop.outputDimensions.height,{fit:'contain',background:'#ededed'}).png().toBuffer());
+ assert.equal(crypto.createHash('sha256').update(recomputed).digest('hex'),crop.outputHash);
+ assert.ok(crop.outputDimensions.width/crop.sourceRect.width>512/1024,'detail subject pixels are enlarged versus old 512 full frame');
+});
+
+test('QA034H6 required per-check results aggregate conservatively into existing Integrity decisions',()=>{
+ const adapter=loadSource(path.join(root,'src/v04/visionIntegrityAdapter.ts'),null,new Map(),{}),engine=loadSource(path.join(root,'src/v04/integrityDecisionEngine.ts'),null),fast={status:'SUSPECT_FINE_DETAIL',coarseStatus:'PASS',confidence:'HIGH'},brief=adapter.minimalEscalationBrief({integrityProfile:'HUMAN'},{BACK:fast},'BACK');
+ const decision=dto=>{const {report}=adapter.mapFineInspection(dto,brief);return engine.integrityDecision(fast,{confidence:report.confidence,report}).result;};
+ assert.equal(decision(qaFinePass()),'PASS');
+ const defect=qaFinePass();defect.checks[0]={...defect.checks[0],result:'DEFECT',issues:[{region:'hand',problem:'implausible finger attachment',severity:'MODERATE',localRepairable:true}]};assert.equal(decision(defect),'REPAIRABLE');
+ defect.checks[0].issues[0].localRepairable=false;assert.equal(decision(defect),'REGENERATE');
+ const uncertain=qaFinePass();uncertain.checks[1].result='UNCERTAIN';assert.equal(decision(uncertain),'HUMAN_REVIEW');
+ const low=qaFinePass();low.checks[2].confidence='LOW';assert.equal(decision(low),'HUMAN_REVIEW');low.checks[2].confidence='MEDIUM';assert.equal(decision(low),'HUMAN_REVIEW');
+ const missing=qaFinePass();missing.checks.pop();assert.equal(decision(missing),'HUMAN_REVIEW');assert.deepEqual(adapter.mapFineInspection(missing,brief).missingCheckClasses,['REAR_LIMB_JOINT_COHERENCE']);
+ const duplicate=qaFinePass();duplicate.checks[2]=duplicate.checks[0];assert.equal(decision(duplicate),'HUMAN_REVIEW');
+ assert.equal(decision({checks:[]}), 'HUMAN_REVIEW');assert.throws(()=>adapter.mapFineInspection({result:'PASS',confidence:'HIGH',issues:[]},brief));
+});
+
+test('QA034H6 HUMAN BACK sends only source-bound detail inputs with no human verdict or MAIN',async()=>{
+ const adapter=loadSource(path.join(root,'src/v04/visionIntegrityAdapter.ts'),null,new Map(),{}),bytes=await require('sharp')({create:{width:1024,height:1024,channels:3,background:'#abc'}}).png().toBuffer(),fast={status:'SUSPECT_FINE_DETAIL',coarseStatus:'PASS',confidence:'HIGH',humanDecision:'REPAIRABLE',defect:'SECRET_HUMAN_VERDICT'},brief=adapter.minimalEscalationBrief({integrityProfile:'HUMAN',mustPreserve:['barefoot']},{BACK:fast},'BACK');
+ for(const transportMode of ['NATIVE','JSON_TEXT']){let request;const session={invokeObject:async r=>{request=r;return {object:qaFinePass()};},invoke:async r=>{request=r;return {text:JSON.stringify(qaFinePass())};}};
+ const result=await adapter.inspectIntegrityVision(1,brief,['MAIN','SIDE','BACK'].map(view=>({view,bytes,mimeType:'image/png'})),{prepared:{model:'fake:vision',signature:'test',session},transportMode,targetView:'BACK'});
+ assert.equal(result.status,'SUCCEEDED');assert.deepEqual(result.audit.imageViewsSent,['BACK_FULL','BACK_DETAIL']);assert.deepEqual(result.audit.imageInputs,['BACK_FULL','BACK_DETAIL']);assert.equal(result.audit.fineDetailVersion,adapter.FINE_DETAIL_VERSION);assert.equal(result.audit.checkResults.length,3);assert.deepEqual(result.audit.missingCheckClasses,[]);assert.equal(result.audit.sourceTargetHash,require('crypto').createHash('sha256').update(bytes).digest('hex'));
+ const content=request.messages[0].content;assert.equal(content.filter(c=>c.type==='image').length,2);assert.ok(!JSON.stringify(brief).includes('MAIN'));assert.ok(!content.filter(c=>c.type==='text').map(c=>c.text).join(' ').includes('SECRET_HUMAN_VERDICT'));assert.ok(!request.system.includes('hand has a defect'));assert.equal(request.maxRetries,0);
+ }
+});
+
+test('QA034H6 fine protocol does not replay HOTFIX05 HIGH PASS and keeps new replay protected',async t=>{
+ const {db,mv,cmd,oss}=await qaFixture(t),crypto=require('crypto'),fast=await mv.fastMultiViewQuality(cmd,7),preflight=await mv.preflightMultiViewVision({...cmd,confirmExternalInspection:true},7),configSignature=preflight.pipeline.configSignature;
+ const row=await db('o_v04AssetIntegrity').where({id:fast.id}).first(),oldKey=crypto.createHash('sha256').update(JSON.stringify({binding:fast.input,targetView:'BACK',configSignature,briefVersion:'integrity.shadow-brief.3',minimalEscalationVersion:'integrity.fine-brief.1'})).digest('hex');
+ const old={...row,id:crypto.randomUUID(),reportJson:JSON.stringify({...fast,pipeline:{...fast.pipeline,kind:'VISION',phase:'COMPLETED',inspectionKey:oldKey,visionEscalation:'USED',decisions:{BACK:'PASS'},visionAudit:{confidence:'HIGH'}}})};await db('o_v04AssetIntegrity').insert(old);const before=await db('o_v04AssetIntegrity').where({id:old.id}).first();oss.visionResult=qaFinePass();
+ const body={...cmd,fastReportId:fast.id,targetView:'BACK',confirmExternalInspection:true},result=await mv.visionMultiViewQuality(body,7);assert.equal(oss.visionCalls,1);assert.notEqual(result.id,old.id);assert.notEqual(result.pipeline.inspectionKey,oldKey);assert.equal(result.pipeline.inspectionBrief.version,'integrity.fine-brief.2');assert.deepEqual(result.pipeline.visionAudit.imageInputs,['BACK_FULL','BACK_DETAIL']);assert.deepEqual(await db('o_v04AssetIntegrity').where({id:old.id}).first(),before);
+ assert.equal((await mv.visionMultiViewQuality(body,7)).id,result.id);assert.equal(oss.visionCalls,1);
 });
