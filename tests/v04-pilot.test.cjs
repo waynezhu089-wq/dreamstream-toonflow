@@ -2782,3 +2782,27 @@ test('QA034H5 timeout is terminal human review with unchanged 60 second budget a
  const result=await adapter.inspectIntegrityVision(1,brief,['MAIN','SIDE','BACK'].map(view=>({view,bytes:png,mimeType:'image/png'})),{prepared:{model:'fake:qwen3.8-flash',signature:'test',session:{invokeObject:async()=>{calls++;throw Object.assign(Error('timed out'),{name:'TimeoutError'});}}},transportMode:'NATIVE',targetView:'BACK'});
  assert.equal(calls,1);assert.equal(result.status,'FAILED');assert.equal(result.reports,null);assert.equal(result.audit.errorCode,'VISION_PROVIDER_TIMEOUT');assert.deepEqual(result.audit.imageViewsSent,['MAIN','BACK']);assert.equal(engine.integrityDecision(fast).result,'HUMAN_REVIEW');
 });
+
+
+test('QA034H5A old brief FAILED records cannot replay minimal brief; current result remains deduplicated',async t=>{
+ const {db,mv,cmd,oss,truth}=await qaFixture(t),crypto=require('crypto'),before=await truth(),fast=await mv.fastMultiViewQuality(cmd,7);
+ const preflight=await mv.preflightMultiViewVision({...cmd,confirmExternalInspection:true},7),configSignature=preflight.pipeline.configSignature;
+ const row=await db('o_v04AssetIntegrity').where({id:fast.id}).first(),oldRows=[];
+ for(const briefVersion of ['integrity.shadow-brief.2','integrity.shadow-brief.3']){
+  const old={...row,id:crypto.randomUUID(),reportJson:JSON.stringify({...fast,pipeline:{...fast.pipeline,kind:'VISION',phase:'COMPLETED',targetView:'BACK',configSignature,inspectionKey:crypto.createHash('sha256').update(JSON.stringify({binding:fast.input,targetView:'BACK',configSignature,briefVersion})).digest('hex'),visionEscalation:'FAILED',visionAudit:{errorCode:'VISION_PROVIDER_TIMEOUT'}}})};
+  await db('o_v04AssetIntegrity').insert(old);oldRows.push(await db('o_v04AssetIntegrity').where({id:old.id}).first());
+ }
+ const body={...cmd,fastReportId:fast.id,targetView:'BACK',confirmExternalInspection:true};oss.visionResult={result:'PASS',confidence:'HIGH',issues:[]};
+ const result=await mv.visionMultiViewQuality(body,7);assert.equal(oss.visionCalls,1);assert.equal(result.pipeline.visionEscalation,'USED');assert.equal(result.pipeline.inspectionBrief.version,'integrity.fine-brief.1');
+ for(const row of oldRows){assert.notEqual(result.id,row.id);assert.notEqual(result.pipeline.inspectionKey,JSON.parse(row.reportJson).pipeline.inspectionKey);assert.deepEqual(await db('o_v04AssetIntegrity').where({id:row.id}).first(),row);}
+ const count=(await db('o_v04AssetIntegrity')).length,replay=await mv.visionMultiViewQuality(body,7);assert.equal(replay.id,result.id);assert.equal(oss.visionCalls,1);assert.equal((await db('o_v04AssetIntegrity')).length,count);assert.deepEqual(await truth(),before);
+ await assert.rejects(db('o_v04AssetIntegrity').where({id:oldRows[0].id}).update({createdAt:0}),/IMMUTABLE/);
+});
+
+test('QA034H5A same minimal brief FAILED result is replay protected without a second provider request',async t=>{
+ const {db,mv,cmd,oss}=await qaFixture(t),fast=await mv.fastMultiViewQuality(cmd,7);await mv.preflightMultiViewVision({...cmd,confirmExternalInspection:true},7);
+ const body={...cmd,fastReportId:fast.id,targetView:'BACK',confirmExternalInspection:true};oss.visionFailure=Object.assign(Error('aborted'),{name:'TimeoutError'});
+ const failed=await mv.visionMultiViewQuality(body,7);assert.equal(failed.pipeline.visionAudit.errorCode,'VISION_PROVIDER_TIMEOUT');assert.equal(oss.visionCalls,1);
+ const rows=await db('o_v04AssetIntegrity').orderBy('id');oss.visionFailure=null;oss.visionResult={result:'PASS',confidence:'HIGH',issues:[]};
+ const replay=await mv.visionMultiViewQuality(body,7);assert.equal(replay.id,failed.id);assert.equal(oss.visionCalls,1);assert.deepEqual(await db('o_v04AssetIntegrity').orderBy('id'),rows);
+});
