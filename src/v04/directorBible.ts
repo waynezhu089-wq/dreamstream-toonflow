@@ -12,6 +12,7 @@ import {
 } from "./directorCompiler";
 import { directorIntentSchema, emptyDirectorIntent } from "./directorContract";
 import { resolveDirectorContext, resolveProjectDirectorSeed } from "./directorContext";
+import { assertActiveDirectorProposal, confirmedDirectorAncestors, finalizeDirectorAncestors } from "./directorLineage";
 import { oneObject } from "./studioTurnSemantic";
 
 const compilerVersion = "v04.director-bible.1",
@@ -292,6 +293,9 @@ export async function proposeDirector(input: unknown, actor: number) {
     let base: any = null;
     if (data.baseProposalId) {
       base = await checkedProposal(trx, scope, data.baseProposalId);
+      // A confirmed proposal may be explicitly referenced as immutable history,
+      // but is never returned as an active candidate or reactivated.
+      if (base.status !== "CONFIRMED") await assertActiveDirectorProposal(trx, scope, base);
       if (base.sourceHash !== captured.sourceHash)
         deny("DIRECTOR_SOURCE_STALE", "影片来源已变化，请重新准备导演方向");
     }
@@ -450,6 +454,10 @@ export async function proposeDirector(input: unknown, actor: number) {
     const fresh = await capture(trx, scope);
     if (fresh.sourceHash !== proposal.sourceHash)
       deny("DIRECTOR_SOURCE_STALE", "生成期间影片来源已变化，请重新准备");
+    if (data.baseProposalId) {
+      const base = await checkedProposal(trx, scope, data.baseProposalId);
+      if (base.status !== "CONFIRMED") await assertActiveDirectorProposal(trx, scope, base);
+    }
     await trx("o_v04DirectorProposal").insert(proposal);
     return present(proposal);
   });
@@ -488,8 +496,7 @@ export async function previewDirector(input: unknown, actor: number) {
   return q.transaction(async (trx) => {
     await authorize(trx, data, actor);
     const p = await checkedProposal(trx, data, data.proposalId);
-    if (["REJECTED", "CONFIRMED"].includes(p.status))
-      deny("DIRECTOR_PROPOSAL_TERMINAL", "该提案已结束，请读取当前版本");
+    await assertActiveDirectorProposal(trx, data, p);
     const captured = await capture(trx, data);
     verify(p, captured);
     const current = await latest(trx, data.projectId),
@@ -535,6 +542,7 @@ export async function confirmDirector(input: unknown, actor: number) {
           affectsGeneration: false,
         };
       }
+      await assertActiveDirectorProposal(trx, data, p);
       if (p.status !== "PREVIEWED" || p.previewHash !== data.previewHash)
         deny("DIRECTOR_PREVIEW_REQUIRED", "请先预览这版导演方向");
       const captured = await capture(trx, data);
@@ -591,6 +599,7 @@ export async function confirmDirector(input: unknown, actor: number) {
       await trx("o_v04DirectorProposal")
         .where({ id: p.id })
         .update({ status: "CONFIRMED", updatedAt: now });
+      await finalizeDirectorAncestors(trx, data, p.id, now);
       return {
         directorVersion,
         unitProjectionVersion,
@@ -630,17 +639,19 @@ export async function readDirector(input: unknown, actor: number) {
           ? "影片创意或素材来源已变化，需要重新确认"
           : null;
     }
-    const p = await trx("o_v04DirectorProposal")
+    const obsolete = await confirmedDirectorAncestors(trx, scope);
+    let pending = trx("o_v04DirectorProposal")
       .where(scope)
       .whereIn("status", ["DRAFT", "PREVIEWED"])
+      .where({ sourceHash: captured.sourceHash, sourceCreativeVersion: captured.sourceCreativeVersion });
+    if (obsolete.size) pending = pending.whereNotIn("id", [...obsolete]);
+    const p = await pending
       .orderBy("createdAt", "desc")
       .orderBy("id")
       .first();
     return {
       accepted,
-      proposal: p
-        ? present(p, p.sourceHash === captured.sourceHash ? p.status : "STALE")
-        : null,
+      proposal: p ? present(p) : null,
       unitProjection: current
         ? ((await trx("o_v04DirectorProjection")
             .where({
@@ -689,7 +700,15 @@ export async function directorHistory(input: unknown, actor: number) {
         .orderBy("unitProjectionVersion", "desc")
         .limit(request.limit + 1)
         .offset(request.offset);
+    const proposalSource = await capture(trx, scope),
+      obsolete = await confirmedDirectorAncestors(trx, scope),
+      proposals = await trx("o_v04DirectorProposal").where(scope)
+        .orderBy("createdAt", "desc").orderBy("id").limit(request.limit + 1).offset(request.offset);
     return {
+      proposals: proposals.slice(0, request.limit).map(p => present(p,
+        ["DRAFT", "PREVIEWED"].includes(p.status) ? obsolete.has(p.id) ? "SUPERSEDED" :
+          p.sourceHash === proposalSource.sourceHash ? p.status : "STALE" : p.status)),
+      hasMoreProposals: proposals.length > request.limit,
       versions: rows
         .slice(0, request.limit)
         .map((r) =>
@@ -723,8 +742,7 @@ export async function rejectDirector(input: unknown, actor: number) {
   return q.transaction(async (trx) => {
     await authorize(trx, data, actor);
     const p = await checkedProposal(trx, data, data.proposalId);
-    if (p.status === "CONFIRMED")
-      deny("DIRECTOR_PROPOSAL_TERMINAL", "已确认版本不能删除");
+    await assertActiveDirectorProposal(trx, data, p);
     await trx("o_v04DirectorProposal")
       .where({ id: p.id })
       .update({ status: "REJECTED", updatedAt: Date.now() });

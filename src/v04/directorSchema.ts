@@ -1,4 +1,5 @@
 import type { Knex } from "knex";
+import { reconcileDirectorLineages } from "./directorLineage";
 // Invoked only by the experimental startup gate, never by a read endpoint.
 export async function initializeDirectorSchema(db: Knex) {
   for (const table of [
@@ -57,4 +58,6 @@ export async function initializeDirectorSchema(db: Knex) {
       `CREATE TRIGGER IF NOT EXISTS ${table}_no_delete BEFORE DELETE ON ${table} BEGIN SELECT RAISE(ABORT,'DIRECTOR_HISTORY_IMMUTABLE'); END`,
     );
   }
+  const repaired = await reconcileDirectorLineages(db);
+  if (repaired.length) console.info("[V04 Director][LineageReconciliation]", JSON.stringify(repaired));
 }
