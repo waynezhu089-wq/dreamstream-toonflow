@@ -125,7 +125,7 @@ test('MV033A compile locks accepted image, STAR graph, prompts, metadata and zer
  const c=await mv.compileMultiView(scope,7);assert.equal(c.canonicalKey,'CHAR-007');assert.equal(c.status,'COMPILED');assert.equal(c.source.attachmentId,attachmentId);assert.equal(c.source.sourceHash,sha256);
  assert.equal(c.topology,'STAR');assert.equal(c.anglePolicy,'TOLERANT');assert.equal(c.sourceQualityGate,'HUMAN_REVIEW_REQUIRED');assert.equal(c.fallback.status,'NOT_AUTHORIZED');
  assert.equal(c.SIDE.sourceHash,sha256);assert.equal(c.BACK.sourceHash,sha256);assert.match(c.SIDE.prompt,/side-oriented|Change viewpoint only/i);assert.match(c.BACK.prompt,/primarily from behind|back-side information|conservatively/);
- for(const side of ['SIDE','BACK']){assert.match(c[side].prompt,/same subject|subject identity/);assert.match(c[side].prompt,/footwear state/);assert.doesNotMatch(c[side].prompt,/pajamas|long-sleeve|moon|awe|sublime|Director|Dream Matter|exactly 90|exactly 180/);assert.match(c[side].prompt,/no props or new accessories/);assert.match(c[side].prompt,/contact sheet or multi-view sheet/);assert.ok(c[side].prompt.split(/\s+/).length<=140);assert.equal(c[side].workflow.graph['7'].inputs.image,'multiview-identity.png');}
+ for(const side of ['SIDE','BACK']){assert.match(c[side].prompt,/same subject|subject identity|same boy/);assert.match(c[side].prompt,/footwear state/);assert.doesNotMatch(c[side].prompt,/pajamas|long-sleeve|moon|awe|sublime|Director|Dream Matter|exactly 90|exactly 180/);if(side==='BACK'){assert.match(c[side].prompt,/no props or new accessories/);assert.match(c[side].prompt,/contact sheet or multi-view sheet/);}else{assert.match(c[side].prompt,/No extra people, animals, props, accessories or text/);assert.doesNotMatch(c[side].prompt,/contact sheet|multi-view sheet|turnaround|reference sheet/i);}assert.ok(c[side].prompt.split(/\s+/).length<=140);assert.equal(c[side].workflow.graph['7'].inputs.image,'multiview-identity.png');}
  assert.match(JSON.stringify(c.identityLock),/white short-sleeve top|white shorts|barefoot/);
  const a=structuredClone(c.SIDE.workflow.graph),b=structuredClone(c.BACK.workflow.graph);delete a['5'].inputs.prompt;delete b['5'].inputs.prompt;assert.deepEqual(a,b);assert.equal(a['12'].class_type,'Krea2EditModelPatch');assert.deepEqual(a['5'].inputs.image,['7',0]);assert.deepEqual(a['12'].inputs.source_image,['7',0]);
  assert.deepEqual(await truth(),before);assert.equal((await db('o_v04ExecutionTrace')).length,0);assert.equal(oss.modelCalls.length,0);
@@ -204,6 +204,32 @@ test('MV033A derive route unsupported or disabled is fail-closed, no T2I fallbac
  await change({reset:true});
  await change({disabledProfiles:['KREA2_DERIVE_CHARACTER_REFERENCE_V1']});
  before=await truth();await assert.rejects(mv.compileMultiView(scope,7),e=>e.code==='MULTIVIEW_ROUTE_UNSUPPORTED');assert.deepEqual(await truth(),before);assert.equal((await db('o_v04ExecutionTrace')).length,0);
+});
+test('MV033AH1 pinned V1 BACK bytes and SIDE non-prompt graph/source/seed/settings remain exact; only Side compiler changes',async t=>{
+ const {db,scope,mv,load,truth,oss}=await mvFixture(t),before=await truth(),compiler=load('multiViewCompiler');
+ const pinned='82514434169676dcf4762644dba5384acddbab35';
+ const oldSource=require('child_process').execFileSync('git',['-c',`safe.directory=${root}`,'show',`${pinned}:src/v04/multiViewCompiler.ts`],{cwd:root,encoding:'utf8',windowsHide:true});
+ const old={exports:{}},code=ts.transpileModule(oldSource,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
+ new Function('require','module','exports',code)(n=>n==='./service'?load('service'):require(n),old,old.exports);
+ const c=await mv.compileMultiView(scope,7),asset=c.evidence.asset,oldSide=old.exports.compileMultiViewBrief(asset,c.source,'SIDE'),oldBack=old.exports.compileMultiViewBrief(asset,c.source,'BACK');
+ assert.equal(compiler.MULTIVIEW_VERSION,old.exports.MULTIVIEW_VERSION);assert.equal(c.evidence.compilerVersion,old.exports.MULTIVIEW_VERSION);
+ assert.equal(c.sourceHash,old.exports.multiViewHash(c.evidence));assert.equal(c.sharedExecution.seed,parseInt(old.exports.multiViewHash(c.evidence).slice(0,12),16));
+ assert.deepEqual(c.BACK.brief,oldBack.brief);assert.equal(c.BACK.prompt,oldBack.prompt);assert.equal(c.BACK.promptHash,oldBack.promptHash);
+ assert.deepEqual(c.SIDE.brief.sourceIdentity,oldSide.brief.sourceIdentity);assert.deepEqual(c.SIDE.brief.preserve,oldSide.brief.preserve);assert.equal(c.SIDE.sourceHash,c.BACK.sourceHash);
+ assert.equal(c.SIDE.brief.version,'multiview.krea2-boy.side.2');assert.notEqual(c.SIDE.promptHash,oldSide.promptHash);
+ const build=prompt=>load('kreaImageEditProfile').buildKreaEditWorkflow({profile:c.sharedExecution.profile,prompt,seed:c.sharedExecution.seed,width:c.sharedExecution.width,height:c.sharedExecution.height,sourceImage:'multiview-identity.png',jobId:c.id,targetRole:'EXPERIMENTAL_MULTIVIEW_SIDE'});
+ const oldGraph=build(oldSide.prompt),newGraph=structuredClone(c.SIDE.workflow);delete oldGraph.graph['5'].inputs.prompt;delete newGraph.graph['5'].inputs.prompt;assert.deepEqual(newGraph,oldGraph);
+ const oldBackWorkflow=load('kreaImageEditProfile').buildKreaEditWorkflow({profile:c.sharedExecution.profile,prompt:oldBack.prompt,seed:c.sharedExecution.seed,width:c.sharedExecution.width,height:c.sharedExecution.height,sourceImage:'multiview-identity.png',jobId:c.id,targetRole:'EXPERIMENTAL_MULTIVIEW_BACK'});assert.deepEqual(c.BACK.workflow,oldBackWorkflow);
+ assert.deepEqual(load('operationsRegistry').graphFacts(c.BACK.workflow.graph),load('operationsRegistry').graphFacts(c.SIDE.workflow.graph));
+ for(const term of [/exactly one person and one body/i,/single centered full-body standing figure/i,/do not duplicate/i,/do not show additional poses/i,/rotate this same boy/i,/replace the current frontal presentation/i,/footwear state/,/face identity/,/hairstyle/,/body proportions/,/clothing construction/])assert.match(c.SIDE.prompt,term);
+ assert.doesNotMatch(c.SIDE.prompt,/contact sheet|multi-view sheet|turnaround|reference sheet|side-view information|main viewpoint|exactly 90|Director|Dream Matter|moon|awe|sublime/i);
+ assert.ok(c.SIDE.prompt.split(/\s+/).length<=120);assert.deepEqual(await truth(),before);assert.equal(oss.modelCalls.length,0);assert.equal((await db('o_v04ExecutionTrace')).length,0);
+ // A real historical compiled record remains immutable/readable with old Side
+ // and the Human's original verdict; the hotfix never rewrites it on read.
+ const historical=structuredClone(c);historical.id=require('crypto').randomUUID();historical.SIDE={...historical.SIDE,...oldSide,workflow:build(oldSide.prompt)};
+ const now=Date.now(),evaluation={SIDE:'FAIL',BACK:'PASS',why:'duplicate subjects'};
+ await db('o_v04MultiViewExperiment').insert({id:historical.id,...scope,status:'COMPLETED',compiledJson:JSON.stringify(historical),executionJson:JSON.stringify({SIDE:{status:'SUCCEEDED',artifact:{artifactId:'side-retained'}},BACK:{status:'SUCCEEDED',artifact:{artifactId:'back-retained'}}}),evaluationJson:JSON.stringify(evaluation),createdAt:now,updatedAt:now});
+ const rowsBefore=await db('o_v04MultiViewExperiment').orderBy('id'),read=(await mv.readMultiView(scope,7)).find(r=>r.id===historical.id);assert.equal(read.SIDE.prompt,oldSide.prompt);assert.deepEqual(read.evaluation,evaluation);assert.equal(read.execution.BACK.artifact.artifactId,'back-retained');assert.deepEqual(await db('o_v04MultiViewExperiment').orderBy('id'),rowsBefore);
 });
 
 async function abFixture(t){
