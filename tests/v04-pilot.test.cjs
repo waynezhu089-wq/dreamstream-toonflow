@@ -123,12 +123,12 @@ async function abFixture(t){
 test('DIR032A current A fidelity, bounded relevant B projection, fair frozen graphs and compile-only truth isolation',async t=>{
  const {db,oss,load,scope,ab,truth}=await abFixture(t),before=await truth(),calls=oss.modelCalls.length,c=await ab.compileDirectorAB(scope,7);
  assert.equal(c.status,'COMPILED');assert.equal(c.evidence.confirmedVisualSpecRevision,null);assert.equal(c.evidence.visualSpecSource,'PERSISTED_DRAFT');
- assert.equal(c.A.renderedPrompt,load('autoAssetPrompt').autoAssetPrompt(c.A.semanticInput.asset,c.A.semanticInput.spec,c.A.semanticInput.creative,'ASSET_MAIN_PREVIEW'));
- assert.deepEqual(c.B.semanticInput,c.A.semanticInput);assert.ok(c.B.renderingBrief);assert.match(c.B.renderedPrompt,/awe first|sublime colossus/);
- assert.deepEqual(c.A.semanticInput.legacyCompilation,c.evidence.legacyCompilation);assert.ok(c.A.semanticInput.legacyCompilation.draftPromptIR);
+ assert.equal(c.A0.renderedPrompt,load('autoAssetPrompt').autoAssetPrompt(c.A0.semanticInput.asset,c.A0.semanticInput.spec,c.A0.semanticInput.creative,'ASSET_MAIN_PREVIEW'));
+ assert.deepEqual(c.B.semanticInput,c.A0.semanticInput);assert.ok(c.B.directorRenderingBrief);assert.match(c.B.renderedPrompt,/awe first|sublime colossus/);
+ assert.deepEqual(c.A0.semanticInput.legacyCompilation,c.evidence.legacyCompilation);assert.ok(c.A0.semanticInput.legacyCompilation.draftPromptIR);
  assert.equal(c.B.directorContext.relevantScaleRelations.length,1);assert.equal(c.B.directorContext.relevantTransformationLineage.length,0);assert.doesNotMatch(JSON.stringify(c.B.directorContext),/Pegasus/);
- assert.match(c.B.renderedPrompt,/no scale-reference objects/);assert.match(c.B.renderedPrompt,/living biological creature/);
- const a=structuredClone(c.workflows.A.graph),b=structuredClone(c.workflows.B.graph);delete a['5'].inputs.text;delete b['5'].inputs.text;assert.deepEqual(a,b);assert.equal(c.workflows.A.graph['20'].inputs.seed,c.workflows.B.graph['20'].inputs.seed);
+ assert.match(c.B.renderedPrompt,/no scale-reference objects/);assert.match(c.B.renderedPrompt,/grounded biological anatomy/);
+ const a=structuredClone(c.workflows.A0.graph),b=structuredClone(c.workflows.B.graph);delete a['5'].inputs.text;delete b['5'].inputs.text;assert.deepEqual(a,b);assert.equal(c.workflows.A0.graph['20'].inputs.seed,c.workflows.B.graph['20'].inputs.seed);
  assert.deepEqual(await truth(),before);assert.equal(oss.modelCalls.length,calls);assert.equal((await db('o_v04ExecutionTrace')).length,0);
  await assert.rejects(db('o_v04DirectorAssetAB').where({id:c.id}).update({compiledJson:'{}'}),/IMMUTABLE/);
  assert.equal((await ab.readDirectorAB(scope,7))[0].id,c.id);
@@ -144,24 +144,24 @@ test('DIR032A missing/current scope gates and baseline drift stay fail-closed',a
  await assert.rejects(ab.compileDirectorAB(other,7),e=>e.code==='DIRECTOR_AB_NOT_READY');assert.deepEqual(await ab.readDirectorAB(other,7),[]);
  const unit=await db('o_script').insert({projectId:scope.projectId,name:'Other unit'});await assert.rejects(ab.compileDirectorAB({...scope,scriptId:unit[0]},7),e=>e.code==='DIRECTOR_AB_NOT_READY');
  const c=await ab.compileDirectorAB(scope,7);await db('o_v04StudioAssetDraftJob').where(scope).update({outputsJson:JSON.stringify([{role:'MAIN_PREVIEW',artifactId:'changed'}])});assert.equal((await ab.readDirectorAB(scope,7))[0].status,'STALE');
- await assert.rejects(ab.directorABArtifact({...other,experimentId:c.id,side:'A'},7),e=>e.code==='DIRECTOR_AB_NOT_FOUND');
+ await assert.rejects(ab.directorABArtifact({...other,experimentId:c.id,side:'A0'},7),e=>e.code==='DIRECTOR_AB_NOT_FOUND');
 });
-for(const failSide of [null,'A','B'])test('DIR032A controlled sequential render '+(failSide?'failure '+failSide:'completion')+' retains truth and exact traces',async t=>{
+for(const failSide of [null,'A0','A1','B'])test('DIR032A controlled sequential render '+(failSide?'failure '+failSide:'completion')+' retains truth and exact traces',async t=>{
  const {db,oss,scope,ab,truth,load}=await abFixture(t),http=require('http'),graphs=[],png=await require('sharp')({create:{width:768,height:1024,channels:3,background:'#334455'}}).png().toBuffer();
  const server=http.createServer(async(req,res)=>{res.setHeader('content-type','application/json');if(req.url==='/queue')return res.end(JSON.stringify({queue_running:[],queue_pending:[]}));
   if(req.url==='/prompt'){let text='';for await(const chunk of req)text+=chunk;graphs.push(JSON.parse(text).prompt);return res.end(JSON.stringify({prompt_id:'p'+graphs.length}));}
-  if(req.url.startsWith('/history/')){const id=req.url.split('/').at(-1),side=id==='p1'?'A':'B';return res.end(JSON.stringify({[id]:failSide===side?{status:{status_str:'error',messages:['CUDA out of memory']}}:{status:{completed:true},outputs:{22:{images:[{filename:id+'.png',subfolder:'',type:'output'}]}}}}));}
+  if(req.url.startsWith('/history/')){const id=req.url.split('/').at(-1),side=id==='p1'?'A0':id==='p2'?'A1':'B';return res.end(JSON.stringify({[id]:failSide===side?{status:{status_str:'error',messages:['CUDA out of memory']}}:{status:{completed:true},outputs:{22:{images:[{filename:id+'.png',subfolder:'',type:'output'}]}}}}));}
   if(req.url.startsWith('/view')){res.setHeader('content-type','image/png');return res.end(png);}res.statusCode=404;res.end('{}');});
  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
  await db('o_v04StudioImageExecutorConfig').insert({projectId:scope.projectId,baseUrl:'http://127.0.0.1:'+server.address().port,enabled:1,checkpoint:'unused',updatedAt:1});
  const c=await ab.compileDirectorAB(scope,7),before=await truth(),cmd={...scope,experimentId:c.id,pairHash:c.pairHash,confirmRender:true};
  await ab.renderDirectorAB(cmd,7);await ab.renderDirectorAB(cmd,7);
  let result;const deadline=Date.now()+6000;do{result=(await ab.readDirectorAB(scope,7))[0];if(['COMPLETED','FAILED'].includes(result.status))break;await new Promise(r=>setTimeout(r,15));}while(Date.now()<deadline);
- assert.equal(result.status,failSide?'FAILED':'COMPLETED');assert.equal(graphs.length,failSide==='A'?1:2);assert.deepEqual(await truth(),before);
+ assert.equal(result.status,failSide?'FAILED':'COMPLETED');assert.equal(graphs.length,failSide==='A0'?1:failSide==='A1'?2:3);assert.deepEqual(await truth(),before);
  const traces=await db('o_v04ExecutionTrace').orderBy('createdAt');assert.equal(traces.length,graphs.length);for(let i=0;i<graphs.length;i++)assert.deepEqual(JSON.parse(traces[i].workflowGraphJson),graphs[i]);
- assert.ok(traces.every(x=>x.executionPurpose==='EXPERIMENTAL_CANDIDATE'));if(failSide==='B')assert.equal(result.execution.A.artifact.role,'EXPERIMENTAL_CANDIDATE');
- if(!failSide){assert.equal(result.execution.A.artifact.width,result.execution.B.artifact.width);assert.equal((await ab.directorABArtifact({...scope,experimentId:c.id,side:'A'},7)).bytes.length,png.length);
-  const evaluation=await ab.evaluateDirectorAB({...scope,experimentId:c.id,choices:['B','B','A','Same','B','B'],conclusion:'PARTIAL_WIN',why:'human judgment'},7);assert.equal(evaluation.conclusion,'PARTIAL_WIN');assert.equal((await ab.readDirectorAB(scope,7))[0].evaluation.why,'human judgment');
+ assert.ok(traces.every(x=>x.executionPurpose==='EXPERIMENTAL_CANDIDATE'));if(failSide==='B')assert.equal(result.execution.A0.artifact.role,'EXPERIMENTAL_CANDIDATE');
+ if(!failSide){assert.equal(result.execution.A0.artifact.width,result.execution.B.artifact.width);for(const side of ['A0','A1','B'])assert.equal((await ab.directorABArtifact({...scope,experimentId:c.id,side},7)).bytes.length,png.length);
+  const evaluation=await ab.evaluateDirectorAB({...scope,experimentId:c.id,hygiene:{choices:Array(6).fill('A1'),conclusion:'CLEAN_BASE_PARTIAL_WIN'},director:{choices:Array(6).fill('B'),conclusion:'PARTIAL_WIN'},why:'human judgment'},7);assert.equal(evaluation.director.conclusion,'PARTIAL_WIN');assert.equal((await ab.readDirectorAB(scope,7))[0].evaluation.why,'human judgment');
  }else await assert.rejects(ab.evaluateDirectorAB({...scope,experimentId:c.id,choices:Array(6).fill('Same'),conclusion:'NO_IMPROVEMENT'},7));
  assert.equal(oss.visionCalls,0);await new Promise(r=>setImmediate(r));await load('directorAssetABSchema').initializeDirectorABSchema(db);assert.deepEqual(await truth(),before);
 });
@@ -219,10 +219,10 @@ test('DIR032AH1 pre-hotfix A is byte identical and unchanged seed/graph controls
  const {scope,ab,load}=await abFixture(t),c=await ab.compileDirectorAB(scope,7),ts=require('typescript');
  const oldText=require('child_process').execFileSync('git',['-c','safe.directory='+root,'show','fc04a90bc2a621c80444747effdef4dafedd3f9d:src/v04/directorAssetABCompiler.ts'],{cwd:root,encoding:'utf8'});
  const old={exports:{}};new Function('require','module','exports',ts.transpileModule(oldText,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText)(name=>name.startsWith('./')?load(name.slice(2)):require(name),old,old.exports);
- const base=c.A.semanticInput,before=old.exports.compileDirectorABAssetInput(base.asset,base.spec,base.creative,c.evidence.directorIntent,1,base.legacyCompilation);
- assert.deepEqual(c.A,before.A);assert.notEqual(c.B.inputHash,before.B.inputHash);
- const graph=load('kreaImageEditProfile').buildKreaEditWorkflow({profile:c.sharedExecution.profile,prompt:before.A.renderedPrompt,seed:parseInt(c.sourceHash.slice(0,12),16),width:768,height:1024,targetRole:'EXPERIMENTAL_CANDIDATE',jobId:c.id});assert.deepEqual(c.workflows.A,graph);
- const a=structuredClone(c.workflows.A),b=structuredClone(c.workflows.B);delete a.graph['5'].inputs.text;delete b.graph['5'].inputs.text;assert.deepEqual(a,b);
+ const base=c.A0.semanticInput,before=old.exports.compileDirectorABAssetInput(base.asset,base.spec,base.creative,c.evidence.directorIntent,1,base.legacyCompilation);
+ assert.deepEqual(c.A0,before.A);assert.notEqual(c.B.inputHash,before.B.inputHash);
+ const graph=load('kreaImageEditProfile').buildKreaEditWorkflow({profile:c.sharedExecution.profile,prompt:before.A.renderedPrompt,seed:parseInt(c.sourceHash.slice(0,12),16),width:768,height:1024,targetRole:'EXPERIMENTAL_CANDIDATE',jobId:c.id});assert.deepEqual(c.workflows.A0,graph);
+ const a=structuredClone(c.workflows.A0),b=structuredClone(c.workflows.B);delete a.graph['5'].inputs.text;delete b.graph['5'].inputs.text;assert.deepEqual(a,b);
 });
 test('DIR032AH1 old full-DNA experiment is read-only STALE and cannot render without recompilation',async t=>{
  const {db,scope,ab,truth}=await abFixture(t),c=await ab.compileDirectorAB(scope,7),old=structuredClone(c);delete old.B.directorContext.assetVisualDNA;old.B.directorContext.globalVisualDNA={materialLanguage:['unsafe global DNA']};
@@ -2412,7 +2412,34 @@ test('DIR032AH3 compact deterministic visual brief preserves visual meaning with
  intent.narrativeVisualRoles[0].narrativeFunction+='鲸鱼喷嚏男孩潜水艇 '.repeat(10000);const long=load('directorAssetABCompiler').compileDirectorABAssetInput(asset,spec,null,intent,2);assert.ok(long.B.renderedPrompt.split(/\s+/).length<=250);assert.doesNotMatch(long.B.renderedPrompt,/[{}\[\]\u3400-\u9fff]/);assert.equal(oss.modelCalls.length,0);
 });
 test('DIR032AH3 old compiler record stays immutable historical while original artifacts remain readable',async t=>{
- const {db,scope,ab}=await abFixture(t),c=await ab.compileDirectorAB(scope,7),old=structuredClone(c),id=require('crypto').randomUUID();delete old.B.renderingBrief;old.evidence.compilerVersion='director.asset-ab.1';old.id=id;
+ const {db,scope,ab}=await abFixture(t),c=await ab.compileDirectorAB(scope,7),old=structuredClone(c),id=require('crypto').randomUUID();delete old.B.directorRenderingBrief;old.compilerVersion='director.asset-ab.2';old.evidence.compilerVersion='director.asset-ab.1';old.id=id;
  const record={id,...scope,status:'COMPLETED',compiledJson:JSON.stringify(old),executionJson:JSON.stringify({A:{status:'SUCCEEDED',artifact:{artifactId:'original-a'}},B:{status:'SUCCEEDED',artifact:{artifactId:'original-b'}}}),createdAt:c.createdAt+1,updatedAt:c.createdAt+1};await db('o_v04DirectorAssetAB').insert(record);
  const before=await db('o_v04DirectorAssetAB').where({id}).first(),read=(await ab.readDirectorAB(scope,7)).find(x=>x.id===id);assert.equal(read.status,'STALE');assert.equal(read.execution.A.artifact.artifactId,'original-a');assert.equal(read.execution.B.artifact.artifactId,'original-b');assert.deepEqual(await db('o_v04DirectorAssetAB').where({id}).first(),before);
+});
+test('DIR032AH4 causal split serializes exact visual fields; Director cannot change clean base',async t=>{
+ const {db,oss,cache}=await fixture(t),load=n=>loadSource(path.join(root,'src/v04/'+n+'.ts'),db,cache,oss),intent=load('directorContract').emptyDirectorIntent();
+ const asset={canonicalKey:'CHAR-003',assetKind:'CREATURE',name:'Whale',description:'whale'},spec={visualIdentitySummary:'mature biological whale',silhouette:'long broad flukes',scale:'large biological animal',proportion:'small eyes and broad torso',primaryPalette:['gray-black','#334455'],materials:['rough gray-black biological skin'],details:{fin:'scarred dorsal fin'},identityAnchors:['asymmetric tail notch'],mustPreserve:['rounded snout']};
+ intent.narrativeVisualRoles=[{canonicalKey:'CHAR-003',narrativeFunction:'ancient majestic sublime colossus',emotionalRead:'awe first',scaleFunction:'monumental mass',requiredAudiencePerception:[],forbiddenInterpretations:[]}];
+ const compile=load('directorAssetABCompiler').compileDirectorControlledAssetInput,c=compile(asset,spec,null,intent,2);
+ assert.equal(c.comparisonDesign,'LEGACY_VS_CLEAN_VS_DIRECTOR');assert.equal(c.A0.renderedPrompt,load('autoAssetPrompt').autoAssetPrompt(asset,spec,null));
+ for(const p of ['long broad flukes','small eyes and broad torso','gray-black','#334455','rough gray-black biological skin','scarred dorsal fin','asymmetric tail notch','rounded snout'])assert.ok(c.A1.renderedPrompt.includes(p),p);
+ assert.equal(c.B.cleanBaseHash,c.A1.cleanBaseHash);assert.deepEqual(c.B.assetRenderingBrief,c.A1.assetRenderingBrief);assert.equal(c.B.renderedPrompt,c.A1.cleanBasePrompt+'\nDirector visual direction: '+c.B.directorDeltaPrompt);
+ assert.doesNotMatch(c.A1.renderedPrompt,/colossus|awe before fear|ancient|majestic/);assert.match(c.B.directorDeltaPrompt,/colossus/);assert.doesNotMatch(c.B.directorDeltaPrompt,/biological whale|no typography/);
+ for(const p of [c.A1.renderedPrompt,c.B.renderedPrompt]){assert.doesNotMatch(p,/[{}\[\]\u3400-\u9fff]|canonicalKey|narrativeRole|CHAR-|PROP-|FX-|BRAND-/);for(const g of ['no text','no typography','no labels','no annotations','no infographic','no diagram'])assert.ok(p.includes(g));}
+ assert.ok(c.A1.renderedPrompt.split(/\s+/).length<=150);assert.ok(c.B.directorDeltaPrompt.split(/\s+/).length<=100);assert.ok(c.B.renderedPrompt.split(/\s+/).length<=250);
+ intent.globalVisualDNA.artStyle='cinematic dream realism';intent.narrativeVisualRoles[0].emotionalRead='quiet ancient awe';const changed=compile(asset,spec,null,intent,3);assert.deepEqual(changed.A1,c.A1);assert.notEqual(changed.B.inputHash,c.B.inputHash);assert.equal(oss.modelCalls.length,0);
+});
+test('DIR032AH4 three frozen workflows share seed/topology; compile only creates experiment record',async t=>{
+ const {ab,scope,truth,db,oss}=await abFixture(t),before=await truth(),calls=oss.modelCalls.length,c=await ab.compileDirectorAB(scope,7);
+ assert.deepEqual(await truth(),before);assert.equal(oss.modelCalls.length,calls);assert.equal((await db('o_v04ExecutionTrace')).length,0);
+ const graphs=['A0','A1','B'].map(side=>{const x=structuredClone(c.workflows[side]);delete x.graph['5'].inputs.text;assert.equal(x.graph['20'].inputs.seed,c.sharedExecution.seed);return x;});assert.deepEqual(graphs[0],graphs[1]);assert.deepEqual(graphs[1],graphs[2]);assert.equal(c.B.cleanBaseHash,c.A1.cleanBaseHash);
+});
+test('DIR032AH4 restart fences unfinished three-way sides without losing succeeded A0',async t=>{
+ const {db,ab,scope,load}=await abFixture(t),c=await ab.compileDirectorAB(scope,7),execution={A0:{status:'SUCCEEDED',artifact:{artifactId:'kept'}},A1:{id:'pending',status:'RUNNING'},B:{status:'QUEUED'}};
+ await db('o_v04DirectorAssetAB').where({id:c.id}).update({status:'RENDERING_A1',executionJson:JSON.stringify(execution)});await load('directorAssetABSchema').initializeDirectorABSchema(db);
+ const r=(await ab.readDirectorAB(scope,7))[0];assert.equal(r.status,'FAILED');assert.equal(r.execution.A0.artifact.artifactId,'kept');assert.equal(r.execution.A1.status,'FAILED');assert.equal(r.execution.B.status,'NOT_RUN');assert.equal((await db('o_v04ExecutionTrace')).length,0);
+});
+test('DIR032AH4 empty Director contributes no delta even when Visual Spec carries massive scale',async t=>{
+ const {db,oss,cache}=await fixture(t),load=n=>loadSource(path.join(root,'src/v04/'+n+'.ts'),db,cache,oss),intent=load('directorContract').emptyDirectorIntent(),asset={canonicalKey:'CHAR-003',assetKind:'CREATURE',name:'Whale',description:'whale'},spec={visualIdentitySummary:'mature whale',scale:'massive biological animal',proportion:'broad torso'};
+ const c=load('directorAssetABCompiler').compileDirectorControlledAssetInput(asset,spec,null,intent,1);assert.equal(c.B.directorDeltaPrompt,'');assert.equal(c.B.renderedPrompt,c.A1.cleanBasePrompt);assert.match(c.A1.cleanBasePrompt,/massive biological animal/);
 });

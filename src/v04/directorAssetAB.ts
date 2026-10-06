@@ -17,13 +17,15 @@ import {submitTracedDraft} from './tracedDraftSubmit';
 import {acquireDraftWorkerLease} from './draftWorkerLease';
 import {DIRECTOR_RENDERING_BRIEF_VERSION} from './directorRenderingBrief';
 import {ASSET_DNA_PROJECTION_VERSION} from './directorAssetVisualDNA';
-import {abHash,compileDirectorABAssetInput,DIRECTOR_AB_COMPILER} from './directorAssetABCompiler';
+import {abHash,compileDirectorControlledAssetInput,DIRECTOR_CONTROLLED_EXPERIMENT_VERSION} from './directorAssetABCompiler';
 const q=db as Knex, table='o_v04DirectorAssetAB';
 const scope=z.object({projectId:z.number().int().positive(),scriptId:z.number().int().positive()}).strict();
 const command=scope.extend({experimentId:z.string().uuid()}).strict();
 const renderRequest=command.extend({pairHash:z.string().regex(/^[a-f0-9]{64}$/),confirmRender:z.literal(true)}).strict();
-const evaluationRequest=command.extend({choices:z.array(z.enum(['A','B','Same'])).length(6),
-  conclusion:z.enum(['CLEAR_WIN','PARTIAL_WIN','NO_IMPROVEMENT','REGRESSION']),why:z.string().max(4000).default('')}).strict();
+const directorChoices=z.array(z.enum(['A','B','Same'])).length(6),directorConclusion=z.enum(['CLEAR_WIN','PARTIAL_WIN','NO_IMPROVEMENT','REGRESSION']);
+const historicalEvaluationRequest=command.extend({choices:directorChoices,conclusion:directorConclusion,why:z.string().max(4000).default('')}).strict();
+const controlledEvaluationRequest=command.extend({hygiene:z.object({choices:z.array(z.enum(['A0','A1','Same'])).length(6),conclusion:z.enum(['CLEAN_BASE_CLEAR_WIN','CLEAN_BASE_PARTIAL_WIN','CLEAN_BASE_NO_CHANGE','CLEAN_BASE_REGRESSION'])}).strict(),director:z.object({choices:z.array(z.enum(['A1','B','Same'])).length(6),conclusion:directorConclusion}).strict(),why:z.string().max(4000).default('')}).strict();
+const evaluationRequest=z.union([controlledEvaluationRequest,historicalEvaluationRequest]);
 function deny(code:string,message:string,status=409):never{throw new PilotError(code,message,status);}
 async function authorize(trx:Knex.Transaction,s:z.infer<typeof scope>,actor:number){
   if(!Number.isSafeInteger(actor)||actor<1)deny('PILOT_AUTH_REQUIRED','需要登录',401);
@@ -53,7 +55,7 @@ export async function captureDirectorABSource(trx:Knex.Transaction,s:z.infer<typ
     directorIntent:director.intent,route,executorConfiguration:state.config,
     baseUrl:localComfyOrigin(state.config?.baseUrl??'http://127.0.0.1:8188'),
     workflowVersion:KREA_EDIT_WORKFLOW_VERSION,legacyCompilerVersion:AUTO_ASSET_RECONCILER_V1,
-    renderingLanguageVersion:KREA2_ASSET_T2I_RENDERING_V1,compilerVersion:DIRECTOR_AB_COMPILER};
+    renderingLanguageVersion:KREA2_ASSET_T2I_RENDERING_V1,compilerVersion:DIRECTOR_CONTROLLED_EXPERIMENT_VERSION};
   if(Buffer.byteLength(JSON.stringify(evidence))>750000)deny('DIRECTOR_AB_NOT_READY','捕获来源超过安全上限');
   return {evidence,sourceHash:abHash(evidence),asset,spec,creative:state.creative,director};
 }
@@ -66,7 +68,7 @@ async function checked(trx:Knex.Transaction,s:z.infer<typeof command>,actor:numb
   return row;
 }
 async function fresh(trx:Knex.Transaction,row:any){
-  if(JSON.parse(row.compiledJson).B.renderingBrief?.version!==DIRECTOR_RENDERING_BRIEF_VERSION)return false;
+  if(JSON.parse(row.compiledJson).compilerVersion!==DIRECTOR_CONTROLLED_EXPERIMENT_VERSION)return false;
   if(JSON.parse(row.compiledJson).B.directorContext.assetVisualDNA?.projectionVersion!==ASSET_DNA_PROJECTION_VERSION)return false;
   try{return (await captureDirectorABSource(trx,{projectId:row.projectId,scriptId:row.scriptId})).sourceHash===JSON.parse(row.compiledJson).sourceHash;}
   catch(e){if(e instanceof PilotError)return false;throw e;}
@@ -75,13 +77,13 @@ export async function compileDirectorAB(input:unknown,actor:number){
   const s=scope.parse(input);
   return q.transaction(async trx=>{
     await authorize(trx,s,actor);const c=await captureDirectorABSource(trx,s),id=randomUUID(),createdAt=Date.now();
-    const pair=compileDirectorABAssetInput(c.asset,c.spec,c.creative,c.director.intent,c.director.current.directorVersion,c.evidence.legacyCompilation);
+    const pair=compileDirectorControlledAssetInput(c.asset,c.spec,c.creative,c.director.intent,c.director.current.directorVersion,c.evidence.legacyCompilation);
     if(!pair.B.directorContext.narrativeRole)deny('DIRECTOR_AB_NOT_READY','当前导演版本缺少鲸鱼叙事角色');
     const seed=parseInt(c.sourceHash.slice(0,12),16),resolution=autoAssetResolution(c.asset.assetKind);
     const build=(prompt:string)=>buildKreaEditWorkflow({profile:c.evidence.route.profile,prompt,seed,...resolution,targetRole:'EXPERIMENTAL_CANDIDATE',jobId:id});
-    const workflows={A:build(pair.A.renderedPrompt),B:build(pair.B.renderedPrompt)};
+    const workflows={A0:build(pair.A0.renderedPrompt),A1:build(pair.A1.renderedPrompt),B:build(pair.B.renderedPrompt)};
     const result={id,...s,canonicalKey:'CHAR-003',sourceHash:c.sourceHash,evidence:c.evidence,...pair,workflows,
-      sharedExecution:{profile:c.evidence.route.profile,workflowVersion:KREA_EDIT_WORKFLOW_VERSION,seed,...resolution,...graphFacts(workflows.A.graph)},createdAt};
+      sharedExecution:{profile:c.evidence.route.profile,workflowVersion:KREA_EDIT_WORKFLOW_VERSION,seed,...resolution,...graphFacts(workflows.A0.graph)},createdAt};
     const frozen={...result,pairHash:abHash(result)};
     if(Buffer.byteLength(JSON.stringify(frozen))>2000000)deny('DIRECTOR_AB_NOT_READY','编译结果超过安全上限');
     await trx(table).insert({id,...s,status:'COMPILED',compiledJson:JSON.stringify(frozen),executionJson:'{}',evaluationJson:null,createdAt,updatedAt:createdAt});
@@ -93,7 +95,7 @@ export async function readDirectorAB(input:unknown,actor:number){
   return q.transaction(async trx=>{await authorize(trx,s,actor);const rows=await trx(table).where(s).orderBy('createdAt','desc').orderBy('id','desc').limit(20);
     let currentHash:string|null=null;
     try{if(rows.length)currentHash=(await captureDirectorABSource(trx,s)).sourceHash;}catch(e){if(!(e instanceof PilotError))throw e;}
-    return rows.map(row=>{const p=present(row);if(p.B.renderingBrief?.version!==DIRECTOR_RENDERING_BRIEF_VERSION||p.sourceHash!==currentHash||p.B.directorContext.assetVisualDNA?.projectionVersion!==ASSET_DNA_PROJECTION_VERSION)p.status='STALE';return p;});});
+    return rows.map(row=>{const p=present(row);if(p.compilerVersion!==DIRECTOR_CONTROLLED_EXPERIMENT_VERSION||p.sourceHash!==currentHash||p.B.directorContext.assetVisualDNA?.projectionVersion!==ASSET_DNA_PROJECTION_VERSION)p.status='STALE';return p;});});
 }
 // No startup worker and no Auto Asset World job admission. Explicit human render is the only entry.
 let rendering=false;
@@ -105,11 +107,11 @@ export async function renderDirectorAB(input:unknown,actor:number){
     if(c.pairHash!==s.pairHash)deny('DIRECTOR_AB_INPUT_CHANGED','实验输入不匹配');
     if(r.status!=='COMPILED')return {...r,replayed:true};
     if(!await fresh(trx,r))deny('DIRECTOR_AB_NOT_READY','来源已变化，请重新编译');
-    if(rendering||await trx(table).whereIn('status',['RENDERING_A','RENDERING_B']).first()||
+    if(rendering||await trx(table).whereIn('status',['RENDERING_A','RENDERING_A0','RENDERING_A1','RENDERING_B']).first()||
        await trx('o_v04StudioAssetDraftJob').whereIn('status',['QUEUED','RUNNING']).first())deny('DIRECTOR_AB_GPU_BUSY','已有图片任务，请等待完成');
-    const execution={A:{id:randomUUID(),status:'QUEUED'},B:{id:randomUUID(),status:'QUEUED'}};
-    await trx(table).where({id:r.id}).update({status:'RENDERING_A',executionJson:JSON.stringify(execution),updatedAt:Date.now()});
-    return {...r,status:'RENDERING_A',executionJson:JSON.stringify(execution)};
+    const execution={A0:{id:randomUUID(),status:'QUEUED'},A1:{id:randomUUID(),status:'QUEUED'},B:{id:randomUUID(),status:'QUEUED'}};
+    await trx(table).where({id:r.id}).update({status:'RENDERING_A0',executionJson:JSON.stringify(execution),updatedAt:Date.now()});
+    return {...r,status:'RENDERING_A0',executionJson:JSON.stringify(execution)};
   });
   if(!row.replayed){rendering=true;void runPair(row).finally(()=>{rendering=false;}).catch(error=>{
     console.error('[V04 DirectorAB][SettlementFailure]',{experimentId:row.id,errorName:error instanceof Error?error.name:'Error'});
@@ -118,7 +120,7 @@ export async function renderDirectorAB(input:unknown,actor:number){
 }
 async function runPair(row:any){
   const c=JSON.parse(row.compiledJson),execution=JSON.parse(row.executionJson),base=c.evidence.baseUrl;
-  let side:'A'|'B'='A';
+  const sides=['A0','A1','B'] as const;let side:typeof sides[number]='A0';
   let release:(()=>Promise<void>)|null=null;
   const save=async(status:string)=>q(table).where({id:row.id}).update({status,executionJson:JSON.stringify(execution),updatedAt:Date.now()});
   try{
@@ -130,8 +132,8 @@ async function runPair(row:any){
     const queue:any=await response.json();
     if(!Array.isArray(queue.queue_running)||!Array.isArray(queue.queue_pending)||queue.queue_running.length||queue.queue_pending.length)
       throw new DraftComfyError('DIRECTOR_AB_GPU_BUSY','Comfy 已有任务');
-    for(side of ['A','B'] as const){
-      if(!await q.transaction(trx=>fresh(trx,row))) {execution[side].status='NOT_RUN';await save('STALE');return;}
+    for(side of sides){
+      if(!await q.transaction(trx=>fresh(trx,row))) {for(const remaining of sides.slice(sides.indexOf(side)))execution[remaining].status='NOT_RUN';await save('STALE');return;}
       execution[side].status='RUNNING';await save('RENDERING_'+side);
       const job={id:execution[side].id,projectId:row.projectId,scriptId:row.scriptId,canonicalKey:'CHAR-003',sourceAssetRevision:c.evidence.assetRevision,
         generationIntent:c.evidence.legacyCompilation.generationIntent,executionPurpose:'EXPERIMENTAL_CANDIDATE',executorType:'COMFY_LOCAL',executorProfile:c.sharedExecution.profile,
@@ -151,7 +153,7 @@ async function runPair(row:any){
   }catch(error){
     const code=error instanceof DraftComfyError?error.code:'EXECUTION_UNCERTAIN';
     execution[side]={...execution[side],status:'FAILED',errorCode:code};execution.errorCode=code;
-    if(side==='A')execution.B.status='NOT_RUN';
+    for(const remaining of sides.slice(sides.indexOf(side)+1))execution[remaining].status='NOT_RUN';
     await q('o_v04ExecutionTrace').where({jobId:execution[side].id}).whereIn('status',['QUEUED','RUNNING']).update({status:'FAILED',errorCode:code,errorDetail:code,completedAt:Date.now(),updatedAt:Date.now()});
     await save('FAILED');
   }finally{if(release)await release();}
@@ -160,11 +162,13 @@ export async function evaluateDirectorAB(input:unknown,actor:number){
   const s=evaluationRequest.parse(input);
   return q.transaction(async trx=>{await trx(table).where({id:s.experimentId}).update({id:s.experimentId});const r=await checked(trx,s,actor);
     if(r.status!=='COMPLETED'||!await fresh(trx,r))deny('DIRECTOR_AB_NOT_READY','只能评价来源当前且完整的对照');
-    const evaluation={choices:s.choices,conclusion:s.conclusion,why:s.why,actorUserId:actor,createdAt:Date.now()};
+    const controlled=JSON.parse(r.compiledJson).comparisonDesign==='LEGACY_VS_CLEAN_VS_DIRECTOR';
+    if(controlled!==('hygiene' in s))deny('DIRECTOR_AB_INPUT_CHANGED','评价格式与实验设计不匹配');
+    const evaluation='hygiene' in s?{hygiene:s.hygiene,director:s.director,why:s.why,actorUserId:actor,createdAt:Date.now()}:{choices:s.choices,conclusion:s.conclusion,why:s.why,actorUserId:actor,createdAt:Date.now()};
     await trx(table).where({id:r.id}).update({evaluationJson:JSON.stringify(evaluation),updatedAt:Date.now()});return evaluation;});
 }
 export async function directorABArtifact(input:unknown,actor:number){
-  const s=command.extend({side:z.enum(['A','B'])}).strict().parse(input);
+  const s=command.extend({side:z.enum(['A','A0','A1','B'])}).strict().parse(input);
   const a=await q.transaction(async trx=>{const row=await checked(trx,s,actor);return JSON.parse(row.executionJson)[s.side]?.artifact;});
   if(!a)deny('DIRECTOR_AB_ARTIFACT_MISSING','实验图片不存在',404);
   const bytes=await fs.readFile(getPath(['v04-director-ab',String(s.projectId),s.experimentId,a.artifactId+'.'+a.extension]));
