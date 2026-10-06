@@ -2,8 +2,9 @@ import {createHash} from 'node:crypto';
 import {PilotError} from './service';
 export const MULTIVIEW_VERSION='multiview.krea2-boy.1';
 // Source-capture identity remains V1: changing it would also change the seed.
-// Only the Side brief compiler changes; its version is part of experimentHash.
-export const MULTIVIEW_SIDE_VERSION='multiview.krea2-boy.side.2';
+// View prompt versions are part of experimentHash; MAIN and execution settings stay fixed.
+export const MULTIVIEW_SIDE_VERSION='multiview.krea2-boy.side.3';
+export const MULTIVIEW_BACK_VERSION='multiview.krea2-boy.back.2';
 export const multiViewHash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const multiViewSides=['SIDE','BACK'] as const;
 export function resolveMultiViewBoy(assets:any[]){
@@ -17,29 +18,16 @@ export function resolveMultiViewBoy(assets:any[]){
 export function compileMultiViewBrief(asset:any,source:any,side:'SIDE'|'BACK'){
   const preserve=['same subject identity','same apparent age and face family','same hairstyle','same body proportions',
     'same clothing construction, sleeve and shorts length','same footwear state','same colors, materials and distinctive details'];
-  if(side==='SIDE'){
-    const brief={version:MULTIVIEW_SIDE_VERSION,targetView:'SIDE_ISH',
-      sourceIdentity:{canonicalKey:asset.canonicalKey,assetRevision:asset.revision,sourceHash:source.sourceHash,
-        identityAuthority:'CURRENT_REFERENCE_IMAGE',identityAnchors:asset.identityAnchors,mustPreserve:asset.mustPreserve,forbiddenChanges:asset.forbiddenChanges},
-      preserve,viewpointInstruction:['rotate this same boy into one clear left-profile standing view','replace the current frontal presentation; only the transformed side-oriented figure remains'],
-      composition:['exactly one person and one body in the entire image','single centered full-body standing figure'],conservativeInferenceRules:[],
-      avoidVisuals:['do not duplicate the character','do not show additional poses or copies','do not keep the original front-facing figure visible','no extra people, animals, props, accessories or text']};
-    const prompt='Preserve exactly the same boy from the supplied reference image. Rotate this same boy into one clear left-profile standing view. Replace the current frontal presentation; only the transformed side-oriented boy remains visible. Keep the same apparent age, face identity, hairstyle, body proportions, clothing construction, sleeve and shorts length, footwear state, colors, materials and distinctive details. Exactly one person and one body in the entire image. Single centered full-body standing figure. Do not duplicate the character. Do not show additional poses or copies. Do not keep the original front-facing figure visible. No extra people, animals, props, accessories or text.';
-    if(prompt.split(/\s+/).length>160)throw new PilotError('MULTIVIEW_PROMPT_LIMIT','侧向提示词超过安全上限',422);
-    return {brief,prompt,promptHash:multiViewHash(prompt)};
-  }
-  const viewpointInstruction=['primarily from behind','useful back-side information',
-    'rear three-quarter acceptable; face must not be the principal visible surface'];
-  const conservativeInferenceRules=['infer unseen back details conservatively from reference; no new costume structure, logos, pockets, straps or decorations'];
-  const brief={version:MULTIVIEW_VERSION,targetView:'BACK_ISH',
-    sourceIdentity:{canonicalKey:asset.canonicalKey,assetRevision:asset.revision,sourceHash:source.sourceHash,
-      identityAuthority:'CURRENT_REFERENCE_IMAGE',identityAnchors:asset.identityAnchors,mustPreserve:asset.mustPreserve,forbiddenChanges:asset.forbiddenChanges},
-    preserve,viewpointInstruction,composition:['one complete subject, full body in frame','change viewpoint only'],conservativeInferenceRules,
-    avoidVisuals:['no redesign','no extra people or animals','no props or new accessories','no text, labels, contact sheet or multi-view sheet']};
-  const prompt=['Preserve exactly the same subject identity and design from the supplied reference image.',
-    'Keep the '+preserve.map(p=>p.replace(/^same /,'')).join(', ')+'.',
-    'Show the character '+viewpointInstruction.join('; ')+'.',...conservativeInferenceRules.map(p=>p+'.'),
-    'Change viewpoint only. One complete subject, full body in frame.',brief.avoidVisuals.join('; ')+'.'].join(' ');
-  if(prompt.split(/\s+/).length>200)throw new PilotError('MULTIVIEW_PROMPT_LIMIT','视角提示词超过安全上限',422);
+  const viewpointInstruction=side==='SIDE'?['clear side-oriented standing view','side-ish is acceptable; no strict angle required']:['clear back-oriented standing view','primarily from behind; back-ish is acceptable; no strict angle required'];
+  const conservativeInferenceRules=side==='BACK'?['infer unseen back details conservatively; no new clothing structure or decorations']:[];
+  const structure='Natural hands, wrists, fingers, knees, ankles, heels and toes aligned with the standing body orientation. No twisted, fused, extra or missing limbs.';
+  const brief={version:side==='SIDE'?MULTIVIEW_SIDE_VERSION:MULTIVIEW_BACK_VERSION,targetView:side==='SIDE'?'SIDE_ISH':'BACK_ISH',
+    sourceIdentity:{canonicalKey:asset.canonicalKey,assetRevision:asset.revision,sourceHash:source.sourceHash,identityAuthority:'CURRENT_REFERENCE_IMAGE',identityAnchors:asset.identityAnchors,mustPreserve:asset.mustPreserve,forbiddenChanges:asset.forbiddenChanges},
+    preserve,viewpointInstruction,composition:['exactly one child, one person and one body','single centered full-body standing figure; change viewpoint only'],conservativeInferenceRules,
+    structuralConstraints:[structure],avoidVisuals:['no redesign','no duplicate or second child','no collage or turnaround sheet','no extra pose, text, props, accessories or cropped body']};
+  const view=side==='SIDE'?'Rotate this same boy into one clear side-oriented standing view. Replace the current frontal presentation; only the transformed figure remains.':'Show a clear back-oriented standing view, primarily from behind. Infer unseen back details conservatively; no new clothing structure or decorations.';
+  const prompt='Preserve exactly the same child from the reference. '+view+' Change viewpoint only; '+(side==='SIDE'?'side-ish':'back-ish')+' is acceptable. Keep the same apparent age, same face identity, same hairstyle, same body proportions, same clothing construction, sleeve and shorts length, colors and details. Keep the same barefoot footwear state; no shoes. Exactly one child, one person and one body. Single centered full-body standing figure, head to toes visible. '+structure+' No redesign, duplicate, second child, collage, turnaround sheet, extra pose, text, props, accessories or cropped body.';
+  if(prompt.split(/\s+/).length>160)throw new PilotError('MULTIVIEW_PROMPT_LIMIT','视角提示词超过安全上限',422);
   return {brief,prompt,promptHash:multiViewHash(prompt)};
+
 }
