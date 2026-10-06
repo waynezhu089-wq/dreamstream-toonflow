@@ -16,7 +16,8 @@ import {submitTracedDraft} from './tracedDraftSubmit';
 import {acquireDraftWorkerLease} from './draftWorkerLease';
 import {MULTIVIEW_TABLE as table} from './multiViewSchema';
 import {MULTIVIEW_VERSION,multiViewHash as hash,resolveMultiViewBoy,compileMultiViewBrief,multiViewSides} from './multiViewCompiler';
-import {integrityProfiles,integrityProfile,inspection,repairDecision,makeRepairProposals,integrityFresh} from './assetIntegrity';
+import {integrityProfiles,inspection,repairDecision,makeRepairProposals,integrityFresh} from './assetIntegrity';
+import {resolveIntegrityProfile,integritySemanticContext} from './integrityProfileResolver';
 import {INTEGRITY_TABLE} from './integritySchema';
 const q=db as Knex;
 const scope=z.object({projectId:z.number().int().positive(),scriptId:z.number().int().positive()}).strict();
@@ -190,10 +191,13 @@ async function integrityInput(trx:Knex.Transaction,r:any){
  }
  return {experimentId:r.id,sourceHash:c.sourceHash,assetRevision:c.assetRevision,visualSpecRevision:c.source.visualSpecRevision??null,artifacts:{MAIN:c.source.sourceHash,SIDE:e.SIDE.artifact.sha256,BACK:e.BACK.artifact.sha256}};
 }
+function multiViewIntegrityContext(c:any){
+ const resolution=resolveIntegrityProfile(integritySemanticContext(c.evidence.asset,c.evidence.visualSpec));
+ return {canonicalKey:c.canonicalKey,assetKind:c.evidence.asset.assetKind,integrityProfile:resolution.profile,profileResolverVersion:resolution.version,profileResolution:resolution,identityAuthority:c.identityLock.identityAuthority,identityAnchors:c.identityLock.identityAnchors,mustPreserve:c.identityLock.preserve,forbiddenChanges:c.identityLock.forbiddenChanges,confirmedParts:[],expectedPartCounts:[],allowedAsymmetry:[],confirmedVisualSpec:c.evidence.visualSpec??null,currentView:['MAIN','SIDE','BACK'],referenceViews:['MAIN'],sourceHash:c.sourceHash,assetRevision:c.assetRevision,visualSpecRevision:c.source.visualSpecRevision??null,knowledgePolicy:'Confirmed fictional structure overrides priors. Not visible is not missing. No Director mood judgement.'};
+}
 export async function readMultiViewIntegrity(input:unknown,actor:number){const s=command.parse(input);return q.transaction(async trx=>{
  const r=await checked(trx,s,actor),c=JSON.parse(r.compiledJson);let captured:any=null;try{captured=await integrityInput(trx,r);}catch(e){if(!(e instanceof PilotError))throw e;}
- const key=integrityProfile(c.evidence.asset.assetKind),profile=integrityProfiles[key as keyof typeof integrityProfiles];
- const context={canonicalKey:c.canonicalKey,assetKind:c.evidence.asset.assetKind,integrityProfile:key,identityAuthority:c.identityLock.identityAuthority,identityAnchors:c.identityLock.identityAnchors,mustPreserve:c.identityLock.preserve,forbiddenChanges:c.identityLock.forbiddenChanges,confirmedParts:[],expectedPartCounts:[],allowedAsymmetry:[],confirmedVisualSpec:c.evidence.visualSpec??null,currentView:['MAIN','SIDE','BACK'],referenceViews:['MAIN'],sourceHash:c.sourceHash,assetRevision:c.assetRevision,visualSpecRevision:c.source.visualSpecRevision??null,knowledgePolicy:'Confirmed fictional structure overrides priors. Not visible is not missing. No Director mood judgement.'};
+ const context=multiViewIntegrityContext(c),profile=integrityProfiles[context.integrityProfile];
  const history=await trx(INTEGRITY_TABLE).where(s).orderBy('createdAt','desc').orderBy('id','desc').limit(100);
  return {input:captured,context,profile,inspector:'HUMAN_INSPECTOR',automaticVision:false,history:history.map(row=>({id:row.id,createdAt:row.createdAt,actorUserId:row.actorUserId,input:JSON.parse(row.inputJson),...JSON.parse(row.reportJson),freshness:captured&&integrityFresh(JSON.parse(row.inputJson),captured)?'CURRENT':'STALE'}))};
  });}
@@ -203,6 +207,6 @@ export async function recordMultiViewIntegrity(input:unknown,actor:number){
  if(!integrityFresh(s.expectedInput,captured))deny('INTEGRITY_INPUT_STALE','检查对象已变化，请刷新');
  for(const [view,report] of Object.entries(s.reports))for(const issue of report.issues){if(view!=='CROSS_VIEW'&&!issue.evidenceViews.includes(view as 'SIDE'|'BACK'))deny('INTEGRITY_EVIDENCE_INVALID','问题需关联当前视角');if(view==='CROSS_VIEW'&&(issue.category!=='CROSS_VIEW'||new Set(issue.evidenceViews).size<2))deny('INTEGRITY_EVIDENCE_INVALID','跨视图问题需要至少两个视角');}
  const ids=Object.values(s.reports).flatMap(report=>report.issues.map(issue=>issue.id));if(new Set(ids).size!==ids.length)deny('INTEGRITY_EVIDENCE_INVALID','问题标识不能重复');
- const c=JSON.parse(r.compiledJson),result={inspector:'HUMAN_INSPECTOR',reports:s.reports,decisions:Object.fromEntries(Object.entries(s.reports).map(([view,report])=>[view,repairDecision(report)])),repairProposals:makeRepairProposals(s.reports,captured,c.identityLock),automaticAcceptance:false};
+ const c=JSON.parse(r.compiledJson),result={inspector:'HUMAN_INSPECTOR',context:multiViewIntegrityContext(c),reports:s.reports,decisions:Object.fromEntries(Object.entries(s.reports).map(([view,report])=>[view,repairDecision(report)])),repairProposals:makeRepairProposals(s.reports,captured,c.identityLock),automaticAcceptance:false};
  const id=randomUUID(),createdAt=Date.now();await trx(INTEGRITY_TABLE).insert({id,experimentId:r.id,projectId:s.projectId,scriptId:s.scriptId,inputJson:JSON.stringify(captured),reportJson:JSON.stringify(result),actorUserId:actor,createdAt});return {id,...result,freshness:'CURRENT'};
  });}

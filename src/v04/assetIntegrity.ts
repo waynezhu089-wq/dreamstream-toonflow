@@ -1,9 +1,10 @@
 import {z} from 'zod';
+import {resolveIntegrityProfile} from './integrityProfileResolver';
 export const dimensions=['PART_COUNT','PART_ATTACHMENT','ORIENTATION','TOPOLOGY','SUPPORT','SYMMETRY','PERSPECTIVE','MATERIAL','FUNCTION','CONTAMINATION','CROSS_VIEW'] as const;
 const profile=(regions:string[],focus:string[])=>({regions,focus});
 export const integrityProfiles={
  HUMAN:profile(['手','脚','四肢','服装','头部'],['joint direction','footwear','clothing-body relationship']),
- ANIMAL:profile(['肢体','尾巴','耳朵','眼睛'],['confirmed limb count','attachment']),
+ ANIMAL:profile(['肢体','爪/蹄/鳍','尾巴','耳朵','眼睛'],['confirmed limb count','attachment']),
  FANTASY_CREATURE:profile(['肢体','翅膀','角','尾巴'],['confirmed fictional morphology overrides ordinary priors']),
  VEHICLE:profile(['车轮','船体/车身','门','后部','桅杆'],['functional attachment','bow/stern','axle orientation']),
  PROP:profile(['把手','开口','连接','支撑'],['functional geometry']),
@@ -12,7 +13,7 @@ export const integrityProfiles={
  ARCHITECTURE:profile(['楼层','楼梯','门窗','柱子'],['support','scale','entry/exit']),
  GENERIC_STRUCTURED_ASSET:profile(['结构','连接','数量','方向','材质'],['attachment','orientation','perspective'])
 };
-export function integrityProfile(kind:string){return ({HUMAN_CHARACTER:'HUMAN',CREATURE:'FANTASY_CREATURE',VEHICLE:'VEHICLE',PROP:'PROP',ENVIRONMENT:'ARCHITECTURE'} as Record<string,string>)[kind]??(kind in integrityProfiles?kind:'GENERIC_STRUCTURED_ASSET');}
+export function integrityProfile(kind:string){return resolveIntegrityProfile({assetKind:kind}).profile;}
 export const integrityIssue=z.object({id:z.string().uuid(),category:z.enum(dimensions),affectedRegion:z.string().min(1).max(100).nullable(),description:z.string().min(1).max(1000),severity:z.enum(['MINOR','MODERATE','MAJOR']),confidence:z.enum(['LOW','MEDIUM','HIGH']),localizable:z.boolean(),repairability:z.enum(['LOCAL_REPAIR','REGION_REPAIR','REGENERATE_VIEW','HUMAN_REVIEW']),evidenceViews:z.array(z.enum(['MAIN','SIDE','BACK'])).min(1).max(3)}).strict();
 export const inspection=z.object({reviewed:z.boolean(),identity:z.enum(['PASS','FAIL','UNKNOWN']),view:z.enum(['PASS','FAIL','UNKNOWN']),contamination:z.enum(['PASS','FAIL','UNKNOWN']),issues:z.array(integrityIssue).max(30)}).strict();
 export function repairDecision(input:z.infer<typeof inspection>){
