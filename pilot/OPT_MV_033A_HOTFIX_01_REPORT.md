@@ -29,3 +29,9 @@ Existing experiment 11beb3c3-172f-4552-93d1-a516513e6380 retains SIDE FAIL/BACK 
 Frontend remains 22de015b75fbd98992eaaf9a0128c7290c809556. Stable backend 194340d6a37c6ef03a6d157f5848490f67c2e834 and frontend 986fb0ff32fd257498974c6c87cf4c47f360cb03 are outside this change.
 
 No real rendering, Comfy calls, downloads, installs, adoption or protected database access. Tests use fake Comfy/temporary data. Next: compile a new Boy Multi-View experiment and review SIDE prompt only; do not render until human approval.
+
+## Runtime verification amendment
+
+Backend restarted on the same experimental data directory; frontend stayed running (PID 16944). Backend listener PID 50800. No queued/running jobs were present. The historical experiment's evaluation changed during the task, already before restart: BACK PASS became PARTIAL_PASS, with added human text about wrong hand/foot, evaluation timestamp and updatedAt changed from 1791280290394 to 1791280843497. This hotfix did not issue an evaluation write and does not revert it. Both SIDE/BACK artifact hashes remain unchanged; all other 70 captured tables remain byte-equivalent logical snapshots. All other experiment fields remain unchanged. Consequently history is preserved, but whole-row equality is not claimed. The latest human BACK assessment is PARTIAL_PASS.
+
+Remote experimental and Stable heads were verified after push. Protected DB was never accessed. This report's source changes still affect SIDE only; BACK rendering defects are outside scope and require human decision.
