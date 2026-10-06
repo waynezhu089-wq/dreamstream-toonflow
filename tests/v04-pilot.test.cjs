@@ -2852,3 +2852,34 @@ test('QA034H6 fine protocol does not replay HOTFIX05 HIGH PASS and keeps new rep
  const body={...cmd,fastReportId:fast.id,targetView:'BACK',confirmExternalInspection:true},result=await mv.visionMultiViewQuality(body,7);assert.equal(oss.visionCalls,1);assert.notEqual(result.id,old.id);assert.notEqual(result.pipeline.inspectionKey,oldKey);assert.equal(result.pipeline.inspectionBrief.version,'integrity.fine-brief.2');assert.deepEqual(result.pipeline.visionAudit.imageInputs,['BACK_FULL','BACK_DETAIL']);assert.deepEqual(await db('o_v04AssetIntegrity').where({id:old.id}).first(),before);
  assert.equal((await mv.visionMultiViewQuality(body,7)).id,result.id);assert.equal(oss.visionCalls,1);
 });
+
+
+async function qaStartedFixture(t,ageMs){
+ const f=await qaFixture(t),fast=await f.mv.fastMultiViewQuality(f.cmd,7),preflight=await f.mv.preflightMultiViewVision({...f.cmd,confirmExternalInspection:true},7),configSignature=preflight.pipeline.configSignature,crypto=require('crypto');
+ const inspectionKey=crypto.createHash('sha256').update(JSON.stringify({binding:fast.input,targetView:'BACK',configSignature,briefVersion:'integrity.shadow-brief.3',minimalEscalationVersion:'integrity.fine-brief.2'})).digest('hex'),base=await f.db('o_v04AssetIntegrity').where({id:fast.id}).first();
+ const {id:fastId,createdAt:fastCreatedAt,input:fastInput,...report}=fast;
+ const row={...base,id:crypto.randomUUID(),createdAt:Date.now()-ageMs,reportJson:JSON.stringify({...report,pipeline:{...fast.pipeline,kind:'VISION',phase:'STARTED',targetView:'BACK',inspectionKey,configSignature,visionEscalation:'STARTED'}})};await f.db('o_v04AssetIntegrity').insert(row);
+ return {...f,started:await f.db('o_v04AssetIntegrity').where({id:row.id}).first(),body:{...f.cmd,fastReportId:fast.id,targetView:'BACK',confirmExternalInspection:true}};
+}
+
+test('QA034H6A recent matching STARTED returns IN_PROGRESS and never reserves or invokes twice',async t=>{
+ const {db,mv,body,oss,started}=await qaStartedFixture(t,5000),before=await db('o_v04AssetIntegrity').orderBy('id');oss.visionResult=qaFinePass();
+ for(let i=0;i<2;i++){const active=await mv.visionMultiViewQuality(body,7);assert.equal(active.status,'IN_PROGRESS');assert.equal(active.id,started.id);assert.equal(active.pipeline.phase,'STARTED');assert.ok(active.retryAfterMs>0&&active.retryAfterMs<=90000);}
+ assert.equal(oss.visionCalls??0,0);assert.deepEqual(await db('o_v04AssetIntegrity').orderBy('id'),before);
+});
+
+test('QA034H6A abandoned STARTED remains immutable and new COMPLETED is replay protected',async t=>{
+ const {db,mv,body,oss,started}=await qaStartedFixture(t,90001),before=await db('o_v04AssetIntegrity');oss.visionResult=qaFinePass();
+ const done=await mv.visionMultiViewQuality(body,7);assert.notEqual(done.id,started.id);assert.equal(done.pipeline.phase,'COMPLETED');assert.equal(done.pipeline.visionEscalation,'USED');assert.equal(oss.visionCalls,1);
+ const after=await db('o_v04AssetIntegrity');assert.equal(after.length,before.length+2);assert.equal(after.filter(r=>JSON.parse(r.reportJson).pipeline.kind==='VISION'&&JSON.parse(r.reportJson).pipeline.phase==='STARTED').length,2);assert.deepEqual(await db('o_v04AssetIntegrity').where({id:started.id}).first(),started);
+ assert.equal((await mv.visionMultiViewQuality(body,7)).id,done.id);assert.equal(oss.visionCalls,1);assert.equal((await db('o_v04AssetIntegrity')).length,after.length);
+ await assert.rejects(db('o_v04AssetIntegrity').where({id:started.id}).update({createdAt:0}),/IMMUTABLE/);
+ // A more recent STARTED cannot hide the already committed final result.
+ await db('o_v04AssetIntegrity').insert({...started,id:require('crypto').randomUUID(),createdAt:Date.now()+1000});assert.equal((await mv.visionMultiViewQuality(body,7)).id,done.id);assert.equal(oss.visionCalls,1);
+});
+
+test('QA034H6A new FAILED completion deduplicates after stale STARTED recovery',async t=>{
+ const {db,mv,body,oss,started}=await qaStartedFixture(t,100000);oss.visionFailure=Object.assign(Error('aborted'),{name:'TimeoutError'});
+ const failed=await mv.visionMultiViewQuality(body,7);assert.notEqual(failed.id,started.id);assert.equal(failed.pipeline.phase,'COMPLETED');assert.equal(failed.pipeline.visionEscalation,'FAILED');assert.equal(oss.visionCalls,1);
+ const rows=await db('o_v04AssetIntegrity').orderBy('id');oss.visionFailure=null;assert.equal((await mv.visionMultiViewQuality(body,7)).id,failed.id);assert.equal(oss.visionCalls,1);assert.deepEqual(await db('o_v04AssetIntegrity').orderBy('id'),rows);
+});

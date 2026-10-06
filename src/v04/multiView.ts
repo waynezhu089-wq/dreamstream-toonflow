@@ -222,11 +222,12 @@ export async function recordMultiViewIntegrity(input:unknown,actor:number){
  const id=randomUUID(),createdAt=Date.now();await trx(INTEGRITY_TABLE).insert({id,experimentId:r.id,projectId:s.projectId,scriptId:s.scriptId,inputJson:JSON.stringify(captured),reportJson:JSON.stringify(result),actorUserId:actor,createdAt});return {id,...result,freshness:'CURRENT'};
  });}
 
-import {inspectionDerivatives,probeVisionCapability} from './visionCapability';
+import {inspectionDerivatives,probeVisionCapability,visionTimeouts} from './visionCapability';
 import {fastAuthority} from './integrityDecisionEngine';
 import {integrityVisionConfiguration,minimalEscalationBrief,MINIMAL_ESCALATION_VERSION} from './visionIntegrityAdapter';
 import {createLocalFastVisionAdapter} from './localFastVision';
 const PIPELINE_VERSION='integrity.pipeline.1';
+const VISION_ACTIVE_WINDOW_MS=visionTimeouts.inspection+30000;
 const emptyInspection=()=>({reviewed:false,identity:'UNKNOWN',view:'UNKNOWN',contamination:'UNKNOWN',issues:[]});
 function qualityBinding(c:any,e:any){return {experimentId:c.id,sourceHash:c.sourceHash,assetRevision:c.assetRevision,visualSpecRevision:c.source.visualSpecRevision??null,artifacts:{MAIN:c.source.sourceHash,SIDE:e.SIDE?.artifact?.sha256??null,BACK:e.BACK?.artifact?.sha256??null}};}
 async function captureQuality(trx:Knex.Transaction,s:z.infer<typeof command>,actor:number){
@@ -275,13 +276,17 @@ export async function visionMultiViewQuality(input:unknown,actor:number){
   if(!s.forceShadow&&!targets.some(view=>parent.fast[view].escalationRequired))deny('INTEGRITY_ESCALATION_NOT_NEEDED','已有验证范围内的结论；Professional 可显式请求影子复核');
   const inspectionKey=createHash('sha256').update(JSON.stringify({binding:x.binding,targetView:s.targetView,configSignature:prepared.signature,briefVersion:'integrity.shadow-brief.3',minimalEscalationVersion:MINIMAL_ESCALATION_VERSION})).digest('hex');
   if(x.images.length!==3||Object.values(x.metadata).some(checks=>checks.some(c=>!c.pass)))deny('INTEGRITY_INPUT_STALE','图像或来源无法可靠核对，不发送 API');
-  const replay=await trx(INTEGRITY_TABLE).where(cmd).whereRaw("json_extract(reportJson,'$.pipeline.inspectionKey') = ? AND json_extract(reportJson,'$.pipeline.kind') = 'VISION'",[inspectionKey]).orderByRaw("CASE WHEN json_extract(reportJson,'$.pipeline.phase')='COMPLETED' THEN 0 ELSE 1 END").orderBy('createdAt','desc').orderBy('id','desc').first();
+  const matching=()=>trx(INTEGRITY_TABLE).where(cmd).whereRaw("json_extract(reportJson,'$.pipeline.inspectionKey') = ? AND json_extract(reportJson,'$.pipeline.kind') = 'VISION'",[inspectionKey]);
+  const replay=await matching().whereRaw("json_extract(reportJson,'$.pipeline.phase') = 'COMPLETED'").orderBy('createdAt','desc').orderBy('id','desc').first();
   if(replay)return {replay:{id:replay.id,...JSON.parse(replay.reportJson)},x,parent,capability:null};
+  const now=Date.now(),active=await matching().whereRaw("json_extract(reportJson,'$.pipeline.phase') = 'STARTED'").where('createdAt','>=',now-VISION_ACTIVE_WINDOW_MS).orderBy('createdAt','desc').orderBy('id','desc').first();
+  if(active)return {active:{id:active.id,...JSON.parse(active.reportJson),status:'IN_PROGRESS',retryAfterMs:Math.max(0,active.createdAt+VISION_ACTIVE_WINDOW_MS-now)},x,parent,capability:null};
+  // Abandoned STARTED rows remain immutable history; reserve a new attempt below.
   const capabilityRow=await trx(INTEGRITY_TABLE).where({projectId:s.projectId}).whereRaw("json_extract(reportJson,'$.pipeline.kind') = 'PREFLIGHT' AND json_extract(reportJson,'$.pipeline.configSignature') = ? AND json_extract(reportJson,'$.pipeline.phase') = 'COMPLETED' AND json_extract(reportJson,'$.pipeline.capability.state')='INTEGRITY_VISION_READY'",[prepared.signature]).orderBy('createdAt','desc').orderBy('id','desc').first();
   const capability=capabilityRow?JSON.parse(capabilityRow.reportJson).pipeline.capability:null;
   if(capability?.state!=='INTEGRITY_VISION_READY')deny('INTEGRITY_VISION_PREFLIGHT_REQUIRED','请先完成该视觉配置的能力预检；不会直接发送完整检查');
   const started=await appendQuality(trx,cmd,actor,x,{...parent,kind:'VISION',phase:'STARTED',inspectionKey,forceShadow:s.forceShadow,targetView:s.targetView,configSignature:prepared.signature,fastReportId:s.fastReportId,visionEscalation:'STARTED',decisions:{SIDE:'HUMAN_REVIEW',BACK:'HUMAN_REVIEW',CROSS_VIEW:'HUMAN_REVIEW'},shadowMode:true},{SIDE:emptyInspection(),BACK:emptyInspection(),CROSS_VIEW:emptyInspection()});return {x,parent,started,capability,inspectionKey};
- });if(admitted.replay)return admitted.replay;
+ });if(admitted.replay)return admitted.replay;if(admitted.active)return admitted.active;
  const brief=qualityBrief(admitted.x,admitted.parent.fast,s.targetView),vision=await inspectIntegrityVision(s.projectId,brief,admitted.x.images,{prepared,transportMode:admitted.capability.transportMode,targetView:s.targetView}),reports={SIDE:emptyInspection(),BACK:emptyInspection(),CROSS_VIEW:emptyInspection(),...vision.reports};
  const decisions:any={},authority:any={};for(const view of ['SIDE','BACK']){const d=integrityDecision(admitted.parent.fast[view],vision.reports?.[view]?{confidence:vision.reports[view].confidence,report:vision.reports[view]}:null);decisions[view]=d.result;authority[view]=d.decisionAuthority;}decisions.CROSS_VIEW=vision.reports?.CROSS_VIEW?.confidence==='HIGH'?repairDecision(vision.reports.CROSS_VIEW):'HUMAN_REVIEW';authority.CROSS_VIEW=vision.reports?'VISION_API':'HUMAN';
  return q.transaction(async trx=>{await checked(trx,cmd,actor);const now=await captureQuality(trx,cmd,actor),current=integrityFresh(now.binding,admitted.x.binding)&&Object.values(now.metadata).every(checks=>checks.every(c=>c.pass));if(!current)for(const view of Object.keys(decisions))decisions[view]='HUMAN_REVIEW';
