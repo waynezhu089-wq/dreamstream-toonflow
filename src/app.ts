@@ -1,3 +1,4 @@
+import {initializeIntegritySchema} from '@/v04/integritySchema';
 // import "./logger";
 import "./err";
 import "./env";
@@ -93,6 +94,7 @@ export default async function startServe(randomPort: Boolean = false) {
   if (process.env.DS_V04_PILOT === "1") await initializeDirectorSchema(db);
   if (process.env.DS_V04_PILOT === "1") await initializeDirectorABSchema(db);
   if (process.env.DS_V04_PILOT === "1") await initializeMultiViewSchema(db);
+  if (process.env.DS_V04_PILOT === "1") await initializeIntegritySchema(db);
   if (process.env.DS_V04_PILOT === "1") await initializeV04Profile(db);
   if (process.env.DS_V04_PILOT === "1") wakeDraftWorker();
 

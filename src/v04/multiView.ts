@@ -16,6 +16,8 @@ import {submitTracedDraft} from './tracedDraftSubmit';
 import {acquireDraftWorkerLease} from './draftWorkerLease';
 import {MULTIVIEW_TABLE as table} from './multiViewSchema';
 import {MULTIVIEW_VERSION,multiViewHash as hash,resolveMultiViewBoy,compileMultiViewBrief,multiViewSides} from './multiViewCompiler';
+import {integrityProfiles,integrityProfile,inspection,repairDecision,makeRepairProposals,integrityFresh} from './assetIntegrity';
+import {INTEGRITY_TABLE} from './integritySchema';
 const q=db as Knex;
 const scope=z.object({projectId:z.number().int().positive(),scriptId:z.number().int().positive()}).strict();
 const command=scope.extend({experimentId:z.string().uuid()}).strict();
@@ -176,3 +178,31 @@ export async function multiViewArtifact(input:unknown,actor:number){
   const bytes=await fs.readFile(getPath(['v04-multiview',String(s.projectId),s.experimentId,z.string().uuid().parse(a.artifactId)+'.'+z.enum(['png','jpg','jpeg','webp']).parse(a.extension)]));
   if(createHash('sha256').update(bytes).digest('hex')!==a.sha256)deny('MULTIVIEW_ARTIFACT_MISSING','图片校验失败',404);return {bytes,mimeType:a.mimeType};
 }
+
+async function integrityInput(trx:Knex.Transaction,r:any){
+ const c=JSON.parse(r.compiledJson),e=JSON.parse(r.executionJson);
+ if(!await fresh(trx,r))deny('INTEGRITY_INPUT_STALE','资产或来源已变化');
+ if(!['COMPLETED','PARTIAL'].includes(r.status)||!['SIDE','BACK'].every(v=>e[v]?.status==='SUCCEEDED'&&e[v]?.artifact?.sha256))deny('INTEGRITY_NOT_READY','需要已完成的 MAIN/SIDE/BACK 图像');
+ for(const side of ['MAIN','SIDE','BACK']){
+  const a=side==='MAIN'?c.source:e[side].artifact;
+  const bytes=side==='MAIN'?await imageBytes(r.projectId,a):await fs.readFile(getPath(['v04-multiview',String(r.projectId),r.id,z.string().uuid().parse(a.artifactId)+'.'+z.enum(['png','jpg','jpeg','webp']).parse(a.extension)]));
+  if(createHash('sha256').update(bytes).digest('hex')!==(side==='MAIN'?a.sourceHash:a.sha256))deny('INTEGRITY_INPUT_STALE','图像内容已变化');
+ }
+ return {experimentId:r.id,sourceHash:c.sourceHash,assetRevision:c.assetRevision,visualSpecRevision:c.source.visualSpecRevision??null,artifacts:{MAIN:c.source.sourceHash,SIDE:e.SIDE.artifact.sha256,BACK:e.BACK.artifact.sha256}};
+}
+export async function readMultiViewIntegrity(input:unknown,actor:number){const s=command.parse(input);return q.transaction(async trx=>{
+ const r=await checked(trx,s,actor),c=JSON.parse(r.compiledJson);let captured:any=null;try{captured=await integrityInput(trx,r);}catch(e){if(!(e instanceof PilotError))throw e;}
+ const key=integrityProfile(c.evidence.asset.assetKind),profile=integrityProfiles[key as keyof typeof integrityProfiles];
+ const context={canonicalKey:c.canonicalKey,assetKind:c.evidence.asset.assetKind,integrityProfile:key,identityAuthority:c.identityLock.identityAuthority,identityAnchors:c.identityLock.identityAnchors,mustPreserve:c.identityLock.preserve,forbiddenChanges:c.identityLock.forbiddenChanges,confirmedParts:[],expectedPartCounts:[],allowedAsymmetry:[],confirmedVisualSpec:c.evidence.visualSpec??null,currentView:['MAIN','SIDE','BACK'],referenceViews:['MAIN'],sourceHash:c.sourceHash,assetRevision:c.assetRevision,visualSpecRevision:c.source.visualSpecRevision??null,knowledgePolicy:'Confirmed fictional structure overrides priors. Not visible is not missing. No Director mood judgement.'};
+ const history=await trx(INTEGRITY_TABLE).where(s).orderBy('createdAt','desc').orderBy('id','desc').limit(100);
+ return {input:captured,context,profile,inspector:'HUMAN_INSPECTOR',automaticVision:false,history:history.map(row=>({id:row.id,createdAt:row.createdAt,actorUserId:row.actorUserId,input:JSON.parse(row.inputJson),...JSON.parse(row.reportJson),freshness:captured&&integrityFresh(JSON.parse(row.inputJson),captured)?'CURRENT':'STALE'}))};
+ });}
+export async function recordMultiViewIntegrity(input:unknown,actor:number){
+ const s=command.extend({expectedInput:z.object({experimentId:z.string().uuid(),sourceHash:z.string().regex(/^[a-f0-9]{64}$/),assetRevision:z.number().int().positive(),visualSpecRevision:z.number().int().positive().nullable(),artifacts:z.object({MAIN:z.string().regex(/^[a-f0-9]{64}$/),SIDE:z.string().regex(/^[a-f0-9]{64}$/),BACK:z.string().regex(/^[a-f0-9]{64}$/)}).strict()}).strict(),reports:z.object({SIDE:inspection,BACK:inspection,CROSS_VIEW:inspection}).strict()}).strict().parse(input);
+ return q.transaction(async trx=>{await trx('o_script').where({id:s.scriptId,projectId:s.projectId}).update({id:s.scriptId});const r=await checked(trx,s,actor),captured=await integrityInput(trx,r);
+ if(!integrityFresh(s.expectedInput,captured))deny('INTEGRITY_INPUT_STALE','检查对象已变化，请刷新');
+ for(const [view,report] of Object.entries(s.reports))for(const issue of report.issues){if(view!=='CROSS_VIEW'&&!issue.evidenceViews.includes(view as 'SIDE'|'BACK'))deny('INTEGRITY_EVIDENCE_INVALID','问题需关联当前视角');if(view==='CROSS_VIEW'&&(issue.category!=='CROSS_VIEW'||new Set(issue.evidenceViews).size<2))deny('INTEGRITY_EVIDENCE_INVALID','跨视图问题需要至少两个视角');}
+ const ids=Object.values(s.reports).flatMap(report=>report.issues.map(issue=>issue.id));if(new Set(ids).size!==ids.length)deny('INTEGRITY_EVIDENCE_INVALID','问题标识不能重复');
+ const c=JSON.parse(r.compiledJson),result={inspector:'HUMAN_INSPECTOR',reports:s.reports,decisions:Object.fromEntries(Object.entries(s.reports).map(([view,report])=>[view,repairDecision(report)])),repairProposals:makeRepairProposals(s.reports,captured,c.identityLock),automaticAcceptance:false};
+ const id=randomUUID(),createdAt=Date.now();await trx(INTEGRITY_TABLE).insert({id,experimentId:r.id,projectId:s.projectId,scriptId:s.scriptId,inputJson:JSON.stringify(captured),reportJson:JSON.stringify(result),actorUserId:actor,createdAt});return {id,...result,freshness:'CURRENT'};
+ });}

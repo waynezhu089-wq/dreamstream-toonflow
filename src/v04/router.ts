@@ -1,7 +1,7 @@
 import {proposeDirector,previewDirector,confirmDirector,readDirector,directorHistory,rejectDirector} from "./directorBible";
 import {directorDryRun} from './directorDryRun';
 import {compileDirectorAB,readDirectorAB,renderDirectorAB,evaluateDirectorAB,directorABArtifact} from './directorAssetAB';
-import {compileMultiView,readMultiView,renderMultiView,evaluateMultiView,multiViewArtifact} from './multiView';
+import {readMultiViewIntegrity,recordMultiViewIntegrity,compileMultiView,readMultiView,renderMultiView,evaluateMultiView,multiViewArtifact} from './multiView';
 import {inspectOperations,recentExecutions,executionDetail,workflowExample,previewRouting,applyRouting} from './operations';
 import {reconcileAutoAssets,autoAssetCoverage} from './autoAsset';
 import {wakeDraftWorker} from './studioDraftImage';
@@ -70,6 +70,8 @@ endpoint("/project/create", (body, req) => createPilotProject(body, Number((req 
 endpoint("/project/read", input => readPilot(input));
 for(const [path,handler] of Object.entries({compile:compileMultiView,current:readMultiView,render:renderMultiView,evaluate:evaluateMultiView}))
   endpoint('/multiview/'+path,(input,req)=>handler(input,Number((req as any).user.id)));
+endpoint('/multiview/integrity/current',(input,req)=>readMultiViewIntegrity(input,Number((req as any).user.id)));
+endpoint('/multiview/integrity/record',(input,req)=>recordMultiViewIntegrity(input,Number((req as any).user.id)));
 router.post('/multiview/artifact',async(req,res)=>{
   try{const image=await multiViewArtifact(req.body,Number((req as any).user.id));res.setHeader('Content-Type',image.mimeType);res.setHeader('Cache-Control','private, max-age=60');res.send(image.bytes);}
   catch(e){res.status(e instanceof PilotError?e.status:404).json({code:'MULTIVIEW_ARTIFACT_MISSING',message:'实验图片不可用'});}
