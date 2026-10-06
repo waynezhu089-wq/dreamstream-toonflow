@@ -11,6 +11,7 @@ import {
   DirectorValidationError,
 } from "./directorCompiler";
 import { directorIntentSchema, emptyDirectorIntent } from "./directorContract";
+import { resolveDirectorContext, resolveProjectDirectorSeed } from "./directorContext";
 import { oneObject } from "./studioTurnSemantic";
 
 const compilerVersion = "v04.director-bible.1",
@@ -26,6 +27,7 @@ const proposalRequest = scopeSchema
     userInstruction: z.string().max(8000).default("整理当前影片的导演视觉方向"),
     baseProposalId: z.string().uuid().optional(),
     baseDirectorVersion: z.number().int().positive().optional(),
+    selectedObject: z.object({ type: z.enum(["PROJECT", "ASSET", "SHOT"]), key: z.string().min(1).max(128) }).strict().nullable().optional(),
   })
   .strict();
 const proposalCommand = scopeSchema
@@ -302,11 +304,12 @@ export async function proposeDirector(input: unknown, actor: number) {
     if (
       !base &&
       current &&
-      current.scriptId === scope.scriptId &&
-      current.sourceHash === captured.sourceHash
+      current.scriptId === scope.scriptId
     )
       base = current;
-    return { captured, base, current };
+    const requestContext = resolveDirectorContext(captured.state, data.userInstruction, data.selectedObject);
+    const seed = !base && !current ? resolveProjectDirectorSeed(captured.state) : null;
+    return { captured, base, current, requestContext, seed };
   });
   let model: any;
   try {
@@ -315,7 +318,7 @@ export async function proposeDirector(input: unknown, actor: number) {
     deny("DIRECTOR_MODEL_FAILED", "文本模型不可用，请检查模型配置", 502);
   }
   const template = emptyDirectorIntent();
-  const system = `You are a visual director / art director semantic planner, NOT screenwriter, asset generator or image prompt writer. Write human-facing descriptions in Chinese. Return exactly one JSON object matching the supplied semantic template; no executor syntax, seed, CFG, sampler, workflow, image generation. Creative facts, active canonical identity, confirmed appearance and REAL_REQUIRED reference win. Never invent story events or redesign costume, anatomy or identity. Supporting roles may remain unresolved/null. Existing proposal is the base: revise only user-requested direction and preserve other semantic sections. Emotional beats follow Creative, not a fixed count. BRAND/UI cannot be MATERIAL_TRANSFORMATION targets. Project direction: whale is SUBLIME COLOSSUS, ancient/majestic/overwhelming, awe first fear second, not evil/gore/cute; when these dream assets actually exist, material lineage Dream Matter→ship→submarine→Pegasus stops physically at Pegasus; Pegasus→real Logo is COMPOSITION_RESOLUTION only, graphic match/dissolve, never AI redraw. Preserve confirmed palettes. Any inference is only a candidate. Template ${JSON.stringify(template)}. Field definitions: keys must refer to supplied active assets; relationType MATERIAL_TRANSFORMATION or COMPOSITION_RESOLUTION; scale kind RELATIVE/DRAMATIC/SHOT_SPECIFIC with shotRef null except for a real candidate clientRef; null storyboardId for unpersisted intentions. Narrative roles contain nullable narrativeFunction/emotionalRead/dramaticImportance/scaleFunction and string arrays requiredAudiencePerception/forbiddenInterpretations. All global DNA arrays are strings. Do not introduce unknown fields.`;
+  const system = `You are a visual director / art director semantic planner, NOT screenwriter, asset generator or image prompt writer. Write human-facing descriptions in Chinese. Return exactly one JSON object matching the supplied semantic template; no executor syntax, seed, CFG, sampler, workflow, image generation. Creative facts, active canonical identity, confirmed appearance and REAL_REQUIRED reference win. Never invent story events or redesign costume, anatomy or identity. Supporting roles may remain unresolved/null. Existing proposal is the base: revise only user-requested direction and preserve other semantic sections. Emotional beats follow Creative, not a fixed count. BRAND/UI cannot be MATERIAL_TRANSFORMATION targets. Composition Resolution to a confirmed real reference is allowed. Preserve confirmed palettes. Project seed is scoped input, never global policy; accepted/base content is the revision base, user instruction changes only the requested direction, seed is used only for initial defaults. Follow the resolved revision scope: for SINGLE_ASSET return its revised Narrative Visual Role and leave every other section unchanged. Any inference is only a candidate. Template ${JSON.stringify(template)}. Field definitions: keys must refer to supplied active assets; relationType MATERIAL_TRANSFORMATION or COMPOSITION_RESOLUTION; scale kind RELATIVE/DRAMATIC/SHOT_SPECIFIC with shotRef null except for a real candidate clientRef; null storyboardId for unpersisted intentions. Narrative roles contain nullable narrativeFunction/emotionalRead/dramaticImportance/scaleFunction and string arrays requiredAudiencePerception/forbiddenInterpretations. All global DNA arrays are strings. Do not introduce unknown fields.`;
   let intent: any;
   try {
     const session = await u.Ai.Text(model).trackedSession();
@@ -329,6 +332,8 @@ export async function proposeDirector(input: unknown, actor: number) {
               type: "text",
               text: JSON.stringify({
                 source: initial.captured.source,
+                projectDirectorSeed: initial.seed,
+                requestContext: initial.requestContext,
                 baseProposal: initial.base ? content(initial.base) : null,
                 currentAccepted: initial.current
                   ? {
@@ -366,25 +371,24 @@ export async function proposeDirector(input: unknown, actor: number) {
     );
   }
   if (initial.base) {
-    const mentioned = initial.captured.state.assets.filter(
-      (a) =>
-        a.status === "ACTIVE" &&
-        (data.userInstruction.includes(a.name) ||
-          data.userInstruction.includes(a.canonicalKey)),
-    );
-    if (
-      mentioned.length === 1 &&
-      !/整体|全片|整部|所有|全局/.test(data.userInstruction)
-    ) {
+    if (initial.requestContext.resolvedCanonicalKey) {
       const base = content(initial.base),
-        key = mentioned[0].canonicalKey,
+        key = initial.requestContext.resolvedCanonicalKey,
         role = intent.narrativeVisualRoles.find(
           (r: any) => r.canonicalKey === key,
         );
       if (!role)
         deny("DIRECTOR_CANDIDATE_INVALID", "目标素材的导演角色缺失", 422);
+      const related = /关系|变形链|血缘|大小关系|比例关系/.test(data.userInstruction);
+      const mergeEdges = (field: "scaleRelations" | "transformationLineage") => {
+        const touches = (edge: any) => field === "scaleRelations"
+          ? edge.smaller === key || edge.larger === key : edge.from === key || edge.to === key;
+        return related ? [...base[field].filter((e: any) => !touches(e)), ...intent[field].filter(touches)] : base[field];
+      };
       intent = validate(initial.captured, {
         ...base,
+        scaleRelations: mergeEdges("scaleRelations"),
+        transformationLineage: mergeEdges("transformationLineage"),
         narrativeVisualRoles: [
           ...base.narrativeVisualRoles.filter(
             (r: any) => r.canonicalKey !== key,
@@ -422,7 +426,9 @@ export async function proposeDirector(input: unknown, actor: number) {
         userInstruction: data.userInstruction,
         appearancePolicy: "PRESERVE_CONFIRMED",
         authority: "VISUAL_INTERPRETATION_ONLY",
-        productDirectionOrigin: "USER_CONFIRMED_WORK_ORDER_OPT_DIR_031B",
+        projectDirectionSources: initial.seed?.projectDirectionSources ?? (initial.base ? [{ type: "DIRECTOR_BASE", sourceId: initial.base.id, scope: "PROJECT" }] : initial.current ? [{ type: "ACCEPTED_DIRECTOR", sourceId: initial.current.id, scope: "PROJECT" }] : []),
+        projectDirectorSeed: initial.seed,
+        requestContext: initial.requestContext,
       }),
       status: "DRAFT",
       createdAt: now,

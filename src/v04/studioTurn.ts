@@ -1,3 +1,4 @@
+import {directorFastPath} from "./directorContext";
 import {proposeDirector,readDirector} from "./directorBible";
 import {previewImageBaseline,listImageBaselines} from './assetImageBaseline';
 import {reconcileAutoAssets,autoAssetCoverage} from './autoAsset';
@@ -60,11 +61,12 @@ export async function answerStudioTurn(input: unknown, userMessageId?: string, a
   const ctx = data.context;
   const state = await readPilot({ projectId: ctx.projectId, scriptId: ctx.scriptId });
   const selected = ctx.selectedObject;
-  if(/导演(方向|方案|视觉)|整部片.*视觉方向|全片.*视觉|鲸鱼.*(恐怖|怪兽|敬畏)|飞马.*神圣|蓝色物质.*贯穿|不要.*赛博|不要.*游戏.*电影/.test(data.message)){
+  const requestDirector = async () => {
     const scope={projectId:ctx.projectId,scriptId:ctx.scriptId};const current=await readDirector(scope,actorUserId??0);
-    const proposal=await proposeDirector({...scope,userInstruction:data.message,...(current.proposal&&current.proposal.status!=='STALE'?{baseProposalId:current.proposal.id}:{} )},actorUserId??0);
+    const proposal=await proposeDirector({...scope,userInstruction:data.message,selectedObject:selected,...(current.proposal&&current.proposal.status!=='STALE'?{baseProposalId:current.proposal.id}:{} )},actorUserId??0);
     return {mode:'DIRECTOR_PROPOSAL',reply:'导演方向候选已准备，请审阅变化后人工确认。当前图片不会自动改变。',directorProposal:proposal,applied:false};
-  }
+  };
+  if(directorFastPath(data.message,selected,state.assets)) return requestDirector();
   if(/把.*资产.*准备好|准备.*全部.*素材|重新做.*第一稿|怎么.*还没图|为什么.*没有图/.test(data.message)){
     const asset=state.assets.find((a:any)=>selected?.type==='ASSET'&&a.canonicalKey===selected.key)||state.assets.find((a:any)=>data.message.includes(a.name)||data.message.includes(a.canonicalKey));
     if(/重新做/.test(data.message)&&!asset)return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'请选中要重新准备第一稿的素材。',applied:false};
@@ -116,7 +118,7 @@ export async function answerStudioTurn(input: unknown, userMessageId?: string, a
     activeAssets: state.assets.filter((asset: any) => asset.status === "ACTIVE").map((asset: any) => ({ canonicalKey: asset.canonicalKey, name: asset.name, category: asset.category, assetKind: asset.assetKind })) }
     : prepared && "early" in prepared ? null : prepared?.source;
   const system = `${renderProjectAgentSystem(agentContext)}\n你是同一个 Project Agent 的 Studio 对话模式。${studioTurnFormat}` +
-    `mode 必须是 DISCUSS、PROPOSE_CHANGE、ASSET_CREATE、ASSET_IMAGE_EDIT 或 NEEDS_TARGET_CONFIRMATION；reply 是自然、简洁的中文回答。` +
+    `mode 必须是 DISCUSS、PROPOSE_CHANGE、ASSET_CREATE、ASSET_IMAGE_EDIT、DIRECTOR_PROPOSAL 或 NEEDS_TARGET_CONFIRMATION；reply 是自然、简洁的中文回答。气质、情绪、叙事角色、视觉定位或导演表达修改用 DIRECTOR_PROPOSAL；像雀斑、服装颜色、背景明暗等外观像素修改用 ASSET_IMAGE_EDIT。DIRECTOR_PROPOSAL 只返回 mode/reply，不要拼导演 JSON；后端根据当前 selectedObject 和消息解析目标。` +
     `本次明确要求用上传图片本身来改图时，imageIntent.sourceAttachmentId 使用真实附件 ID，referenceBindings 为空；只参考风格/光影时，主体仍取资产基准，上传图只放 referenceBindings。仅讨论或称赞图片不能重绘或设基准。用户要求修改现有图片、重做风格或派生大头照/背面时，使用 ASSET_IMAGE_EDIT 而不是 PROPOSE_CHANGE。它生成图片候选，不改变 Visual Spec。imageIntent 的 editMode 为 TEXT_EDIT/REFERENCE_EDIT/DERIVE_VIEW/STYLE_VARIANT；targetRole 为 EDIT_CANDIDATE/STYLE_VARIANT/FACE_HERO/FULL_BODY_FRONT/FULL_BODY_BACK/SIDE_SPECIAL_LEFT/SIDE_SPECIAL_RIGHT/DETAIL_REFERENCE。sourceFocus 为 FACE/BODY/BACK，按实际要修改的部位选择；仅说保留脸不代表 FACE 修改，默认 BODY。preserveIntent 的 identity/face/hairstyle/costume/palette/silhouette/proportions/material/composition 只能为 HIGH/MEDIUM/LOW，默认 HIGH。referenceBindings 只可引用这次给出的真实 attachmentId，role 只能为 STYLE_REFERENCE/COSTUME_REFERENCE/LIGHTING_REFERENCE/MATERIAL_REFERENCE/POSE_REFERENCE/COMPOSITION_REFERENCE/DETAIL_REFERENCE；图用途不明先自然语言追问。仅在用户明确引用历史图片时使用 availableReferenceImages 中的真实 ID；没有本次上传或明确历史引用时为空。canonicalKey 必须是当前选中或用户明确提到的有效素材。不要虚构图片执行成功，reply 只说已提交候选制作。` +
     `疑问、解释、对比和建议用 DISCUSS；只有用户明确要求改变当前对象，才用 PROPOSE_CHANGE，并填写 summary、rationale、patch。` +
     `目标含糊或涉及素材身份的改名、归属、退休等身份级修改时用 NEEDS_TARGET_CONFIRMATION。` +
@@ -156,6 +158,7 @@ export async function answerStudioTurn(input: unknown, userMessageId?: string, a
       studioFailure(ctx, repairError instanceof StudioSemanticError ? repairError.stage : "STRICT_VALIDATION_FAILED", repairError, 1);
     }
   }
+  if (turn.mode === "DIRECTOR_PROPOSAL") return requestDirector();
   if (turn.mode === "ASSET_IMAGE_EDIT") {
     if(/你觉得|你认为|怎么样|分析这张|这张不错/.test(data.message)&&!/帮我|请.*(?:改|生成)|改得|修改成|重绘|生成/.test(data.message))return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'这次只讨论图片，没有修改或设置基准。你希望换成这张图中的人物，还是只参考它的画风？',applied:false};
     const intent = turn.imageIntent as any;
