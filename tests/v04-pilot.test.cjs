@@ -107,7 +107,7 @@ const asset = (name='Dreamer', category='CHAR', sourcePolicy='AI_ALLOWED') => ({
 
 async function mvFixture(t){
  const f=await fixture(t),{db,oss,cache,service}=f,load=n=>loadSource(path.join(root,'src/v04/'+n+'.ts'),db,cache,oss);
- await load('directorAssetABSchema').initializeDirectorABSchema(db);await load('multiViewSchema').initializeMultiViewSchema(db);
+ await load('directorAssetABSchema').initializeDirectorABSchema(db);await load('multiViewSchema').initializeMultiViewSchema(db);await load('integritySchema').initializeIntegritySchema(db);
  const scope=await service.createPilotProject({name:'Multi View test',brief:'boy',targetDuration:40,aspectRatio:'16:9'},7);
  await db('o_v04Asset').insert({projectId:scope.projectId,canonicalKey:'CHAR-007',name:'Boy',category:'CHAR',assetKind:'HUMAN_CHARACTER',sourcePolicy:'AI_ALLOWED',description:'old long-sleeve pajamas; image authority wins',identityAnchors:JSON.stringify(['white short-sleeve top']),mustPreserve:JSON.stringify(['white shorts','barefoot']),forbiddenChanges:JSON.stringify(['shoes']),status:'ACTIVE',revision:2,createdAt:1,updatedAt:1});
  const png=await require('sharp')({create:{width:768,height:768,channels:3,background:'#aabbcc'}}).png().toBuffer(),crypto=require('crypto');
@@ -116,7 +116,7 @@ async function mvFixture(t){
  await db('o_v04AgentAttachment').insert({id:attachmentId,...scope,messageId:crypto.randomUUID(),originalName:'boy.png',mimeType:'image/png',bytes:png.length,sha256,purpose:'CONVERSATIONAL_REFERENCE',contextJson:'{}',filePath:'/unused-test.png',createdAt:1});
  await db('o_v04Decision').insert({id:baselineVersion,...scope,category:'ASSET_EDIT_BASELINE',subjectType:'ASSET',subjectKey:'CHAR-007',content:JSON.stringify({canonicalKey:'CHAR-007',sourceAssetRevision:2,role:'GENERAL',attachmentId,sha256}),status:'ACCEPTED',sourceMessageIds:'[]',createdAt:1,acceptedAt:1});
  await db('o_v04StudioImageExecutorConfig').insert({projectId:scope.projectId,baseUrl:'http://127.0.0.1:8188',enabled:1,checkpoint:'unused',updatedAt:1});
- const truth=async()=>{const out={};for(const {name} of await db('sqlite_master').where({type:'table'}).orderBy('name')){if(['sqlite_sequence','o_v04MultiViewExperiment','o_v04ExecutionTrace'].includes(name))continue;out[name]=(await db(name)).map(r=>JSON.stringify(r)).sort();}return out;};
+ const truth=async()=>{const out={};for(const {name} of await db('sqlite_master').where({type:'table'}).orderBy('name')){if(['sqlite_sequence','o_v04MultiViewExperiment','o_v04ExecutionTrace','o_v04AssetIntegrity'].includes(name))continue;out[name]=(await db(name)).map(r=>JSON.stringify(r)).sort();}return out;};
  return {...f,load,scope,png,attachmentId,sha256,baselineVersion,truth,mv:load('multiView')};
 }
 test('MV033A compile locks accepted image, STAR graph, prompts, metadata and zero production/truth writes',async t=>{
@@ -125,7 +125,7 @@ test('MV033A compile locks accepted image, STAR graph, prompts, metadata and zer
  const c=await mv.compileMultiView(scope,7);assert.equal(c.canonicalKey,'CHAR-007');assert.equal(c.status,'COMPILED');assert.equal(c.source.attachmentId,attachmentId);assert.equal(c.source.sourceHash,sha256);
  assert.equal(c.topology,'STAR');assert.equal(c.anglePolicy,'TOLERANT');assert.equal(c.sourceQualityGate,'HUMAN_REVIEW_REQUIRED');assert.equal(c.fallback.status,'NOT_AUTHORIZED');
  assert.equal(c.SIDE.sourceHash,sha256);assert.equal(c.BACK.sourceHash,sha256);assert.match(c.SIDE.prompt,/side-oriented|Change viewpoint only/i);assert.match(c.BACK.prompt,/primarily from behind|back-side information|conservatively/);
- for(const side of ['SIDE','BACK']){assert.match(c[side].prompt,/same subject|subject identity|same boy/);assert.match(c[side].prompt,/footwear state/);assert.doesNotMatch(c[side].prompt,/pajamas|long-sleeve|moon|awe|sublime|Director|Dream Matter|exactly 90|exactly 180/);if(side==='BACK'){assert.match(c[side].prompt,/no props or new accessories/);assert.match(c[side].prompt,/contact sheet or multi-view sheet/);}else{assert.match(c[side].prompt,/No extra people, animals, props, accessories or text/);assert.doesNotMatch(c[side].prompt,/contact sheet|multi-view sheet|turnaround|reference sheet/i);}assert.ok(c[side].prompt.split(/\s+/).length<=140);assert.equal(c[side].workflow.graph['7'].inputs.image,'multiview-identity.png');}
+ for(const side of ['SIDE','BACK']){assert.match(c[side].prompt,/same subject|subject identity|same boy/);assert.match(c[side].prompt,/footwear state/);assert.doesNotMatch(c[side].prompt,/pajamas|long-sleeve|moon|awe|sublime|Director|Dream Matter|exactly 90|exactly 180/);if(side==='BACK'){assert.match(c[side].prompt,/no props or new accessories/);assert.match(c[side].prompt,/contact sheet or multi-view sheet/);}else{assert.match(c[side].prompt,/No extra people, animals, props, accessories or text/);assert.doesNotMatch(c[side].prompt,/contact sheet|multi-view sheet|turnaround|reference sheet/i);}assert.ok(c[side].basePrompt.split(/\s+/).length<=140);assert.equal(c[side].generationGuard.version,'generation.structural-guard.1');assert.equal(c[side].workflow.graph['7'].inputs.image,'multiview-identity.png');}
  assert.match(JSON.stringify(c.identityLock),/white short-sleeve top|white shorts|barefoot/);
  const a=structuredClone(c.SIDE.workflow.graph),b=structuredClone(c.BACK.workflow.graph);delete a['5'].inputs.prompt;delete b['5'].inputs.prompt;assert.deepEqual(a,b);assert.equal(a['12'].class_type,'Krea2EditModelPatch');assert.deepEqual(a['5'].inputs.image,['7',0]);assert.deepEqual(a['12'].inputs.source_image,['7',0]);
  assert.deepEqual(await truth(),before);assert.equal((await db('o_v04ExecutionTrace')).length,0);assert.equal(oss.modelCalls.length,0);
@@ -214,19 +214,19 @@ test('MV033AH1 pinned V1 BACK bytes and SIDE non-prompt graph/source/seed/settin
  const c=await mv.compileMultiView(scope,7),asset=c.evidence.asset,oldSide=old.exports.compileMultiViewBrief(asset,c.source,'SIDE'),oldBack=old.exports.compileMultiViewBrief(asset,c.source,'BACK');
  assert.equal(compiler.MULTIVIEW_VERSION,old.exports.MULTIVIEW_VERSION);assert.equal(c.evidence.compilerVersion,old.exports.MULTIVIEW_VERSION);
  assert.equal(c.sourceHash,old.exports.multiViewHash(c.evidence));assert.equal(c.sharedExecution.seed,parseInt(old.exports.multiViewHash(c.evidence).slice(0,12),16));
- assert.deepEqual(c.BACK.brief,oldBack.brief);assert.equal(c.BACK.prompt,oldBack.prompt);assert.equal(c.BACK.promptHash,oldBack.promptHash);
+ assert.deepEqual(c.BACK.brief,oldBack.brief);assert.equal(c.BACK.basePrompt,oldBack.prompt);assert.equal(c.BACK.basePromptHash,oldBack.promptHash);assert.equal(c.BACK.prompt,c.BACK.basePrompt+' '+c.BACK.generationGuard.constraints.join(' '));
  assert.deepEqual(c.SIDE.brief.sourceIdentity,oldSide.brief.sourceIdentity);assert.deepEqual(c.SIDE.brief.preserve,oldSide.brief.preserve);assert.equal(c.SIDE.sourceHash,c.BACK.sourceHash);
  assert.equal(c.SIDE.brief.version,'multiview.krea2-boy.side.2');assert.notEqual(c.SIDE.promptHash,oldSide.promptHash);
  const build=prompt=>load('kreaImageEditProfile').buildKreaEditWorkflow({profile:c.sharedExecution.profile,prompt,seed:c.sharedExecution.seed,width:c.sharedExecution.width,height:c.sharedExecution.height,sourceImage:'multiview-identity.png',jobId:c.id,targetRole:'EXPERIMENTAL_MULTIVIEW_SIDE'});
  const oldGraph=build(oldSide.prompt),newGraph=structuredClone(c.SIDE.workflow);delete oldGraph.graph['5'].inputs.prompt;delete newGraph.graph['5'].inputs.prompt;assert.deepEqual(newGraph,oldGraph);
- const oldBackWorkflow=load('kreaImageEditProfile').buildKreaEditWorkflow({profile:c.sharedExecution.profile,prompt:oldBack.prompt,seed:c.sharedExecution.seed,width:c.sharedExecution.width,height:c.sharedExecution.height,sourceImage:'multiview-identity.png',jobId:c.id,targetRole:'EXPERIMENTAL_MULTIVIEW_BACK'});assert.deepEqual(c.BACK.workflow,oldBackWorkflow);
+ const oldBackWorkflow=load('kreaImageEditProfile').buildKreaEditWorkflow({profile:c.sharedExecution.profile,prompt:oldBack.prompt,seed:c.sharedExecution.seed,width:c.sharedExecution.width,height:c.sharedExecution.height,sourceImage:'multiview-identity.png',jobId:c.id,targetRole:'EXPERIMENTAL_MULTIVIEW_BACK'});const guardedBack=structuredClone(c.BACK.workflow);delete guardedBack.graph['5'].inputs.prompt;delete oldBackWorkflow.graph['5'].inputs.prompt;assert.deepEqual(guardedBack,oldBackWorkflow);
  assert.deepEqual(load('operationsRegistry').graphFacts(c.BACK.workflow.graph),load('operationsRegistry').graphFacts(c.SIDE.workflow.graph));
  for(const term of [/exactly one person and one body/i,/single centered full-body standing figure/i,/do not duplicate/i,/do not show additional poses/i,/rotate this same boy/i,/replace the current frontal presentation/i,/footwear state/,/face identity/,/hairstyle/,/body proportions/,/clothing construction/])assert.match(c.SIDE.prompt,term);
  assert.doesNotMatch(c.SIDE.prompt,/contact sheet|multi-view sheet|turnaround|reference sheet|side-view information|main viewpoint|exactly 90|Director|Dream Matter|moon|awe|sublime/i);
- assert.ok(c.SIDE.prompt.split(/\s+/).length<=120);assert.deepEqual(await truth(),before);assert.equal(oss.modelCalls.length,0);assert.equal((await db('o_v04ExecutionTrace')).length,0);
+ assert.ok(c.SIDE.basePrompt.split(/\s+/).length<=120);assert.deepEqual(await truth(),before);assert.equal(oss.modelCalls.length,0);assert.equal((await db('o_v04ExecutionTrace')).length,0);
  // A real historical compiled record remains immutable/readable with old Side
  // and the Human's original verdict; the hotfix never rewrites it on read.
- const historical=structuredClone(c);historical.id=require('crypto').randomUUID();historical.SIDE={...historical.SIDE,...oldSide,workflow:build(oldSide.prompt)};
+ const historical=structuredClone(c);historical.id=require('crypto').randomUUID();historical.SIDE={...oldSide,workflow:build(oldSide.prompt)};historical.BACK={...oldBack,workflow:oldBackWorkflow};
  const now=Date.now(),evaluation={SIDE:'FAIL',BACK:'PASS',why:'duplicate subjects'};
  await db('o_v04MultiViewExperiment').insert({id:historical.id,...scope,status:'COMPLETED',compiledJson:JSON.stringify(historical),executionJson:JSON.stringify({SIDE:{status:'SUCCEEDED',artifact:{artifactId:'side-retained'}},BACK:{status:'SUCCEEDED',artifact:{artifactId:'back-retained'}}}),evaluationJson:JSON.stringify(evaluation),createdAt:now,updatedAt:now});
  const rowsBefore=await db('o_v04MultiViewExperiment').orderBy('id'),read=(await mv.readMultiView(scope,7)).find(r=>r.id===historical.id);assert.equal(read.SIDE.prompt,oldSide.prompt);assert.deepEqual(read.evaluation,evaluation);assert.equal(read.execution.BACK.artifact.artifactId,'back-retained');assert.deepEqual(await db('o_v04MultiViewExperiment').orderBy('id'),rowsBefore);
@@ -2628,4 +2628,66 @@ test('INTEGRITY03 semantic resolver routes confirmed biology and fictional morph
  assert.equal(r({...whale,confirmedMorphologyProfile:'FANTASY_CREATURE'}).profile,'FANTASY_CREATURE');
  const nameOnly=r({assetKind:'CREATURE',name:'whale'});assert.equal(nameOnly.profile,'ANIMAL');assert.equal(nameOnly.confidence,'LOW');assert.equal(r({assetKind:'CREATURE',name:'whale',confirmedVisualSpec:{details:{speciesOrForm:'hybrid creature'}}}).profile,'FANTASY_CREATURE');
  const ctx=integritySemanticContext({assetKind:'CREATURE',category:'CHAR',name:'unimportant',description:'有翼马',identityAnchors:'[]',mustPreserve:'[]',forbiddenChanges:'[]',director:'fantasy'},null);assert.equal(r(ctx).profile,'FANTASY_CREATURE');assert.equal(r(ctx).version,INTEGRITY_RESOLVER_VERSION);assert.equal('director' in ctx,false);
+});
+
+test('QA034 guard profiles, rear orientation, compact framing and confirmed-only counts',()=>{
+ const {buildGenerationStructuralGuard:g}=loadSource(path.join(root,'src/v04/generationStructuralGuard.ts'),null);
+ const input={profile:'HUMAN',targetView:'BACK',identityAuthority:'ACCEPTED_REFERENCE',sourceDimensions:{width:768,height:768},confirmedCounts:[]};
+ assert.match(g(input).constraints.join(' '),/heels, feet.*rear-facing/);assert.match(g({...input,targetView:'SIDE'}).constraints.join(' '),/One side-oriented figure/);
+ for(const profile of ['ANIMAL','FANTASY_CREATURE','VEHICLE','PROP','GENERIC_STRUCTURED_ASSET'])assert.ok(g({...input,profile}).constraints.length>=2);
+ assert.doesNotMatch(g({...input,profile:'FANTASY_CREATURE'}).constraints.join(' '),/two wings|count:/);
+ assert.match(g({...input,profile:'FANTASY_CREATURE',confirmedCounts:[{part:'wings',count:4}]}).constraints.join(' '),/wings count: 4/);
+ assert.equal(g(input).hash,g(input).hash);assert.notEqual(g(input).hash,g({...input,targetView:'SIDE'}).hash);
+});
+
+test('QA034 conservative Fast states and bounded decisions never invoke an API',async()=>{
+ const f=loadSource(path.join(root,'src/v04/fastIntegrityGate.ts'),null),d=loadSource(path.join(root,'src/v04/integrityDecisionEngine.ts'),null),pass={reviewed:true,identity:'PASS',view:'PASS',contamination:'PASS',issues:[]};let calls=0;
+ const adapter={state:'AVAILABLE',inspect:async()=>{calls++;return {checks:[...f.requiredVisualChecks],confidence:'HIGH',report:pass};}};
+ assert.equal((await f.fastIntegrityGate([{name:'HASH',pass:false}],{},adapter)).status,'CLEAR_GLOBAL_DEFECT');assert.equal(calls,0);
+ const unknown=await f.fastIntegrityGate([{name:'HASH',pass:true}],{});assert.equal(unknown.status,'SUSPECT');assert.equal(d.integrityDecision(unknown).result,'HUMAN_REVIEW');
+ const clean=await f.fastIntegrityGate([{name:'HASH',pass:true}],{},adapter);assert.equal(clean.status,'PASS');assert.equal(clean.escalationRequired,false);assert.equal(d.integrityDecision(clean).decisionAuthority,'FAST_VISION');
+ adapter.inspect=async()=>({checks:[...f.requiredVisualChecks],confidence:'LOW',report:pass});assert.equal((await f.fastIntegrityGate([],{},adapter)).status,'SUSPECT');
+ adapter.inspect=async()=>{throw Error('local failure');};assert.equal((await f.fastIntegrityGate([],{},adapter)).status,'UNAVAILABLE');
+ for(const status of ['PASS','CLEAR_LOCAL_DEFECT','CLEAR_GLOBAL_DEFECT'])assert.notEqual(d.integrityDecision({status,localVisionState:'AVAILABLE'}).result,'HUMAN_REVIEW');
+ assert.equal(d.integrityDecision(unknown,{confidence:'LOW',report:pass}).result,'HUMAN_REVIEW');assert.equal(d.retryPolicy.automaticExecutionEnabled,false);
+});
+
+async function qaFixture(t){
+ const f=await mvFixture(t),c=await f.mv.compileMultiView(f.scope,7),execution={},crypto=require('crypto');
+ const png=await require('sharp')({create:{width:c.sharedExecution.width,height:c.sharedExecution.height,channels:3,background:'#abc'}}).png().toBuffer();
+ for(const side of ['SIDE','BACK']){const a={artifactId:crypto.randomUUID(),extension:'png',sha256:crypto.createHash('sha256').update(png).digest('hex'),mimeType:'image/png',width:c.sharedExecution.width,height:c.sharedExecution.height};const dir=path.join(f.oss.testDir,'v04-multiview',String(f.scope.projectId),c.id);fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,a.artifactId+'.png'),png);execution[side]={status:'SUCCEEDED',artifact:a};}
+ await f.db('o_v04MultiViewExperiment').where({id:c.id}).update({status:'COMPLETED',executionJson:JSON.stringify(execution)});return {...f,c,execution,cmd:{...f.scope,experimentId:c.id}};
+}
+
+test('QA034 real SQLite Fast zero model/truth writes, explicit Vision reservation replay and immutable reports',async t=>{
+ const {db,mv,cmd,oss,truth,c}=await qaFixture(t),before=await truth(),rows=await db('o_v04MultiViewExperiment');
+ const fast=await mv.fastMultiViewQuality(cmd,7);assert.equal(fast.pipeline.fast.BACK.status,'SUSPECT');assert.equal(fast.pipeline.decisions.BACK,'HUMAN_REVIEW');assert.equal(oss.modelCalls.length,0);assert.equal(fast.pipeline.guardState,'APPLIED');
+ await assert.rejects(mv.visionMultiViewQuality({...cmd,fastReportId:fast.id},7));assert.equal(oss.modelCalls.length,0);
+ const pass={reviewed:true,identity:'PASS',view:'PASS',contamination:'PASS',issues:[],confidence:'HIGH'};oss.visionModel='fake:vision';oss.visionResult={SIDE:pass,BACK:pass,CROSS_VIEW:pass};
+ const body={...cmd,fastReportId:fast.id,confirmExternalInspection:true};const result=await mv.visionMultiViewQuality(body,7);assert.equal(result.pipeline.phase,'COMPLETED');assert.equal(result.pipeline.decisions.BACK,'PASS');assert.equal(result.pipeline.visionAudit.modelRole,'vision');assert.equal(oss.visionCalls,1);
+ assert.equal((await mv.visionMultiViewQuality(body,7)).id,result.id);assert.equal(oss.visionCalls,1);assert.equal((await db('o_v04AssetIntegrity')).length,3);
+ const feedback=await mv.feedbackMultiViewQuality({...cmd,visionReportId:result.id,usefulness:'PARTIALLY_USEFUL'},7);assert.equal(feedback.pipeline.humanFeedback,'PARTIALLY_USEFUL');assert.equal(oss.visionCalls,1);assert.equal((await db('o_v04AssetIntegrity')).length,4);
+ assert.deepEqual(await truth(),before);assert.deepEqual(await db('o_v04MultiViewExperiment'),rows);assert.equal(c.SIDE.generationGuard.version,'generation.structural-guard.1');
+ await assert.rejects(db('o_v04AssetIntegrity').update({createdAt:0}),/IMMUTABLE/);await assert.rejects(mv.fastMultiViewQuality(cmd,99),e=>e.code==='PILOT_FORBIDDEN');
+});
+
+test('QA034 Vision timeout/malformed/low confidence fail closed without regeneration or adoption',async t=>{
+ const {mv,cmd,oss,truth,db}=await qaFixture(t),before=await truth();oss.visionModel='fake:vision';
+ for(const mode of ['timeout','malformed','low']){
+  const fast=await mv.fastMultiViewQuality(cmd,7);oss.visionFailure=mode==='timeout'?Object.assign(Error('secret not logged'),{name:'TimeoutError'}):null;
+  const pass={reviewed:true,identity:'PASS',view:'PASS',contamination:'PASS',issues:[],confidence:'LOW'};oss.visionResult=mode==='malformed'?{invalid:true}:{SIDE:pass,BACK:pass,CROSS_VIEW:pass};
+  const r=await mv.visionMultiViewQuality({...cmd,fastReportId:fast.id,confirmExternalInspection:true},7);assert.equal(r.pipeline.decisions.BACK,'HUMAN_REVIEW');assert.equal(r.automaticAcceptance,false);assert.equal(r.pipeline.retryPolicy.automaticExecutionEnabled,false);
+  if(mode!=='low')assert.equal(r.pipeline.visionEscalation,'FAILED');
+ }
+ assert.deepEqual(await truth(),before);assert.equal(oss.visionCalls,3);assert.equal((await db('o_v04AssetIntegrity')).length,9);
+});
+
+test('QA034 explicit escalation denies clear Fast verdict and changed artifact before any provider call',async t=>{
+ const {mv,cmd,db,oss,execution}=await qaFixture(t),fast=await mv.fastMultiViewQuality(cmd,7),crypto=require('crypto');
+ const row=await db('o_v04AssetIntegrity').where({id:fast.id}).first(),report=JSON.parse(row.reportJson);for(const view of ['SIDE','BACK'])report.pipeline.fast[view].status='PASS';
+ const id=crypto.randomUUID();await db('o_v04AssetIntegrity').insert({...row,id,reportJson:JSON.stringify(report)});
+ await assert.rejects(mv.visionMultiViewQuality({...cmd,fastReportId:id,confirmExternalInspection:true},7),e=>e.code==='INTEGRITY_ESCALATION_NOT_NEEDED');assert.equal(oss.modelCalls.length,0);
+ fs.writeFileSync(path.join(oss.testDir,'v04-multiview',String(cmd.projectId),cmd.experimentId,execution.BACK.artifact.artifactId+'.png'),'broken');
+ await assert.rejects(mv.visionMultiViewQuality({...cmd,fastReportId:fast.id,confirmExternalInspection:true},7),e=>e.code==='INTEGRITY_INPUT_STALE');assert.equal(oss.modelCalls.length,0);
+ const bad=await mv.fastMultiViewQuality(cmd,7);assert.equal(bad.pipeline.fast.BACK.status,'CLEAR_GLOBAL_DEFECT');assert.equal(bad.pipeline.decisions.BACK,'REGENERATE');assert.equal(bad.pipeline.retryPolicy.automaticExecutionEnabled,false);
 });

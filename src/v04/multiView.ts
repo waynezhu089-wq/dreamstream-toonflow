@@ -19,6 +19,10 @@ import {MULTIVIEW_VERSION,multiViewHash as hash,resolveMultiViewBoy,compileMulti
 import {integrityProfiles,inspection,repairDecision,makeRepairProposals,integrityFresh} from './assetIntegrity';
 import {resolveIntegrityProfile,integritySemanticContext} from './integrityProfileResolver';
 import {INTEGRITY_TABLE} from './integritySchema';
+import {buildGenerationStructuralGuard,GENERATION_GUARD_VERSION} from './generationStructuralGuard';
+import {fastIntegrityGate,FAST_GATE_VERSION,requiredVisualChecks} from './fastIntegrityGate';
+import {integrityDecision,DECISION_ENGINE_VERSION,retryPolicy} from './integrityDecisionEngine';
+import {inspectIntegrityVision,VISION_INTEGRITY_VERSION} from './visionIntegrityAdapter';
 const q=db as Knex;
 const scope=z.object({projectId:z.number().int().positive(),scriptId:z.number().int().positive()}).strict();
 const command=scope.extend({experimentId:z.string().uuid()}).strict();
@@ -97,7 +101,9 @@ export async function compileMultiView(input:unknown,actor:number){
   const s=scope.parse(input);return q.transaction(async trx=>{
     await authorize(trx,s,actor);const c=await captureMultiViewSource(trx,s),id=randomUUID(),createdAt=Date.now();
     const seed=parseInt(c.sourceHash.slice(0,12),16),profile=c.evidence.route.profile;
-    const make=(side:'SIDE'|'BACK')=>{const part=compileMultiViewBrief(c.asset,c.source,side),workflow=buildKreaEditWorkflow({profile,prompt:part.prompt,seed,width:768,height:768,sourceImage:'multiview-identity.png',jobId:id,targetRole:'EXPERIMENTAL_MULTIVIEW_'+side});return {...part,sourceHash:c.source.sourceHash,workflow};};
+    const make=(side:'SIDE'|'BACK')=>{const part=compileMultiViewBrief(c.asset,c.source,side),resolution=resolveIntegrityProfile(integritySemanticContext(c.asset,c.evidence.visualSpec));
+      const generationGuard=buildGenerationStructuralGuard({profile:resolution.profile,targetView:side,identityAuthority:'CURRENT_REFERENCE_IMAGE',sourceDimensions:{width:c.source.width,height:c.source.height},confirmedCounts:[],identityAnchors:c.asset.identityAnchors,mustPreserve:part.brief.preserve,forbiddenChanges:part.brief.sourceIdentity.forbiddenChanges,confirmedMorphology:c.evidence.visualSpec?.details??null});
+      const prompt=part.prompt+' '+generationGuard.constraints.join(' '),workflow=buildKreaEditWorkflow({profile,prompt,seed,width:768,height:768,sourceImage:'multiview-identity.png',jobId:id,targetRole:'EXPERIMENTAL_MULTIVIEW_'+side});return {...part,basePrompt:part.prompt,basePromptHash:part.promptHash,prompt,promptHash:hash(prompt),generationGuard,sourceHash:c.source.sourceHash,workflow};};
     const SIDE=make('SIDE'),BACK=make('BACK');
     const result={id,...s,canonicalKey:c.asset.canonicalKey,assetRevision:c.asset.revision,version:MULTIVIEW_VERSION,source:c.source,sourceHash:c.sourceHash,evidence:c.evidence,
       identityLock:{...SIDE.brief.sourceIdentity,preserve:SIDE.brief.preserve},topology:'STAR',anglePolicy:'TOLERANT',SIDE,BACK,
@@ -125,9 +131,9 @@ export async function renderMultiView(input:unknown,actor:number){
     const execution={SIDE:{id:randomUUID(),status:'QUEUED'},BACK:{id:randomUUID(),status:'QUEUED'},sourceQualityConfirmed:true};
     await trx(table).where({id:r.id}).update({status:'RENDERING_SIDE',executionJson:JSON.stringify(execution),updatedAt:Date.now()});return {...r,status:'RENDERING_SIDE',executionJson:JSON.stringify(execution)};
   });
-  if(!r.replayed){rendering=true;void run(r).finally(()=>{rendering=false;}).catch(()=>console.error('[V04 MultiView] settlement failed',{experimentId:r.id}));}return present(r);
+  if(!r.replayed){rendering=true;void run(r,actor).finally(()=>{rendering=false;}).catch(()=>console.error('[V04 MultiView] settlement failed',{experimentId:r.id}));}return present(r);
 }
-async function run(r:any){
+async function run(r:any,actor:number){
   const c=JSON.parse(r.compiledJson),e=JSON.parse(r.executionJson),base=c.evidence.baseUrl;let release:(()=>Promise<void>)|null=null;
   const save=(status:string)=>q(table).where({id:r.id}).update({status,executionJson:JSON.stringify(e),updatedAt:Date.now()});
   try{
@@ -140,7 +146,7 @@ async function run(r:any){
     for(const side of multiViewSides){
       if(!await q.transaction(trx=>fresh(trx,r))){e[side].status='NOT_RUN';await save('STALE');return;}
       try{
-        e[side].status='RUNNING';await save('RENDERING_'+side);
+        e[side].status='RUNNING';e[side].generationStartedAt=Date.now();await save('RENDERING_'+side);
         const workflow=structuredClone(c[side].workflow);workflow.graph['7'].inputs.image=sourceImage;
         const job={id:e[side].id,projectId:r.projectId,scriptId:r.scriptId,canonicalKey:c.canonicalKey,sourceAssetRevision:c.assetRevision,
           generationIntent:'SUBJECT_MAIN_PREVIEW',executionPurpose:'EXPERIMENTAL_MULTIVIEW_'+side,executorType:'COMFY_LOCAL',executorProfile:c.sharedExecution.profile,
@@ -151,7 +157,7 @@ async function run(r:any){
         if(image.width!==c.sharedExecution.width||image.height!==c.sharedExecution.height)throw new DraftComfyError('MULTIVIEW_OUTPUT_INVALID','输出尺寸偏离冻结条件');
         const artifact={artifactId:randomUUID(),role:'EXPERIMENTAL_MULTIVIEW_'+side,width:image.width,height:image.height,extension:image.extension,mimeType:image.mimeType,sha256:createHash('sha256').update(image.bytes).digest('hex')};
         const dir=getPath(['v04-multiview',String(r.projectId),r.id]);await fs.mkdir(dir,{recursive:true});await fs.writeFile(getPath(['v04-multiview',String(r.projectId),r.id,artifact.artifactId+'.'+artifact.extension]),image.bytes,{flag:'wx'});
-        e[side]={...e[side],status:'SUCCEEDED',artifact};
+        e[side]={...e[side],status:'SUCCEEDED',artifact,generationTimeMs:Date.now()-e[side].generationStartedAt};
         await q('o_v04ExecutionTrace').where({jobId:job.id,status:'RUNNING'}).update({status:'SUCCEEDED',outputArtifactIdsJson:JSON.stringify([artifact.artifactId]),completedAt:Date.now(),updatedAt:Date.now()});
       }catch(error){const code=error instanceof DraftComfyError?error.code:'EXECUTION_UNCERTAIN';e[side]={...e[side],status:'FAILED',errorCode:code};
         await q('o_v04ExecutionTrace').where({jobId:e[side].id}).whereIn('status',['QUEUED','RUNNING']).update({status:'FAILED',errorCode:code,errorDetail:code,completedAt:Date.now(),updatedAt:Date.now()});}
@@ -163,6 +169,7 @@ async function run(r:any){
     e.completedAt=Date.now();await save(!await q.transaction(trx=>fresh(trx,r))?'STALE':multiViewSides.every(side=>e[side].status==='SUCCEEDED')?'COMPLETED':multiViewSides.some(side=>e[side].status==='SUCCEEDED')?'PARTIAL':'FAILED');
   }catch(error){e.errorCode=error instanceof DraftComfyError?error.code:'EXECUTION_UNCERTAIN';for(const side of multiViewSides)if(e[side].status==='QUEUED')e[side].status='NOT_RUN';await save('FAILED');}
   finally{if(release)await release();}
+  try{await fastMultiViewQuality({projectId:r.projectId,scriptId:r.scriptId,experimentId:r.id},actor);}catch{console.error('[V04 Integrity]',{experimentId:r.id,status:'FAST_UNAVAILABLE'});}
 }
 export async function evaluateMultiView(input:unknown,actor:number){
   const verdict=z.enum(['PASS','PARTIAL_PASS','FAIL']),s=command.extend({SIDE:verdict,BACK:verdict,why:z.string().max(4000).default('')}).strict().parse(input);
@@ -210,3 +217,63 @@ export async function recordMultiViewIntegrity(input:unknown,actor:number){
  const c=JSON.parse(r.compiledJson),result={inspector:'HUMAN_INSPECTOR',context:multiViewIntegrityContext(c),reports:s.reports,decisions:Object.fromEntries(Object.entries(s.reports).map(([view,report])=>[view,repairDecision(report)])),repairProposals:makeRepairProposals(s.reports,captured,c.identityLock),automaticAcceptance:false};
  const id=randomUUID(),createdAt=Date.now();await trx(INTEGRITY_TABLE).insert({id,experimentId:r.id,projectId:s.projectId,scriptId:s.scriptId,inputJson:JSON.stringify(captured),reportJson:JSON.stringify(result),actorUserId:actor,createdAt});return {id,...result,freshness:'CURRENT'};
  });}
+
+const PIPELINE_VERSION='integrity.pipeline.1';
+const emptyInspection=()=>({reviewed:false,identity:'UNKNOWN',view:'UNKNOWN',contamination:'UNKNOWN',issues:[]});
+function qualityBinding(c:any,e:any){return {experimentId:c.id,sourceHash:c.sourceHash,assetRevision:c.assetRevision,visualSpecRevision:c.source.visualSpecRevision??null,artifacts:{MAIN:c.source.sourceHash,SIDE:e.SIDE?.artifact?.sha256??null,BACK:e.BACK?.artifact?.sha256??null}};}
+async function captureQuality(trx:Knex.Transaction,s:z.infer<typeof command>,actor:number){
+ const r=await checked(trx,s,actor),c=JSON.parse(r.compiledJson),e=JSON.parse(r.executionJson),current=await fresh(trx,r),context=multiViewIntegrityContext(c);
+ const images:{view:string;bytes:Buffer;mimeType:string}[]=[],dimensions:Record<string,unknown>={},metadata:Record<string,{name:string;pass:boolean}[]>={SIDE:[],BACK:[]};let totalBytes=0;
+ for(const view of ['MAIN','SIDE','BACK']){
+  let verified=false,size=false;try{const a=view==='MAIN'?c.source:e[view]?.artifact;if(!a)throw Error('MISSING');
+   const artifactPath=view==='MAIN'?null:getPath(['v04-multiview',String(r.projectId),r.id,z.string().uuid().parse(a.artifactId)+'.'+z.enum(['png','jpg','jpeg','webp']).parse(a.extension)]);
+   if(artifactPath&&(await fs.stat(artifactPath)).size>6000000)throw Error('SIZE');
+   const bytes=artifactPath?await fs.readFile(artifactPath):await imageBytes(r.projectId,a);
+   totalBytes+=bytes.length;if(bytes.length>6000000||totalBytes>15000000)throw Error('SIZE');
+   verified=createHash('sha256').update(bytes).digest('hex')===(view==='MAIN'?a.sourceHash:a.sha256);
+   const meta=await sharp(bytes,{limitInputPixels:16000000}).metadata();dimensions[view]={width:meta.width,height:meta.height};size=meta.width===(view==='MAIN'?c.source.width:c.sharedExecution.width)&&meta.height===(view==='MAIN'?c.source.height:c.sharedExecution.height)&&(meta.pages??1)===1;
+   if(verified&&size)images.push({view,bytes,mimeType:meta.format==='jpeg'?'image/jpeg':meta.format==='webp'?'image/webp':'image/png'});
+  }catch{/* Unreadable or unbounded image is an explicit metadata failure, never PASS. */}
+  for(const side of ['SIDE','BACK'])if(view==='MAIN'||view===side)metadata[side].push({name:view+'_ARTIFACT_HASH',pass:verified},{name:view+'_DIMENSIONS',pass:size});
+ }
+ for(const side of ['SIDE','BACK'])metadata[side].push({name:'SOURCE_FRESHNESS',pass:current},{name:'SUCCEEDED_SINGLE_OUTPUT',pass:e[side]?.status==='SUCCEEDED'&&!!e[side]?.artifact},{name:'TARGET_VIEW_METADATA',pass:c[side]?.brief?.targetView===(side==='SIDE'?'SIDE_ISH':'BACK_ISH')});
+ return {r,c,e,context,images,metadata,dimensions,binding:qualityBinding(c,e)};
+}
+function qualityBrief(x:Awaited<ReturnType<typeof captureQuality>>,fast:any){
+ const d=x.context.confirmedVisualSpec?.details??{};
+ return {version:PIPELINE_VERSION,profile:x.context.integrityProfile,profileResolution:x.context.profileResolution,targetViews:['SIDE','BACK'],identityAuthority:x.context.identityAuthority,preserveFacts:x.context.mustPreserve,confirmedPhysicalFacts:Object.fromEntries(['speciesOrForm','bodyStructure','anatomy','vehicleType','mainStructure'].filter(k=>typeof d[k]==='string').map(k=>[k,d[k]])),fictionalOverride:'Confirmed fictional identity overrides ordinary priors; not visible is not missing.',intentionalAsymmetry:x.context.allowedAsymmetry,questions:requiredVisualChecks,fastEvidence:fast,artifactHashes:x.binding.artifacts};
+}
+async function appendQuality(trx:Knex.Transaction,s:z.infer<typeof command>,actor:number,x:Awaited<ReturnType<typeof captureQuality>>,pipeline:any,reports:any){
+ const id=randomUUID(),createdAt=Date.now(),result={inspector:'SHADOW_PIPELINE',context:x.context,reports,decisions:pipeline.decisions,repairProposals:makeRepairProposals(reports,x.binding,x.c.identityLock),automaticAcceptance:false,pipeline};
+ await trx(INTEGRITY_TABLE).insert({id,...s,inputJson:JSON.stringify(x.binding),reportJson:JSON.stringify(result),actorUserId:actor,createdAt});return {id,createdAt,input:x.binding,...result};
+}
+export async function fastMultiViewQuality(input:unknown,actor:number){
+ const s=command.parse(input),x=await q.transaction(trx=>captureQuality(trx,s,actor)),fast:any={};
+ for(const view of ['SIDE','BACK'])fast[view]=await fastIntegrityGate(x.metadata[view],{profile:x.context.integrityProfile,view,questions:requiredVisualChecks});
+ const decisions=Object.fromEntries(Object.entries(fast).map(([view,f])=>[view,integrityDecision(f).result]));decisions.CROSS_VIEW='HUMAN_REVIEW';
+ const pipeline={version:PIPELINE_VERSION,kind:'FAST',phase:'COMPLETED',guardVersion:x.c.SIDE.generationGuard?.version??null,guardState:x.c.SIDE.generationGuard?'APPLIED':'NOT_APPLICABLE_HISTORICAL',profileResolverVersion:x.context.profileResolverVersion,actualDimensions:x.dimensions,generationTimeMs:Object.fromEntries(['SIDE','BACK'].map(view=>[view,x.e[view]?.generationTimeMs??null])),fastGateVersion:FAST_GATE_VERSION,visionAdapterVersion:VISION_INTEGRITY_VERSION,decisionEngineVersion:DECISION_ENGINE_VERSION,fast,visionEscalation:'NOT_REQUESTED',decisions,decisionAuthority:Object.fromEntries(Object.entries(fast).map(([view,f])=>[view,integrityDecision(f).decisionAuthority])),retryPolicy,metrics:{fastPassCount:Object.values(fast).filter((f:any)=>f.status==='PASS').length,fastClearFailCount:Object.values(fast).filter((f:any)=>f.status.startsWith('CLEAR_')).length,apiEscalationCount:0,apiEscalationRate:0},shadowMode:true};
+ return q.transaction(async trx=>{await trx('o_script').where({id:s.scriptId,projectId:s.projectId}).update({id:s.scriptId});const now=await captureQuality(trx,s,actor);if(!integrityFresh(x.binding,now.binding)||JSON.stringify(x.metadata)!==JSON.stringify(now.metadata))deny('INTEGRITY_INPUT_STALE','检查输入已变化');return appendQuality(trx,s,actor,x,pipeline,{SIDE:emptyInspection(),BACK:emptyInspection(),CROSS_VIEW:emptyInspection()});});
+}
+export async function visionMultiViewQuality(input:unknown,actor:number){
+ const s=command.extend({fastReportId:z.string().uuid(),confirmExternalInspection:z.literal(true)}).strict().parse(input),cmd={projectId:s.projectId,scriptId:s.scriptId,experimentId:s.experimentId};
+ const admitted=await q.transaction(async trx=>{await trx('o_script').where({id:s.scriptId,projectId:s.projectId}).update({id:s.scriptId});const x=await captureQuality(trx,cmd,actor);
+  const prior=await trx(INTEGRITY_TABLE).where({...cmd,id:s.fastReportId}).first();if(!prior)deny('INTEGRITY_NOT_FOUND','Fast 检查不存在');const parent=JSON.parse(prior.reportJson).pipeline;
+  if(parent?.kind!=='FAST'||!integrityFresh(JSON.parse(prior.inputJson),x.binding))deny('INTEGRITY_INPUT_STALE','Fast 检查已过期');
+  if(!Object.values(parent.fast).some((f:any)=>['SUSPECT','UNAVAILABLE'].includes(f.status)))deny('INTEGRITY_ESCALATION_NOT_NEEDED','Fast 已有明确结论，无需外部 API');
+  if(x.images.length!==3||Object.values(x.metadata).some(checks=>checks.some(c=>!c.pass)))deny('INTEGRITY_INPUT_STALE','图像或来源无法可靠核对，不发送 API');
+  const replay=await trx(INTEGRITY_TABLE).where(cmd).whereRaw("json_extract(reportJson,'$.pipeline.fastReportId') = ?",[s.fastReportId]).orderByRaw("CASE WHEN json_extract(reportJson,'$.pipeline.phase')='COMPLETED' THEN 0 ELSE 1 END").orderBy('createdAt','desc').orderBy('id','desc').first();
+  if(replay)return {replay:{id:replay.id,...JSON.parse(replay.reportJson)},x,parent};
+  const started=await appendQuality(trx,cmd,actor,x,{...parent,kind:'VISION',phase:'STARTED',fastReportId:s.fastReportId,visionEscalation:'STARTED',decisions:{SIDE:'HUMAN_REVIEW',BACK:'HUMAN_REVIEW',CROSS_VIEW:'HUMAN_REVIEW'},shadowMode:true},{SIDE:emptyInspection(),BACK:emptyInspection(),CROSS_VIEW:emptyInspection()});return {x,parent,started};
+ });if(admitted.replay)return admitted.replay;
+ const brief=qualityBrief(admitted.x,admitted.parent.fast),vision=await inspectIntegrityVision(s.projectId,brief,admitted.x.images),reports=vision.reports??{SIDE:emptyInspection(),BACK:emptyInspection(),CROSS_VIEW:emptyInspection()};
+ const decisions:any={},authority:any={};for(const view of ['SIDE','BACK']){const d=integrityDecision(admitted.parent.fast[view],vision.reports?.[view]?{confidence:vision.reports[view].confidence,report:vision.reports[view]}:null);decisions[view]=d.result;authority[view]=d.decisionAuthority;}decisions.CROSS_VIEW=vision.reports?.CROSS_VIEW.confidence==='HIGH'?repairDecision(vision.reports.CROSS_VIEW):'HUMAN_REVIEW';authority.CROSS_VIEW=vision.reports?'VISION_API':'HUMAN';
+ return q.transaction(async trx=>{await checked(trx,cmd,actor);const now=await captureQuality(trx,cmd,actor),current=integrityFresh(now.binding,admitted.x.binding)&&Object.values(now.metadata).every(checks=>checks.every(c=>c.pass));if(!current)for(const view of Object.keys(decisions))decisions[view]='HUMAN_REVIEW';
+  return appendQuality(trx,cmd,actor,admitted.x,{...admitted.parent,kind:'VISION',phase:'COMPLETED',fastReportId:s.fastReportId,visionEscalation:vision.status==='SUCCEEDED'?'USED':'FAILED',visionAudit:vision.audit,inspectionBrief:brief,decisions,decisionAuthority:authority,freshness:current?'CURRENT':'STALE',metrics:{...admitted.parent.metrics,apiEscalationCount:1,apiEscalationRate:1},guardFeedback:{version:'generation.guard-feedback.1',proposalOnly:true,promotionAuthorized:false,issueIds:Object.values(reports).flatMap(r=>r.issues.map((i:any)=>i.id))},shadowMode:true},reports);});
+}
+
+export async function feedbackMultiViewQuality(input:unknown,actor:number){
+ const s=command.extend({visionReportId:z.string().uuid(),usefulness:z.enum(['USEFUL','PARTIALLY_USEFUL','WRONG'])}).strict().parse(input),cmd={projectId:s.projectId,scriptId:s.scriptId,experimentId:s.experimentId};
+ return q.transaction(async trx=>{const x=await captureQuality(trx,cmd,actor),row=await trx(INTEGRITY_TABLE).where({...cmd,id:s.visionReportId}).first();if(!row)deny('INTEGRITY_NOT_FOUND','检查记录不存在');const report=JSON.parse(row.reportJson);
+ if(report.pipeline?.kind!=='VISION'||report.pipeline.phase!=='COMPLETED'||!integrityFresh(JSON.parse(row.inputJson),x.binding))deny('INTEGRITY_INPUT_STALE','只评价当前已完成的 Vision 影子检查');
+ return appendQuality(trx,cmd,actor,x,{...report.pipeline,kind:'HUMAN_FEEDBACK',visionReportId:s.visionReportId,humanFeedback:s.usefulness},report.reports);});
+}
