@@ -5,6 +5,7 @@ import {z} from 'zod';
 import {db} from '@/utils/db';
 import {getAgentAttachmentBytes} from './agentAttachments';
 import {PilotError} from './service';
+import {captureDirectorReferenceBoundary,inheritDirectorMainReference} from './directorBible';
 const q=db as Knex;
 const hash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const baselineRequest=z.object({projectId:z.number().int().positive(),scriptId:z.number().int().positive(),canonicalKey:z.string().min(1).max(128),attachmentId:z.string().uuid(),role:z.enum(['GENERAL','FACE_HERO','FULL_BODY_FRONT','FULL_BODY_BACK','DETAIL_REFERENCE','HERO_3Q','SIDE_PROFILE','BACK_3Q','REAR_3Q']).default('GENERAL')}).strict();
@@ -40,14 +41,21 @@ export async function confirmImageBaseline(input:unknown){
   if(prior){const value=JSON.parse(prior.content);if(value.canonicalKey!==data.canonicalKey||value.attachmentId!==data.attachmentId||value.role!==data.role||value.sha256!==sha256)throw new PilotError('PILOT_PREVIEW_STALE','确认请求已变化',409);const asset=await trx('o_v04Asset').where({projectId:data.projectId,canonicalKey:data.canonicalKey,status:'ACTIVE'}).first();if(!asset||asset.revision!==value.sourceAssetRevision)throw new PilotError('PILOT_PREVIEW_STALE','素材已变化',409);return {applied:true,replayed:true,version:prior.id};}
   const {previewHash:_hash,...request}=data;const p=await plan(trx,request);
   if(p.previewHash!==data.previewHash||p.current.sha256!==sha256)throw new PilotError('PILOT_PREVIEW_STALE','基准预览已过期，请重新查看',409);
+  const boundary=data.role==='GENERAL'?await captureDirectorReferenceBoundary(trx,{projectId:data.projectId,scriptId:data.scriptId}):null;
   const id=randomUUID(),now=Date.now(),content={...p.current,previewHash:p.previewHash,width:meta.width,height:meta.height,format:meta.format};
   await trx('o_v04Decision').insert({id,projectId:data.projectId,scriptId:data.scriptId,category:'ASSET_EDIT_BASELINE',subjectType:'ASSET',subjectKey:data.canonicalKey,content:JSON.stringify(content),status:'ACCEPTED',sourceMessageIds:JSON.stringify([file.row.messageId]),supersedesDecisionId:p.current.previousVersion,createdAt:now,acceptedAt:now});
   const ref=await trx('o_v04AgentReference').where({projectId:data.projectId,scriptId:data.scriptId,attachmentId:data.attachmentId,targetType:'ASSET_BIBLE',targetKey:data.canonicalKey}).first();
   if(!ref)await trx('o_v04AgentReference').insert({id:randomUUID(),projectId:data.projectId,scriptId:data.scriptId,attachmentId:data.attachmentId,targetType:'ASSET_BIBLE',targetKey:data.canonicalKey,assetId:null,createdAt:now});
+  if(boundary&&!ref)await inheritDirectorMainReference(trx,{projectId:data.projectId,scriptId:data.scriptId},boundary,data.canonicalKey,data.attachmentId);
   return {applied:true,replayed:false,version:id};
  });
 }
-export async function listImageBaselines(input:unknown){const scope=scopeSchema.parse(input);return q.transaction(async trx=>{if(!await trx('o_script').where({id:scope.scriptId,projectId:scope.projectId}).first())throw new PilotError('PILOT_SCOPE_INVALID','制作单元不存在',404);const rows=await baselinesInTransaction(trx,scope);const assets=await trx('o_v04Asset').where({projectId:scope.projectId,status:'ACTIVE'}).whereIn('canonicalKey',rows.map(r=>r.canonicalKey));return rows.filter(r=>assets.some((a:any)=>a.canonicalKey===r.canonicalKey&&a.revision===r.sourceAssetRevision));});}
+export async function listImageBaselines(input:unknown){const scope=scopeSchema.parse(input);return q.transaction(async trx=>{
+ if(!await trx('o_script').where({id:scope.scriptId,projectId:scope.projectId}).first())throw new PilotError('PILOT_SCOPE_INVALID','制作单元不存在',404);
+ const rows=await baselinesInTransaction(trx,scope),assets=await trx('o_v04Asset').where({projectId:scope.projectId,status:'ACTIVE'}).whereIn('canonicalKey',rows.map(r=>r.canonicalKey));
+ const jobs=await trx('o_v04StudioAssetDraftJob').where(scope).whereIn('id',rows.map(r=>r.sourceJobId).filter(Boolean));
+ return rows.filter(r=>assets.some((a:any)=>a.canonicalKey===r.canonicalKey&&a.revision===r.sourceAssetRevision)).map(r=>({...r,effectiveStatus:r.sourceJobId&&jobs.some(j=>j.id===r.sourceJobId&&['STALE','CANCELLED'].includes(j.status))?'STALE':'CURRENT'}));
+});}
 export async function recordCandidateBaseline(trx:Knex.Transaction,job:any,attachmentId:string,output:any,previewHash:string){
  const role=['FACE_HERO','FULL_BODY_FRONT','FULL_BODY_BACK','DETAIL_REFERENCE','HERO_3Q','SIDE_PROFILE','BACK_3Q','REAR_3Q'].includes(job.executionPurpose)?job.executionPurpose:'GENERAL';
  const prior=(await baselinesInTransaction(trx,{projectId:job.projectId,scriptId:job.scriptId})).find(r=>r.canonicalKey===job.canonicalKey&&r.role===role);

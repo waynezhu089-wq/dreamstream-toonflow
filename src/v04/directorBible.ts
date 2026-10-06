@@ -188,6 +188,53 @@ export async function captureCurrentDirectorForExperiment(trx: Knex.Transaction,
     deny("DIRECTOR_AB_NOT_READY", "导演来源已变化，请先审阅导演版本");
   return { current, intent: directorIntentSchema.parse(content(current)) };
 }
+
+export const DIRECTOR_REFERENCE_CONTINUITY_V1 = 'director.reference-continuity.1';
+// Called inside the authoritative MAIN-adoption transaction, never by a read.
+export async function captureDirectorReferenceBoundary(trx: Knex.Transaction, scope: Scope) {
+  if (!await trx.schema.hasTable('o_v04DirectorVersion')) return null;
+  const current = await latest(trx, scope.projectId);
+  if (!current) return null;
+  const captured = await capture(trx, scope);
+  if (current.scriptId !== scope.scriptId || current.status !== 'CURRENT' || current.sourceHash !== captured.sourceHash)
+    deny('DIRECTOR_RECONFIRM_REQUIRED', '导演来源已变化，请先重新确认视觉方向');
+  return {current, captured};
+}
+export async function inheritDirectorMainReference(trx: Knex.Transaction, scope: Scope,
+  before: Awaited<ReturnType<typeof captureDirectorReferenceBoundary>>, canonicalKey: string, attachmentId: string,
+  reason:'MAIN_REFERENCE_REPLACEMENT'|'DERIVED_REFERENCE_ADOPTION'='MAIN_REFERENCE_REPLACEMENT') {
+  if (!before) return null;
+  const after = await capture(trx, scope), current = await latest(trx, scope.projectId);
+  const semantic = (s: any) => {const {references, ...rest} = s; return rest;};
+  const refs = after.source.references.filter((r: any) => r.attachmentId !== attachmentId);
+  const added = after.source.references.filter((r: any) => r.attachmentId === attachmentId);
+  if (current?.id !== before.current.id || hash(semantic(after.source)) !== hash(semantic(before.captured.source)) ||
+      hash(refs) !== hash(before.captured.source.references) || added.length !== 1 ||
+      added[0].targetType !== 'ASSET_BIBLE' || added[0].targetKey !== canonicalKey)
+    deny('DIRECTOR_RECONFIRM_REQUIRED', '变化不只是当前主图替换，请重新确认导演方向');
+  const intent = directorIntentSchema.parse(content(current));
+  const directorVersion = current.directorVersion + 1;
+  const projection = await trx('o_v04DirectorProjection').where(scope).orderBy('unitProjectionVersion', 'desc').first();
+  const now = Date.now(), proposalId = randomUUID();
+  const evidence = {...JSON.parse(current.evidenceJson), truthConstraints: after.source,
+    continuity: {version:DIRECTOR_REFERENCE_CONTINUITY_V1, inheritedFromDirectorRevision:current.directorVersion,
+      inheritanceReason:reason, oldReferenceHash:hash(before.captured.source.references),
+      newReferenceHash:hash(after.source.references), directorSemanticHash:hash(intent), automaticInheritance:true,
+      canonicalKey, attachmentId}};
+  const base = {...scope, sourceCreativeVersion:after.sourceCreativeVersion, sourceHash:after.sourceHash,
+    candidateHash:candidateHash(after.sourceHash,intent), schemaVersion, compilerVersion,
+    projectBibleJson:current.projectBibleJson, unitProjectionJson:current.unitProjectionJson,
+    evidenceJson:JSON.stringify(evidence), status:'CONFIRMED', createdAt:now, updatedAt:now, actorUserId:current.actorUserId};
+  const previewHash = hash({version:DIRECTOR_REFERENCE_CONTINUITY_V1, old:current.id, sourceHash:after.sourceHash});
+  await trx('o_v04DirectorProposal').insert({...base,id:proposalId,baseProposalId:current.proposalId,
+    baseDirectorVersion:current.directorVersion,previewHash,diffJson:'[]'});
+  const row = {...base,status:'CURRENT',proposalId,previewHash,directorVersion,
+    unitProjectionVersion:(projection?.unitProjectionVersion??0)+1,confirmedAt:now};
+  // Append only. Even old status/content is untouched by automatic inheritance.
+  await trx('o_v04DirectorVersion').insert({...row,id:randomUUID()});
+  await trx('o_v04DirectorProjection').insert({...row,id:randomUUID()});
+  return evidence.continuity;
+}
 async function checkedProposal(
   trx: Knex.Transaction,
   scope: Scope,

@@ -1,0 +1,39 @@
+import {compileDirectorRenderingBrief,renderKreaDirectorBrief} from './directorRenderingBrief';
+import {projectGlobalVisualDNAForAsset} from './directorAssetVisualDNA';
+import {PilotError} from './service';
+export const KREA2_ASSET_MAIN_V1='krea2.asset-main.1';
+export const ASSET_PIPELINE_VERSION='asset.krea-main-klein-view.1';
+const list=(x:any)=>{if(typeof x==='string'&&x.startsWith('[')){try{return JSON.parse(x);}catch{return [];}}return x??[];};
+export function compilePipelineAssetPrompt(asset:any,spec:any,role:string,director:any=null){
+ if(asset.sourcePolicy!=='AI_ALLOWED'||['BRAND','UI'].includes(asset.category))throw new PilotError('PILOT_REAL_REFERENCE_ONLY','真实品牌和界面仅使用已确认参考',409);
+ const subject=asset.assetKind==='CREATURE'&&/鲸|whale/i.test(asset.name)?'one realistic biological whale':asset.assetKind==='CREATURE'&&/飞马|pegasus/i.test(asset.name)?'one complete winged horse':asset.assetKind==='VEHICLE'&&/海盗船|pirate/i.test(asset.name)?'one complete pirate ship':asset.assetKind==='VEHICLE'&&/潜水艇|submarine/i.test(asset.name)?'one complete submarine':({HUMAN_CHARACTER:'exactly one character',CREATURE:'exactly one creature',VEHICLE:'exactly one vehicle',PROP:'exactly one object',ENVIRONMENT:'one empty environment',MATERIAL_FX:'one material study',CELESTIAL:'one celestial form'} as Record<string,string>)[asset.assetKind]||'one subject';
+ const main=role==='ASSET_MAIN_PREVIEW',background=asset.assetKind==='ENVIRONMENT'?'Clean environment reference study, no story actors or unrelated subjects.':'Plain white or near-white neutral background, neutral clear lighting, no environment scenery, no story scene.';
+ const structure=subject.includes('ship')?'Preserve hull, mast count, sail arrangement, rigging and silhouette. No crew, people, extra boats, duplicated masts or sails.':subject.includes('submarine')?'Preserve streamlined hull, tower, fins and structural design. No people, whales, ship or extra vehicles.':subject.includes('whale')?'Ancient monumental solemn biological whale; same body, fins, tail and proportions. Natural non-luminous skin, no mascot, no ship, boy, submarine or extra animal.':subject.includes('winged horse')?'Same horse identity, wings and anatomy. No rider, human or extra animal.':asset.assetKind==='HUMAN_CHARACTER'?'Same person, age, face, hairstyle, body proportions, clothing, footwear and palette; no redesign. Natural hands, wrists, fingers, knees, ankles, heels and toes. No fused, extra or missing limbs.':'Same identity, design, materials and proportions; no extra subjects or unrelated objects.';
+ const rear=subject.includes('ship')?'Direct stern-oriented view, broad stern cabin/transom nearest camera; bow and bowsprit recede away, never attached to the stern.':subject.includes('submarine')?'Direct stern/rear view with coherent source-defined tail and propulsion structure; no bow-facing nose.':subject.includes('whale')?'Tail toward camera, back receding away; no front-facing head mixed into the rear.':'Clear back-oriented full-subject view; no front-facing parts.';
+ const front=subject.includes('ship')?'Direct bow-oriented view, bow nearest camera, coherent full hull and source-defined masts; no three-quarter view.':subject.includes('submarine')?'Direct bow/front view, coherent complete streamlined structure; no three-quarter or rear-facing parts.':asset.assetKind==='HUMAN_CHARACTER'?'Front-facing neutral straight standing full-body view.':'Direct front-facing complete subject view, coherent source-defined anatomy and proportions.';
+ const view=({FACE_HERO:'Chest-up face portrait of the same identity.',FULL_BODY_FRONT:front,FULL_BODY_BACK:rear,HERO_3Q:'Readable complete three-quarter main view.',SIDE_PROFILE:'Readable left-side profile, full subject; preserve side structural coherence, no front-view contamination.',BACK_3Q:rear,REAR_3Q:rear,DETAIL_REFERENCE:'Single coherent close study of source-defined structural details; no invented parts.',SIDE_SPECIAL_LEFT:'Readable left-side profile, full subject.',SIDE_SPECIAL_RIGHT:'Readable right-side profile, full subject.'} as Record<string,string>)[role]||'Full subject visible, neutral readable asset presentation.';
+ let directorBrief=null;if(director){const key=asset.canonicalKey,intent=director.intent;
+ const p={narrativeRole:intent.narrativeVisualRoles.find((r:any)=>r.canonicalKey===key)??null,
+ relevantScaleRelations:intent.scaleRelations.filter((r:any)=>r.kind!=='SHOT_SPECIFIC'&&(r.smaller===key||r.larger===key)),
+ relevantTransformationLineage:intent.transformationLineage.filter((r:any)=>r.from===key||r.to===key)};
+ const assetVisualDNA=projectGlobalVisualDNAForAsset({asset,visualSpec:spec,narrativeRole:p.narrativeRole,globalVisualDNA:intent.globalVisualDNA,relevantLineage:p.relevantTransformationLineage,relevantScale:p.relevantScaleRelations});
+ directorBrief=compileDirectorRenderingBrief(asset,spec,{...p,assetVisualDNA});
+ // Subject semantics carry over; final-shot night lighting/background does not.
+ directorBrief.environmentStyle=directorBrief.environmentStyle.filter((s:string)=>!/atmosphere|night|violet/.test(s));
+ directorBrief.lighting=['neutral clear reference lighting'];
+ if(asset.assetKind==='HUMAN_CHARACTER')directorBrief.avoidVisuals[0]='no other people, animals or story actors';
+ if(assetVisualDNA.materialIdentity==='SOURCE_DEFINED_MATERIAL'&&p.relevantTransformationLineage.some((r:any)=>r.relationType==='MATERIAL_TRANSFORMATION')){
+   directorBrief.materialIdentity.push('preserve source-defined shared material lineage; no biological material substitution');
+   const material=assetVisualDNA.inherited.materialLanguage.join(' ');
+   if(/Dream\s*Matter|荧光物质|梦的?物质/i.test(material)){
+     directorBrief.materialIdentity.push('Shared Dream Matter constitution, continuous mist, particles, luminous contour and semi-transparent condensed solid; preserve the same material across linked forms.');
+     if(/cool\s*blue|冷蓝|青蓝|蓝色荧光/i.test(material+' '+intent.globalVisualDNA.colorLanguage.join(' ')))directorBrief.materialIdentity.push('Source-defined cool-blue luminosity belongs to this material, not to the background or unrelated biological subjects.');
+   }
+ }
+ }
+ const identityFacts={identityAnchors:list(spec.identityAnchors?.length?spec.identityAnchors:asset.identityAnchors),mustPreserve:list(spec.mustPreserve?.length?spec.mustPreserve:asset.mustPreserve),silhouette:spec.silhouette,proportion:spec.proportion,palette:spec.primaryPalette,materials:spec.materials,details:spec.details};
+ return {version:ASSET_PIPELINE_VERSION,directorBrief,renderedPrompt:[subject,`Source-defined visual facts: ${JSON.stringify(identityFacts)}.`,structure,
+ main?'First MAIN design, complete subject, centered neutral presentation.':`The supplied MAIN is the identity reference. Change viewpoint only. ${view}`,
+ 'Cinematic dreamlike grounded realism, refined physical anatomy and material detail, soft filmic lighting; no chibi or mascot styling.',directorBrief?renderKreaDirectorBrief(directorBrief):'',background,
+ 'Full subject visible unless explicitly a face/detail study. No duplicate subject, collage, contact sheet, extra pose, text or labels.',`Avoid: ${JSON.stringify(list(spec.forbiddenChanges?.length?spec.forbiddenChanges:asset.forbiddenChanges))}.`].filter(Boolean).join('\n')};
+}

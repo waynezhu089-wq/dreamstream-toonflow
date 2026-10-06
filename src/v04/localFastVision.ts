@@ -24,9 +24,9 @@ export function invokeLocalInspector(config:Record<string,string>,question:strin
  child.stdin.end(JSON.stringify({runtimePath:config.RUNTIME,modelPath:config.MODEL,mmprojPath:config.MMPROJ,question,images:images.map(i=>({view:i.view,base64:i.bytes.toString('base64')})),maxTokens,jsonMode:maxTokens>32}));
  });
 }
-export function createLocalFastVisionAdapter(images:InspectionImage[]):FastVisionInspectorAdapter{
+export function createLocalFastVisionAdapter(images:InspectionImage[], workerLeaseHeld=false):FastVisionInspectorAdapter{
  const config=localInspectorConfiguration();if(!config)return {state:'UNAVAILABLE',inspect:async()=>{throw Error('LOCAL_VISION_NOT_PROVEN');}};
- return {state:'AVAILABLE',capabilityClass:'COARSE_ONLY',inspect:async(brief:any)=>{const release=await acquireDraftWorkerLease(getPath(['v04-draft-worker.lock']));if(!release)throw Error('LOCAL_VISION_GPU_BUSY');try{
+ return {state:'AVAILABLE',capabilityClass:'COARSE_ONLY',inspect:async(brief:any)=>{const release=workerLeaseHeld?async()=>{}:await acquireDraftWorkerLease(getPath(['v04-draft-worker.lock']));if(!release)throw Error('LOCAL_VISION_GPU_BUSY');try{
  const view=brief.view,derivatives=await inspectionDerivatives(images.filter(i=>i.view==='MAIN'||i.view===view));
  const question='Inspect TARGET '+view+' only; MAIN is reference, not a second subject in the target. FAST obvious visual QA, not deep diagnosis. Not visible is not missing; confirmed fictional appendages are valid. Return JSON {"checks":{"SUBJECT_COUNT":"PASS|FAIL|UNKNOWN","VIEW":"PASS|FAIL|UNKNOWN","PART_STRUCTURE":"PASS|FAIL|UNKNOWN","ATTACHMENT":"PASS|FAIL|UNKNOWN","CONTAMINATION":"PASS|FAIL|UNKNOWN","CROSS_VIEW":"PASS|FAIL|UNKNOWN"},"confidence":"HIGH|MEDIUM|LOW","localizedDefects":[]}. SUBJECT_COUNT: one target subject? VIEW: broadly '+view+'? PART_STRUCTURE: no obvious duplicated/missing/grossly malformed major parts? ATTACHMENT: no detached/floating parts? CONTAMINATION: no extra person/animal/text? CROSS_VIEW: no major identity/footwear/design contradiction to MAIN? Use UNKNOWN when uncertain. Only obvious localized defects may add {check:PART_STRUCTURE or ATTACHMENT,region,description}; otherwise empty list. Context:'+JSON.stringify(brief);
  const output=await invokeLocalInspector(config,question,derivatives),normalized=compileLocalObservation(parseLocalOutput(output.text),view);

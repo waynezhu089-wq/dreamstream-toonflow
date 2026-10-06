@@ -15,8 +15,8 @@ export async function currentRouting(trx: Knex | Knex.Transaction, projectId: nu
   return { version: row?.version ?? 0, routes: row ? JSON.parse(row.routesJson) : {...routingDefaults},
     disabledProfiles: row ? JSON.parse(row.disabledProfilesJson) : [], changedBy: row?.actorUserId ?? null, changedAt: row?.createdAt ?? null };
 }
-export async function resolveEditRouting(trx: Knex.Transaction, projectId: number, task: RoutingTask) {
-  const routing = await currentRouting(trx, projectId), profile = routing.routes[task];
+export async function resolveEditRouting(trx: Knex.Transaction, projectId: number, task: RoutingTask, pipeline = false) {
+  const routing = await currentRouting(trx, projectId), profile = pipeline && task === 'DERIVE_VIEW' && routing.version === 0 ? 'KLEIN_ASSET_VIEW_V1' : routing.routes[task];
   if (routing.disabledProfiles.includes(profile)) throw new PilotError('PILOT_IMAGE_ROUTING_DISABLED', '当前图片修改暂时不可用，现有资产未改变。', 409);
   return {profile, routingVersion: routing.version};
 }

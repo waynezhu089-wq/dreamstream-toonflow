@@ -1,4 +1,8 @@
-import {autoJobFresh,captureAutoAssetReadContext} from './autoAsset';
+import {buildKleinAssetWorkflow,KLEIN_ASSET_VIEW_V1,KLEIN_ASSET_WORKFLOW_VERSION,kleinModels} from './kleinAssetProfile';
+import {ASSET_PIPELINE_VERSION,compilePipelineAssetPrompt} from './assetPipelinePrompt';
+import {autoJobFresh,captureAutoAssetReadContext,reconcileAutoAssetsInTransaction,preparedSpec} from './autoAsset';
+import {captureDirectorReferenceBoundary,inheritDirectorMainReference} from './directorBible';
+import {compileVisualSemantic} from './visualSpecContract';
 import {createHash,randomUUID} from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -16,6 +20,8 @@ import {baselinesInTransaction,suitableBaseline,recordCandidateBaseline} from '.
 import {resolveEditRouting} from './operations';
 import {submitTracedDraft,failSubmittedTrace} from './tracedDraftSubmit';
 import {settleJobTraces} from './executionTrace';
+import {inspectAssetCandidate} from './assetPipelineQuality';
+import {createLocalFastVisionAdapter} from './localFastVision';
 const q=db as Knex;
 const sha=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const bytesHash=(v:Buffer)=>createHash('sha256').update(v).digest('hex');
@@ -24,7 +30,7 @@ const jobRequest=scopeSchema.extend({jobId:z.string().uuid()});
 async function assertScope(trx:Knex.Transaction,scope:{projectId:number;scriptId:number}){
  if(!await trx('o_script').where({id:scope.scriptId,projectId:scope.projectId}).first())throw new PilotError('PILOT_SCOPE_INVALID','制作单元不存在',404);
 }
-async function capture(trx:Knex.Transaction,scope:{projectId:number;scriptId:number},intent:ImageEditIntent,parentCandidateId?:string){
+async function capture(trx:Knex.Transaction,scope:{projectId:number;scriptId:number},intent:ImageEditIntent,parentCandidateId?:string,mainPipeline=false){
  await assertScope(trx,scope);
  const asset=await trx('o_v04Asset').where({projectId:scope.projectId,canonicalKey:intent.canonicalKey,status:'ACTIVE'}).first();
  if(!asset)throw new PilotError('PILOT_TARGET_INVALID','请先选择有效素材',404);
@@ -33,12 +39,12 @@ async function capture(trx:Knex.Transaction,scope:{projectId:number;scriptId:num
  const rejected=await trx('o_v04Decision').where({projectId:scope.projectId,scriptId:scope.scriptId,category:'ASSET_IMAGE_EDIT',status:'REJECTED'}).limit(300);
  const rejectIds=new Set(rejected.map((r:any)=>r.subjectKey));
  const eligible=jobs.filter((j:any)=>!rejectIds.has(j.id));
- const baseline=suitableBaseline((await baselinesInTransaction(trx,scope)).filter((b:any)=>b.sourceAssetRevision===asset.revision),asset.canonicalKey,intent.targetRole==='FACE_HERO'?'FACE':intent.targetRole==='FULL_BODY_BACK'?'BACK':intent.sourceFocus);
+ const baseline=suitableBaseline((await baselinesInTransaction(trx,scope)).filter((b:any)=>b.sourceAssetRevision===asset.revision),asset.canonicalKey,mainPipeline?'BODY':intent.targetRole==='FACE_HERO'?'FACE':intent.targetRole==='FULL_BODY_BACK'?'BACK':intent.sourceFocus);
  let source:any=null,sourceRole:string|undefined,artifact:any=null,sourceAttachment:any=null;
  if(intent.sourceAttachmentId){sourceAttachment=await trx('o_v04AgentAttachment').where({id:intent.sourceAttachmentId,...scope}).first();if(!sourceAttachment?.messageId)throw new PilotError('PILOT_REFERENCE_INVALID','本次来源图片不属于当前对话',409);}
  else if(parentCandidateId&&!intent.useBaseline){source=eligible.find((j:any)=>j.id===parentCandidateId);if(!source)throw new PilotError('PILOT_SOURCE_STALE','上一个候选已失效',409);}
  else if(baseline){sourceAttachment=await trx('o_v04AgentAttachment').where({id:baseline.attachmentId,...scope}).first();if(!sourceAttachment||sourceAttachment.sha256!==baseline.sha256)throw new PilotError('PILOT_SOURCE_STALE','当前基准图片不可用',409);}
- else for(const role of sourceRolePriority(intent)){source=eligible.find((j:any)=>JSON.parse(j.outputsJson).some((o:any)=>o.role===role));if(source){sourceRole=role;break;}}
+ else for(const role of mainPipeline&&intent.editMode==='DERIVE_VIEW'?['MAIN_PREVIEW']:sourceRolePriority(intent)){source=eligible.find((j:any)=>JSON.parse(j.outputsJson).some((o:any)=>o.role===role));if(source){sourceRole=role;break;}}
  if(!sourceAttachment&&!source)throw new PilotError('PILOT_SOURCE_MISSING','当前素材尚无可修改的图片，请先上传并确认基准',409);
  if(source){const outputs=JSON.parse(source.outputsJson),output=sourceRole?outputs.find((o:any)=>o.role===sourceRole):outputs[0];artifact=await trx('o_v04StudioDraftArtifact').where({artifactId:output?.artifactId,jobId:source.id,projectId:scope.projectId}).first();if(!artifact)throw new PilotError('ARTIFACT_MISSING','源图片暂不可用',409);}
  const refs=[];for(const binding of intent.referenceBindings){
@@ -52,27 +58,38 @@ async function capture(trx:Knex.Transaction,scope:{projectId:number;scriptId:num
  const spec=await trx('o_v04AssetVisualSpec').where({projectId:scope.projectId,canonicalKey:asset.canonicalKey,status:'CONFIRMED'}).orderBy('revision','desc').first();
  const config=await trx('o_v04StudioImageExecutorConfig').where({projectId:scope.projectId}).first();
  const baseUrl=localComfyOrigin(config?.baseUrl??'http://127.0.0.1:8188');
- const routing=await resolveEditRouting(trx,scope.projectId,intent.editMode==='DERIVE_VIEW'?'DERIVE_VIEW':intent.referenceBindings.length?'REFERENCE_EDIT':'SOURCE_EDIT');
+ const routing=await resolveEditRouting(trx,scope.projectId,intent.editMode==='DERIVE_VIEW'?'DERIVE_VIEW':intent.referenceBindings.length?'REFERENCE_EDIT':'SOURCE_EDIT',mainPipeline);
  return {asset:{canonicalKey:asset.canonicalKey,revision:asset.revision,category:asset.category,sourcePolicy:asset.sourcePolicy},
   sourceType:sourceAttachment?'ATTACHMENT':'ARTIFACT',sourceAttachmentId:sourceAttachment?.id??null,sourceAttachmentHash:sourceAttachment?.sha256??null,baselineVersion:baseline?.version??null,baselineRole:baseline?.role??null,
   sourceArtifactId:artifact?.artifactId??null,sourceJobId:source?.id??null,parentCandidateId:source?.generationIntent==='ASSET_IMAGE_EDIT'?source.id:null,
   sourceSpecHash:spec?sha(spec):null,referenceBindings:refs,referenceArtifactIds:refs.map(r=>r.sourceArtifactId).filter(Boolean),uploadedReferenceIds:refs.filter(r=>r.purpose==='CONVERSATIONAL_REFERENCE').map(r=>r.attachmentId),baseUrl,intent,routing};
 }
-export async function enqueueAssetImageEdit(scope:{projectId:number;scriptId:number},raw:unknown,userMessageId:string,parentCandidateId?:string){
- const intent=imageEditIntent.parse(raw);
- const snapshot=await q.transaction(trx=>capture(trx,scope,intent,parentCandidateId));
+export async function enqueueAssetImageEdit(scope:{projectId:number;scriptId:number},raw:unknown,userMessageId:string,parentCandidateId?:string,mainPipeline=false){
+ const parsed=imageEditIntent.parse(raw);
+ const intent=mainPipeline?{...parsed,...(parsed.editMode!=='DERIVE_VIEW'?{targetRole:'EDIT_CANDIDATE' as const}:{}),sourceFocus:'BODY' as const}:parsed;
+ if(mainPipeline&&intent.editMode==='DERIVE_VIEW'&&(intent.sourceAttachmentId||parentCandidateId))throw new PilotError('PILOT_MAIN_REQUIRED','派生视角必须使用当前主图',409);
+ const snapshot=await q.transaction(trx=>capture(trx,scope,intent,parentCandidateId,mainPipeline));
  const profile=snapshot.routing.profile;
  const source=snapshot.sourceAttachmentId?await getAgentAttachmentBytes(scope.projectId,snapshot.sourceAttachmentId):await getDraftArtifact(scope.projectId,snapshot.sourceArtifactId!);
  const referenceHashes=await Promise.all(snapshot.referenceBindings.map(async r=>{const file=await getAgentAttachmentBytes(scope.projectId,r.attachmentId);if(bytesHash(file.bytes)!==r.sha256)throw new PilotError('PILOT_REFERENCE_INVALID','参考图片内容已变化',409);return r.sha256;}));
- const sourceSha256=bytesHash(source.bytes),executionPrompt=editExecutionPrompt(intent);
+ const sourceSha256=bytesHash(source.bytes);
+ if(mainPipeline&&intent.editMode==='DERIVE_VIEW'&&intent.referenceBindings.length)throw new PilotError('CAPABILITY_LIMITED','多视角只使用当前主图，请先修改主图',409);
+ if(mainPipeline&&intent.editMode==='DERIVE_VIEW'&&profile!==KLEIN_ASSET_VIEW_V1)throw new PilotError('PILOT_ROUTE_INCOMPATIBLE','请在专业配置启用多视角执行器',409);
+ if(mainPipeline&&intent.editMode!=='DERIVE_VIEW'&&!['KREA2_SOURCE_EDIT_V1','KREA2_REFERENCE_EDIT_V1'].includes(profile))throw new PilotError('PILOT_ROUTE_INCOMPATIBLE','主图修改执行器不兼容',409);
+ const context=mainPipeline?await q.transaction(trx=>captureAutoAssetReadContext(trx,scope)):null;
+ if(context?.directorBlocked)throw new PilotError('DIRECTOR_SOURCE_STALE','请先审阅当前导演方向',409);
+ const asset=context?.assets.find(a=>a.canonicalKey===intent.canonicalKey),spec=asset?context?.specs.find(s=>s.canonicalKey===asset.canonicalKey&&s.sourceAssetRevision===asset.revision):null;
+ const visual=asset&&context?(preparedSpec(context,asset,[])??compileVisualSemantic({...asset,identityAnchors:JSON.parse(asset.identityAnchors),mustPreserve:JSON.parse(asset.mustPreserve),forbiddenChanges:JSON.parse(asset.forbiddenChanges)},{})):spec?JSON.parse(spec.specJson):null;
+ const executionPrompt=mainPipeline?compilePipelineAssetPrompt(asset,visual,intent.editMode==='DERIVE_VIEW'?intent.targetRole:'ASSET_MAIN_PREVIEW',context?.director).renderedPrompt+'\nRequested edit: '+editExecutionPrompt(intent):editExecutionPrompt(intent);
  if(snapshot.sourceAttachmentId&&sourceSha256!==snapshot.sourceAttachmentHash)throw new PilotError('PILOT_SOURCE_STALE','上传来源内容已变化',409);
- const frozen={...snapshot,sourceSha256,referenceHashes,executorProfile:profile,workflowVersion:KREA_EDIT_WORKFLOW_VERSION,models:kreaModels,executionPrompt,width:768,height:768,fallbackPolicy:{knownOutOfMemoryResolution:512,maxAttempts:2},userMessageId};
+ const workflowVersion=profile===KLEIN_ASSET_VIEW_V1?KLEIN_ASSET_WORKFLOW_VERSION:KREA_EDIT_WORKFLOW_VERSION;
+ const frozen={...snapshot,...(mainPipeline?{pipelineVersion:ASSET_PIPELINE_VERSION,pipelineMain:intent.editMode!=='DERIVE_VIEW',visualSpecDraft:visual,directorSemanticHash:context?.director?sha(context.director.intent):null}:{}),sourceSha256,referenceHashes,executorProfile:profile,workflowVersion,models:profile===KLEIN_ASSET_VIEW_V1?kleinModels:kreaModels,executionPrompt,width:768,height:profile===KLEIN_ASSET_VIEW_V1?1024:768,fallbackPolicy:{knownOutOfMemoryResolution:512,maxAttempts:2},userMessageId};
  const draftHash=sha(frozen),seed=parseInt(draftHash.slice(0,12),16),now=Date.now();
  const result=await q.transaction(async trx=>{
   const existing=await trx('o_v04StudioAssetDraftJob').where({id:userMessageId,...scope}).first();if(existing)return existing;
-  const check=await capture(trx,scope,intent,parentCandidateId);if(sha(check)!==sha(snapshot))throw new PilotError('PILOT_SOURCE_STALE','素材来源刚刚变化，请重试',409);
+  const check=await capture(trx,scope,intent,parentCandidateId,mainPipeline);if(sha(check)!==sha(snapshot))throw new PilotError('PILOT_SOURCE_STALE','素材来源刚刚变化，请重试',409);
   const row={id:userMessageId,...scope,canonicalKey:intent.canonicalKey,sourceAssetRevision:snapshot.asset.revision,draftHash,generationIntent:'ASSET_IMAGE_EDIT',executionPurpose:intent.targetRole,
-   executorType:'COMFY_LOCAL',executorProfile:profile,workflowVersion:KREA_EDIT_WORKFLOW_VERSION,status:'QUEUED',comfyPromptId:null,
+   executorType:'COMFY_LOCAL',executorProfile:profile,workflowVersion,status:'QUEUED',comfyPromptId:null,
    inputSnapshotJson:JSON.stringify({...frozen,seed}),outputsJson:'[]',errorCode:null,errorMessage:null,attemptCount:1,createdAt:now,startedAt:null,completedAt:null,updatedAt:now};
   await trx('o_v04StudioAssetDraftJob').insert(row);return row;
  });wakeDraftWorker();return {jobId:result.id,status:result.status,canonicalKey:result.canonicalKey,applied:false};
@@ -86,9 +103,10 @@ function sourceIsCurrent(job:any,snapshot:any,asset:any,spec:any,source:any,refs
   && snapshot.referenceBindings.every((r:any)=>refs.some(a=>a.id===r.attachmentId&&a.sha256===r.sha256));
 }
 async function fresh(job:any,snapshot:any,trx:Knex.Transaction){
+ if(snapshot.pipelineVersion){const context=await captureAutoAssetReadContext(trx,{projectId:job.projectId,scriptId:job.scriptId});if(context.directorBlocked||snapshot.directorSemanticHash!==(context.director?sha(context.director.intent):null))return false;}
  const asset=await trx('o_v04Asset').where({projectId:job.projectId,canonicalKey:job.canonicalKey,status:'ACTIVE'}).first();
  const source=snapshot.sourceAttachmentId?await trx('o_v04AgentAttachment').where({id:snapshot.sourceAttachmentId,projectId:job.projectId,scriptId:job.scriptId}).first():await trx('o_v04StudioAssetDraftJob').where({id:snapshot.sourceJobId,projectId:job.projectId,scriptId:job.scriptId,status:'SUCCEEDED'}).first();
- const baseline=suitableBaseline(await baselinesInTransaction(trx,{projectId:job.projectId,scriptId:job.scriptId}),job.canonicalKey,snapshot.intent.targetRole==='FACE_HERO'?'FACE':snapshot.intent.targetRole==='FULL_BODY_BACK'?'BACK':snapshot.intent.sourceFocus);
+ const baseline=suitableBaseline(await baselinesInTransaction(trx,{projectId:job.projectId,scriptId:job.scriptId}),job.canonicalKey,snapshot.pipelineVersion?'BODY':snapshot.intent.targetRole==='FACE_HERO'?'FACE':snapshot.intent.targetRole==='FULL_BODY_BACK'?'BACK':snapshot.intent.sourceFocus);
  const spec=await trx('o_v04AssetVisualSpec').where({projectId:job.projectId,canonicalKey:job.canonicalKey,status:'CONFIRMED'}).orderBy('revision','desc').first();
  const rejected=await trx('o_v04Decision').where({projectId:job.projectId,scriptId:job.scriptId,category:'ASSET_IMAGE_EDIT',subjectKey:snapshot.sourceJobId??'',status:'REJECTED'}).first();
  const refs=await trx('o_v04AgentAttachment').where({projectId:job.projectId,scriptId:job.scriptId}).whereIn('id',snapshot.referenceBindings.map((r:any)=>r.attachmentId));
@@ -104,17 +122,30 @@ export async function produceAssetImageEdit(job:any,freshClaim:boolean){
    const src=snapshot.sourceAttachmentId?await getAgentAttachmentBytes(job.projectId,snapshot.sourceAttachmentId):await getDraftArtifact(job.projectId,snapshot.sourceArtifactId);if(bytesHash(src.bytes)!==snapshot.sourceSha256)throw new DraftComfyError('SOURCE_CHANGED','源图片内容已变化');
    const sourceImage=await uploadEditInput(base,src.bytes,`ds-edit-${job.id}-source.png`);let referenceImage:string|undefined;
    if(snapshot.referenceBindings.length){const ref=await getAgentAttachmentBytes(job.projectId,snapshot.referenceBindings[0].attachmentId);if(bytesHash(ref.bytes)!==snapshot.referenceBindings[0].sha256)throw new DraftComfyError('SOURCE_CHANGED','参考图片内容已变化');referenceImage=await uploadEditInput(base,ref.bytes,`ds-edit-${job.id}-reference.png`);}
-   workflow=buildKreaEditWorkflow({profile:job.executorProfile,prompt:snapshot.executionPrompt,seed:snapshot.seed,width:snapshot.recovery?.width??snapshot.width,height:snapshot.recovery?.height??snapshot.height,sourceImage,referenceImage,targetRole:job.executionPurpose,jobId:job.id});
+   workflow=job.executorProfile===KLEIN_ASSET_VIEW_V1?buildKleinAssetWorkflow({prompt:snapshot.executionPrompt,seed:snapshot.seed,sourceImage,targetRole:job.executionPurpose,jobId:job.id}):buildKreaEditWorkflow({profile:job.executorProfile,prompt:snapshot.executionPrompt,seed:snapshot.seed,width:snapshot.recovery?.width??snapshot.width,height:snapshot.recovery?.height??snapshot.height,sourceImage,referenceImage,targetRole:job.executionPurpose,jobId:job.id});
    const promptId=await submitTracedDraft(base,workflow,job);await q('o_v04StudioAssetDraftJob').where({id:job.id,status:'RUNNING'}).update({comfyPromptId:promptId,updatedAt:Date.now()});job.comfyPromptId=promptId;
   }
   const image=await awaitDraft(base,job.comfyPromptId,'22',900000),output=await downloadDraft(base,image);
   const artifactId=randomUUID(),createdAt=Date.now(),file=getPath(['v04-draft-artifacts',String(job.projectId),`${artifactId}.${output.extension}`]);
   await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,output.bytes,{flag:'wx'});
-  const artifact={artifactId,role:job.executionPurpose,mimeType:output.mimeType,width:output.width,height:output.height,sha256:bytesHash(output.bytes),fileRef:`/api/v04/studio/artifact/${job.projectId}/${artifactId}`,createdAt};
+  let quality=null;
+  if(snapshot.pipelineVersion){
+   const source=snapshot.sourceAttachmentId?await getAgentAttachmentBytes(job.projectId,snapshot.sourceAttachmentId):await getDraftArtifact(job.projectId,snapshot.sourceArtifactId);
+   const view=snapshot.pipelineMain?'MAIN':/SIDE/.test(job.executionPurpose)?'SIDE':/BACK|REAR/.test(job.executionPurpose)?'BACK':'FRONT';
+   quality=await inspectAssetCandidate(output,{view,profile:snapshot.visualSpecDraft.assetKind,mustPreserve:snapshot.visualSpecDraft.mustPreserve,confirmedPhysicalFacts:snapshot.visualSpecDraft.details},createLocalFastVisionAdapter([{view:'MAIN',bytes:source.bytes,mimeType:'image/png'},{view,bytes:output.bytes,mimeType:output.mimeType}],true));
+  }
+  const artifact={artifactId,role:job.executionPurpose,mimeType:output.mimeType,width:output.width,height:output.height,sha256:bytesHash(output.bytes),quality,fileRef:`/api/v04/studio/artifact/${job.projectId}/${artifactId}`,createdAt};
   await q.transaction(async trx=>{
    const current=await trx('o_v04StudioAssetDraftJob').where({id:job.id}).first();
    await trx('o_v04StudioDraftArtifact').insert({artifactId,jobId:job.id,projectId:job.projectId,mimeType:output.mimeType,extension:output.extension,role:job.executionPurpose,width:output.width,height:output.height,createdAt});
-   if(current?.status==='RUNNING')await trx('o_v04StudioAssetDraftJob').where({id:job.id,status:'RUNNING'}).update({status:await fresh(job,snapshot,trx)?'SUCCEEDED':'STALE',outputsJson:JSON.stringify([artifact]),completedAt:createdAt,updatedAt:createdAt});
+   if(current?.status==='RUNNING'){
+    const currentSource=await fresh(job,snapshot,trx),failed=quality?.status==='CLEAR_FAILURE';
+    await trx('o_v04StudioAssetDraftJob').where({id:job.id,status:'RUNNING'}).update({status:!currentSource?'STALE':failed?'FAILED':'SUCCEEDED',errorCode:failed?'QUALITY_CLEAR_FAILURE':null,outputsJson:JSON.stringify([artifact]),completedAt:createdAt,updatedAt:createdAt});
+    if(currentSource&&failed&&job.attemptCount===1){
+     const retry={...snapshot,retryOf:job.id,retryRootHash:job.draftHash,seed:snapshot.seed+1};
+     await trx('o_v04StudioAssetDraftJob').insert({...job,id:randomUUID(),status:'QUEUED',comfyPromptId:null,draftHash:sha(retry),inputSnapshotJson:JSON.stringify(retry),outputsJson:'[]',attemptCount:2,errorCode:null,errorMessage:null,createdAt,updatedAt:createdAt,startedAt:null,completedAt:null});
+    }
+   }
    else if(current?.status==='STALE')await trx('o_v04StudioAssetDraftJob').where({id:job.id,status:'STALE'}).update({outputsJson:JSON.stringify([artifact]),completedAt:createdAt,updatedAt:createdAt});
   });
  }catch(error){
@@ -122,7 +153,7 @@ export async function produceAssetImageEdit(job:any,freshClaim:boolean){
   await failSubmittedTrace(job,code);
   // Only a confirmed terminal OOM may submit once more. Lost submission or
   // transport responses never authorize an automatic duplicate execution.
-  if(code==='OUT_OF_MEMORY'&&!snapshot.recovery&&snapshot.fallbackPolicy?.maxAttempts===2){
+  if(job.executorProfile!==KLEIN_ASSET_VIEW_V1&&code==='OUT_OF_MEMORY'&&job.attemptCount===1&&!snapshot.recovery&&snapshot.fallbackPolicy?.maxAttempts===2){
    const retrySnapshot={...snapshot,recovery:{failedPromptId:job.comfyPromptId,reason:code,width:512,height:512,attempt:2}};
    const changed=await q('o_v04StudioAssetDraftJob').where({id:job.id,status:'RUNNING'}).update({inputSnapshotJson:JSON.stringify(retrySnapshot),comfyPromptId:null,attemptCount:2,updatedAt:Date.now()});
    if(changed)return produceAssetImageEdit({...job,inputSnapshotJson:JSON.stringify(retrySnapshot),comfyPromptId:null},true);
@@ -144,7 +175,7 @@ export async function listAssetImageCandidates(input:unknown){const scope=scopeS
  const refs=await trx('o_v04AgentAttachment').where(scope).whereIn('id',snapshots.flatMap((s:any)=>(s.referenceBindings??[]).map((r:any)=>r.attachmentId)));
  const autoContext=rows.some((j:any)=>JSON.parse(j.inputSnapshotJson).autoVersion)?await captureAutoAssetReadContext(trx,scope):undefined;
  return Promise.all(rows.map(async(j:any,i:number)=>{const s=snapshots[i],asset=assets.find((a:any)=>a.canonicalKey===j.canonicalKey),spec=specs.find((a:any)=>a.canonicalKey===j.canonicalKey);
-  const current=s.autoVersion?await autoJobFresh(j,trx,autoContext):sourceIsCurrent(j,s,asset,spec,s.sourceAttachmentId?attachmentSources.find((p:any)=>p.id===s.sourceAttachmentId):sources.find((p:any)=>p.id===s.sourceJobId),refs,decisions.some((d:any)=>d.subjectKey===s.sourceJobId&&d.status==='REJECTED'),suitableBaseline(baselines,j.canonicalKey,s.intent.targetRole==='FACE_HERO'?'FACE':s.intent.targetRole==='FULL_BODY_BACK'?'BACK':s.intent.sourceFocus));
+  const current=s.autoVersion?await autoJobFresh(j,trx,autoContext):sourceIsCurrent(j,s,asset,spec,s.sourceAttachmentId?attachmentSources.find((p:any)=>p.id===s.sourceAttachmentId):sources.find((p:any)=>p.id===s.sourceJobId),refs,decisions.some((d:any)=>d.subjectKey===s.sourceJobId&&d.status==='REJECTED'),suitableBaseline(baselines,j.canonicalKey,s.pipelineVersion?'BODY':s.intent.targetRole==='FACE_HERO'?'FACE':s.intent.targetRole==='FULL_BODY_BACK'?'BACK':s.intent.sourceFocus));
   return {id:j.id,assetName:asset?.name??'素材',canonicalKey:j.canonicalKey,sourceAssetRevision:j.sourceAssetRevision,userMessageId:s.userMessageId,parentCandidateId:s.parentCandidateId,sourceArtifactId:s.sourceArtifactId,targetRole:j.executionPurpose,automatic:!!s.autoVersion,generationIntent:j.generationIntent,startedAt:j.startedAt??null,completedAt:j.completedAt??null,updatedAt:j.updatedAt,status:j.status==='SUCCEEDED'&&!current?'STALE':j.status,outputs:JSON.parse(j.outputsJson),errorMessage:j.errorMessage,decision:decisions.find((d:any)=>d.subjectKey===j.id)?.status??null,createdAt:j.createdAt};}));
 });}
 async function candidatePlan(trx:Knex.Transaction,data:z.infer<typeof jobRequest>){
@@ -164,14 +195,19 @@ export async function acceptAssetImageCandidate(input:unknown){
  if(candidateOutput.sha256 && bytesHash(media.bytes)!==candidateOutput.sha256)throw new PilotError('PILOT_SOURCE_STALE','候选图片内容已变化',409);
  const ext=media.mimeType==='image/jpeg'?'jpg':media.mimeType==='image/webp'?'webp':'png';const file=getPath(['v04-conversation',String(data.projectId),`${id}.${ext}`]);await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,media.bytes,{flag:'wx'});
  try{return await q.transaction(async trx=>{
+  await trx('o_script').where({id:data.scriptId,projectId:data.projectId}).update({id:data.scriptId});
   const current=await candidatePlan(trx,data);if(current.previewHash!==data.previewHash)throw new PilotError('PILOT_PREVIEW_STALE','候选预览已过期',409);
   const existing=await trx('o_v04Decision').where({projectId:data.projectId,scriptId:data.scriptId,category:'ASSET_IMAGE_EDIT',subjectKey:plan.job.id,status:'ACCEPTED'}).first();if(existing)return {applied:true,replayed:true};
   const now=Date.now(),snapshot=JSON.parse(plan.job.inputSnapshotJson);
+  const mainAdoption=!!snapshot.pipelineMain||plan.job.executionPurpose==='ASSET_MAIN_PREVIEW';
+  const directorBoundary=(mainAdoption||snapshot.pipelineVersion)?await captureDirectorReferenceBoundary(trx,{projectId:data.projectId,scriptId:data.scriptId}):null;
   await trx('o_v04AgentAttachment').insert({id,projectId:data.projectId,scriptId:data.scriptId,messageId:snapshot.userMessageId??null,contextJson:JSON.stringify({projectId:data.projectId,scriptId:data.scriptId,currentStage:'studio',currentRoute:'studio',selectedObject:{type:'ASSET',key:plan.job.canonicalKey}}),filePath:`/v04-conversation/${data.projectId}/${id}.${ext}`,originalName:`${plan.job.canonicalKey}-candidate.png`,mimeType:media.mimeType,bytes:media.bytes.length,sha256:bytesHash(media.bytes),purpose:'GENERATED_CANDIDATE',createdAt:now});
   await recordCandidateBaseline(trx,plan.job,id,{...candidateOutput,sha256:bytesHash(media.bytes)},data.previewHash);
   await trx('o_v04AgentReference').insert({id:randomUUID(),projectId:data.projectId,scriptId:data.scriptId,attachmentId:id,targetType:'ASSET_BIBLE',targetKey:plan.job.canonicalKey,assetId:null,createdAt:now});
   await trx('o_v04Decision').insert({id:randomUUID(),projectId:data.projectId,scriptId:data.scriptId,category:'ASSET_IMAGE_EDIT',subjectType:'ASSET',subjectKey:plan.job.id,content:JSON.stringify({canonicalKey:plan.job.canonicalKey,artifactId,attachmentId:id,previewHash:data.previewHash}),status:'ACCEPTED',sourceMessageIds:JSON.stringify([snapshot.userMessageId].filter(Boolean)),supersedesDecisionId:null,createdAt:now,acceptedAt:now});
-  return {applied:true,artifactId,attachmentId:id};
+  const continuity=directorBoundary?await inheritDirectorMainReference(trx,{projectId:data.projectId,scriptId:data.scriptId},directorBoundary,plan.job.canonicalKey,id,mainAdoption?'MAIN_REFERENCE_REPLACEMENT':'DERIVED_REFERENCE_ADOPTION'):null;
+  const derivation=mainAdoption?await reconcileAutoAssetsInTransaction(trx,{projectId:data.projectId,scriptId:data.scriptId,canonicalKeys:[plan.job.canonicalKey],viewsOnly:true}):null;
+  return {applied:true,artifactId,attachmentId:id,derivation,continuity};
  });}catch(e){await fs.unlink(file).catch(()=>{});throw e;}
 }
 export async function rejectAssetImageCandidate(input:unknown){const data=jobRequest.parse(input);return q.transaction(async trx=>{

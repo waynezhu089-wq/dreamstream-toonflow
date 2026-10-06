@@ -53,12 +53,12 @@ async function checkedScope(trx: Knex.Transaction, input: z.infer<typeof scope>)
 }
 
 export async function createPilotProject(input: unknown, actorUserId: number) {
-  const data = z.object({ name: z.string().trim().min(1).max(200), brief: text, targetDuration: z.number().int().min(1).max(600), aspectRatio: z.enum(["16:9", "9:16", "1:1"]) }).strict().parse(input);
+  const data = z.object({ name: z.string().trim().min(1).max(200), brief: text, visualStyle:z.string().trim().max(4000).default(''), targetDuration: z.number().int().min(1).max(600), aspectRatio: z.enum(["16:9", "9:16", "1:1"]) }).strict().parse(input);
   return q.transaction(async trx => {
     const projectId = Date.now() * 1000 + Math.floor(Math.random() * 1000);
     const profile = await trx("o_productionProfileVersion").where({ profileKey: "advertisement", version: 2, status: "ACTIVE" }).first();
     if (!profile) throw new PilotError("PILOT_PROFILE_UNAVAILABLE", "实验版受控生产工艺尚未初始化", 503);
-    await trx("o_project").insert({ id: projectId, projectType: "general_video", type: "advertisement", name: data.name, intro: data.brief, artStyle: "", directorManual: "", videoRatio: data.aspectRatio, imageModel: "", videoModel: "", imageQuality: "", mode: "", userId: actorUserId, createTime: Date.now() });
+    await trx("o_project").insert({ id: projectId, projectType: "general_video", type: "advertisement", name: data.name, intro: data.brief, artStyle: data.visualStyle, directorManual: "", videoRatio: data.aspectRatio, imageModel: "", videoModel: "", imageQuality: "", mode: "", userId: actorUserId, createTime: Date.now() });
     await trx("o_projectProfileBinding").insert({ projectId, profileKey: "advertisement", profileVersion: 2, source: "MANUAL", createdAt: Date.now(), updatedAt: Date.now() });
     const [scriptId] = await trx("o_script").insert({ projectId, name: "广告制作单元", content: "", createTime: Date.now() });
     await trx("o_v04Creative").insert({ projectId, scriptId, brief: data.brief, treatment: "", script: "", targetDuration: data.targetDuration, aspectRatio: data.aspectRatio, version: 1, updatedAt: Date.now() });

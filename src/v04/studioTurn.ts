@@ -2,6 +2,7 @@ import {directorFastPath} from "./directorContext";
 import {proposeDirector,readDirector} from "./directorBible";
 import {previewImageBaseline,listImageBaselines} from './assetImageBaseline';
 import {reconcileAutoAssets,autoAssetCoverage} from './autoAsset';
+import {generateAllAssets} from './assetPipeline';
 import {wakeDraftWorker} from './studioDraftImage';
 import { readAgentAttachment } from "./agentAttachments";
 import { analyzeImages } from "./visionAnalyzer";
@@ -67,6 +68,18 @@ export async function answerStudioTurn(input: unknown, userMessageId?: string, a
     return {mode:'DIRECTOR_PROPOSAL',reply:'导演方向候选已准备，请审阅变化后人工确认。当前图片不会自动改变。',directorProposal:proposal,applied:false};
   };
   if(directorFastPath(data.message,selected,state.assets)) return requestDirector();
+  if(/生成.*全部.*资产|生成.*所有.*素材|准备.*全部.*素材|把.*资产.*准备好/.test(data.message)){
+    const result=await generateAllAssets({projectId:ctx.projectId,scriptId:ctx.scriptId},actorUserId??0);
+    return {mode:'DISCUSS',reply:'已接收资产准备请求。后台会依次准备主图与所需视角；未能确认质量的图片会标为需要关注，刷新不会重复提交。',pipeline:result,applied:false};
+  }
+  if(/生成.*多视角|重新.*多视角|派生.*视角/.test(data.message)){
+    const mentioned=state.assets.filter((a:any)=>a.status==='ACTIVE'&&(data.message.includes(a.canonicalKey)||data.message.includes(a.name)));
+    const asset=mentioned.length===1?mentioned[0]:mentioned.length===0&&selected?.type==='ASSET'?state.assets.find((a:any)=>a.canonicalKey===selected.key):null;
+    if(!asset)return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'请选择要生成多视角的素材。',applied:false};
+    const result=await reconcileAutoAssets({projectId:ctx.projectId,scriptId:ctx.scriptId,canonicalKeys:[asset.canonicalKey],viewsOnly:true});wakeDraftWorker();
+    const paused=result.results.find(r=>r.status==='PAUSED');
+    return {mode:'DISCUSS',reply:paused?'多视角准备暂时受阻：'+paused.code+'。现有素材没有改变。':result.results.length?'已提交当前主图的多视角候选。各视角可分别审阅和采用，不要求全部通过。':'尚无可用主图或此类素材不需要多视角。',applied:false};
+  }
   if(/把.*资产.*准备好|准备.*全部.*素材|重新做.*第一稿|怎么.*还没图|为什么.*没有图/.test(data.message)){
     const asset=state.assets.find((a:any)=>selected?.type==='ASSET'&&a.canonicalKey===selected.key)||state.assets.find((a:any)=>data.message.includes(a.name)||data.message.includes(a.canonicalKey));
     if(/重新做/.test(data.message)&&!asset)return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'请选中要重新准备第一稿的素材。',applied:false};
@@ -173,7 +186,7 @@ export async function answerStudioTurn(input: unknown, userMessageId?: string, a
     if ((intent.referenceBindings??[]).some((r:any)=>!allowedRefs.has(r.attachmentId))) throw new PilotError('PILOT_REFERENCE_INVALID','引用的图片不属于当前对话',409);
     if(data.attachmentIds.length && !intent.sourceAttachmentId && !(intent.referenceBindings??[]).length)return {mode:'NEEDS_TARGET_CONFIRMATION',reply:'你主要希望参考这张图的长相，还是风格和光影？',applied:false};
     let imageCandidate:Awaited<ReturnType<typeof enqueueAssetImageEdit>>;
-    try{imageCandidate=await enqueueAssetImageEdit({projectId:ctx.projectId,scriptId:ctx.scriptId},intent,userMessageId,data.parentCandidateId);}
+    try{imageCandidate=await enqueueAssetImageEdit({projectId:ctx.projectId,scriptId:ctx.scriptId},intent,userMessageId,data.parentCandidateId,true);}
     catch(error){
       if(error instanceof PilotError){const correlationId=randomUUID();console.error('[V04 AssetEdit][PreparationFailure]',{correlationId,projectId:ctx.projectId,code:error.code});throw new StudioTurnFailure(error.code,error.message,'IMAGE_EDIT_PREPARATION_FAILED',correlationId,error.status);}
       studioFailure(ctx,'ACTION_FINALIZATION_FAILED',error);

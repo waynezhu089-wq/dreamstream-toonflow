@@ -4,6 +4,7 @@ import {compileDirectorAB,readDirectorAB,renderDirectorAB,evaluateDirectorAB,dir
 import {preflightMultiViewVision,feedbackMultiViewQuality,fastMultiViewQuality,visionMultiViewQuality,readMultiViewIntegrity,recordMultiViewIntegrity,compileMultiView,readMultiView,renderMultiView,evaluateMultiView,multiViewArtifact} from './multiView';
 import {inspectOperations,recentExecutions,executionDetail,workflowExample,previewRouting,applyRouting} from './operations';
 import {reconcileAutoAssets,autoAssetCoverage} from './autoAsset';
+import {prepareInitialProject,generateAllAssets,assetPipelineState} from './assetPipeline';
 import {wakeDraftWorker} from './studioDraftImage';
 import {listImageBaselines,previewImageBaseline,confirmImageBaseline} from './assetImageBaseline';
 import { listAssetImageCandidates, previewAssetImageCandidate, acceptAssetImageCandidate, rejectAssetImageCandidate } from "./assetImageEdit";
@@ -66,7 +67,9 @@ endpoint('/operations/execution',executionDetail);
 endpoint('/operations/workflow/example',async input=>workflowExample(input));
 endpoint('/operations/routing/preview',input=>previewRouting(input));
 endpoint('/operations/routing/apply',(input,req)=>applyRouting(input,Number((req as any).user.id)));
-endpoint("/project/create", (body, req) => createPilotProject(body, Number((req as any).user.id)));
+endpoint("/project/create", async (body, req) => {const actor=Number((req as any).user.id),created=await createPilotProject(body,actor);if(body.visualStyle?.trim())await prepareInitialProject(created,actor);return created;});
+endpoint('/studio/assets/generate-all',(input,req)=>generateAllAssets(input,Number((req as any).user.id)));
+endpoint('/studio/assets/pipeline/current',(input,req)=>assetPipelineState(input,Number((req as any).user.id)));
 endpoint("/project/read", input => readPilot(input));
 for(const [path,handler] of Object.entries({compile:compileMultiView,current:readMultiView,render:renderMultiView,evaluate:evaluateMultiView}))
   endpoint('/multiview/'+path,(input,req)=>handler(input,Number((req as any).user.id)));
@@ -86,7 +89,14 @@ router.post('/director/asset-ab/artifact',async(req,res)=>{
   try{const image=await directorABArtifact(req.body,Number((req as any).user.id));res.setHeader('Content-Type',image.mimeType);res.setHeader('Cache-Control','private, max-age=60');res.send(image.bytes);}
   catch(e){res.status(e instanceof PilotError?e.status:404).json({code:'DIRECTOR_AB_ARTIFACT_MISSING',message:'实验图片不可用'});}
 });
-for(const [path,handler] of Object.entries({propose:proposeDirector,preview:previewDirector,confirm:confirmDirector,current:readDirector,history:directorHistory,reject:rejectDirector})) endpoint("/director/"+path,(input,req)=>handler(input,Number((req as any).user.id)));
+for(const [path,handler] of Object.entries({propose:proposeDirector,preview:previewDirector,confirm:confirmDirector,current:readDirector,history:directorHistory,reject:rejectDirector})) endpoint("/director/"+path,async(input,req)=>{
+ const actor=Number((req as any).user.id),result=await handler(input,actor);
+ if(path==='confirm'&&(await db('o_v04Decision').where({projectId:input.projectId,scriptId:input.scriptId,category:'ASSET_PIPELINE_SETUP',status:'INITIAL_STARTED'}).first())){
+   try{await generateAllAssets({projectId:input.projectId,scriptId:input.scriptId},actor);}
+   catch(e){return {...result,pipelineAttention:true,pipelineErrorCode:e instanceof PilotError?e.code:'ASSET_PREPARATION_FAILED'};}
+ }
+ return result;
+});
 endpoint("/creative/preview", previewCreative);
 endpoint("/creative/apply", applyCreative);
 endpoint("/assets/preview", previewAssets);
@@ -124,7 +134,7 @@ endpoint("/visual-spec/preview", previewVisualSpec);
 endpoint("/visual-spec/apply", applyVisualSpec);
 endpoint("/visual-spec/prompt/rebuild", rebuildVisualPrompt);
 endpoint("/assets/library-binding/set", setLibraryBinding);
-endpoint("/skills/preview", previewSkill);
+endpoint("/skills/preview", input=>previewSkill(input));
 endpoint("/agent/creative-proposal", previewCreativeProposal);
 endpoint("/agent/action-proposal", proposeAgentAction);
 // A stable assistant identity is a final duplicate-write fence for retries,
