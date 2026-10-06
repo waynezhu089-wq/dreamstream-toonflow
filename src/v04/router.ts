@@ -1,7 +1,7 @@
 import {proposeDirector,previewDirector,confirmDirector,readDirector,directorHistory,rejectDirector} from "./directorBible";
 import {directorDryRun} from './directorDryRun';
 import {compileDirectorAB,readDirectorAB,renderDirectorAB,evaluateDirectorAB,directorABArtifact} from './directorAssetAB';
-import {feedbackMultiViewQuality,fastMultiViewQuality,visionMultiViewQuality,readMultiViewIntegrity,recordMultiViewIntegrity,compileMultiView,readMultiView,renderMultiView,evaluateMultiView,multiViewArtifact} from './multiView';
+import {preflightMultiViewVision,feedbackMultiViewQuality,fastMultiViewQuality,visionMultiViewQuality,readMultiViewIntegrity,recordMultiViewIntegrity,compileMultiView,readMultiView,renderMultiView,evaluateMultiView,multiViewArtifact} from './multiView';
 import {inspectOperations,recentExecutions,executionDetail,workflowExample,previewRouting,applyRouting} from './operations';
 import {reconcileAutoAssets,autoAssetCoverage} from './autoAsset';
 import {wakeDraftWorker} from './studioDraftImage';
@@ -73,6 +73,7 @@ for(const [path,handler] of Object.entries({compile:compileMultiView,current:rea
 endpoint('/multiview/integrity/current',(input,req)=>readMultiViewIntegrity(input,Number((req as any).user.id)));
 endpoint('/multiview/integrity/record',(input,req)=>recordMultiViewIntegrity(input,Number((req as any).user.id)));
 endpoint('/multiview/quality/fast',(input,req)=>fastMultiViewQuality(input,Number((req as any).user.id)));
+endpoint('/multiview/quality/preflight',(input,req)=>preflightMultiViewVision(input,Number((req as any).user.id)));
 endpoint('/multiview/quality/vision',(input,req)=>visionMultiViewQuality(input,Number((req as any).user.id)));
 router.post('/multiview/artifact',async(req,res)=>{
   try{const image=await multiViewArtifact(req.body,Number((req as any).user.id));res.setHeader('Content-Type',image.mimeType);res.setHeader('Cache-Control','private, max-age=60');res.send(image.bytes);}

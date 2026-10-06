@@ -23,12 +23,14 @@ function loadSource(file, db, cache = new Map(), oss = null) {
         if (next instanceof Error) throw next;
         return {object: next ?? oss.proposalOutput};
       }
+      if(input.system?.includes('VISION_CAPABILITY_PREFLIGHT')){oss.probeCalls=(oss.probeCalls||0)+1;return {object:input.messages[0].content[0].text.includes('sameSubject')?{sameSubject:true,obviousStructuralAnomaly:false,uncertain:false}:{subjectCount:1,confidence:'HIGH'}};}
       oss.visionCalls++;
       if (oss.visionFailure) throw oss.visionFailure;
       if (oss.modelError) throw Error('provider call failed');
       return { object: oss.visionResult ?? { summary: 'A dark blue image with a bright logo', dominantColors: ['deep blue'], visibleText: ['DreamStream'], uncertainty: [] } };
     }, invoke: async input => {
       oss.modelCalls.push({ model, ...input, method: input.output ? 'invokeJson' : 'invokeText' });
+      if(input.system?.includes('VISION_CAPABILITY_PREFLIGHT')){oss.probeCalls=(oss.probeCalls||0)+1;return {text:'1'};}
       const next=input.output ? oss.skillResponses?.shift() : oss.studioResponses?.shift();
       if (next instanceof Error) throw next;
       if (oss.modelError) throw Error('provider call failed');
@@ -2653,7 +2655,7 @@ test('QA034 conservative Fast states and bounded decisions never invoke an API',
 });
 
 async function qaFixture(t){
- const f=await mvFixture(t),c=await f.mv.compileMultiView(f.scope,7),execution={},crypto=require('crypto');
+ const f=await mvFixture(t);await f.db.schema.createTable('o_vendorConfig',t=>{t.text('id').primary();t.text('inputValues');});await f.db('o_vendorConfig').insert({id:'fake',inputValues:'{}'});const c=await f.mv.compileMultiView(f.scope,7),execution={},crypto=require('crypto');
  const png=await require('sharp')({create:{width:c.sharedExecution.width,height:c.sharedExecution.height,channels:3,background:'#abc'}}).png().toBuffer();
  for(const side of ['SIDE','BACK']){const a={artifactId:crypto.randomUUID(),extension:'png',sha256:crypto.createHash('sha256').update(png).digest('hex'),mimeType:'image/png',width:c.sharedExecution.width,height:c.sharedExecution.height};const dir=path.join(f.oss.testDir,'v04-multiview',String(f.scope.projectId),c.id);fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,a.artifactId+'.png'),png);execution[side]={status:'SUCCEEDED',artifact:a};}
  await f.db('o_v04MultiViewExperiment').where({id:c.id}).update({status:'COMPLETED',executionJson:JSON.stringify(execution)});return {...f,c,execution,cmd:{...f.scope,experimentId:c.id}};
@@ -2664,9 +2666,9 @@ test('QA034 real SQLite Fast zero model/truth writes, explicit Vision reservatio
  const fast=await mv.fastMultiViewQuality(cmd,7);assert.equal(fast.pipeline.fast.BACK.status,'SUSPECT');assert.equal(fast.pipeline.decisions.BACK,'HUMAN_REVIEW');assert.equal(oss.modelCalls.length,0);assert.equal(fast.pipeline.guardState,'APPLIED');
  await assert.rejects(mv.visionMultiViewQuality({...cmd,fastReportId:fast.id},7));assert.equal(oss.modelCalls.length,0);
  const pass={reviewed:true,identity:'PASS',view:'PASS',contamination:'PASS',issues:[],confidence:'HIGH'};oss.visionModel='fake:vision';oss.visionResult={SIDE:pass,BACK:pass,CROSS_VIEW:pass};
- const body={...cmd,fastReportId:fast.id,confirmExternalInspection:true};const result=await mv.visionMultiViewQuality(body,7);assert.equal(result.pipeline.phase,'COMPLETED');assert.equal(result.pipeline.decisions.BACK,'PASS');assert.equal(result.pipeline.visionAudit.modelRole,'vision');assert.equal(oss.visionCalls,1);
- assert.equal((await mv.visionMultiViewQuality(body,7)).id,result.id);assert.equal(oss.visionCalls,1);assert.equal((await db('o_v04AssetIntegrity')).length,3);
- const feedback=await mv.feedbackMultiViewQuality({...cmd,visionReportId:result.id,usefulness:'PARTIALLY_USEFUL'},7);assert.equal(feedback.pipeline.humanFeedback,'PARTIALLY_USEFUL');assert.equal(oss.visionCalls,1);assert.equal((await db('o_v04AssetIntegrity')).length,4);
+ const body={...cmd,fastReportId:fast.id,confirmExternalInspection:true};await mv.preflightMultiViewVision(body,7);const result=await mv.visionMultiViewQuality(body,7);assert.equal(result.pipeline.phase,'COMPLETED');assert.equal(result.pipeline.decisions.BACK,'PASS');assert.equal(result.pipeline.visionAudit.modelRole,'vision');assert.equal(oss.visionCalls,1);
+ assert.equal((await mv.visionMultiViewQuality(body,7)).id,result.id);assert.equal(oss.visionCalls,1);assert.equal((await db('o_v04AssetIntegrity')).length,5);
+ const feedback=await mv.feedbackMultiViewQuality({...cmd,visionReportId:result.id,usefulness:'PARTIALLY_USEFUL'},7);assert.equal(feedback.pipeline.humanFeedback,'PARTIALLY_USEFUL');assert.equal(oss.visionCalls,1);assert.equal((await db('o_v04AssetIntegrity')).length,6);
  assert.deepEqual(await truth(),before);assert.deepEqual(await db('o_v04MultiViewExperiment'),rows);assert.equal(c.SIDE.generationGuard.version,'generation.structural-guard.1');
  await assert.rejects(db('o_v04AssetIntegrity').update({createdAt:0}),/IMMUTABLE/);await assert.rejects(mv.fastMultiViewQuality(cmd,99),e=>e.code==='PILOT_FORBIDDEN');
 });
@@ -2674,12 +2676,12 @@ test('QA034 real SQLite Fast zero model/truth writes, explicit Vision reservatio
 test('QA034 Vision timeout/malformed/low confidence fail closed without regeneration or adoption',async t=>{
  const {mv,cmd,oss,truth,db}=await qaFixture(t),before=await truth();oss.visionModel='fake:vision';
  for(const mode of ['timeout','malformed','low']){
-  const fast=await mv.fastMultiViewQuality(cmd,7);oss.visionFailure=mode==='timeout'?Object.assign(Error('secret not logged'),{name:'TimeoutError'}):null;
+  const fast=await mv.fastMultiViewQuality(cmd,7);await mv.preflightMultiViewVision({...cmd,fastReportId:fast.id,confirmExternalInspection:true},7);oss.visionFailure=mode==='timeout'?Object.assign(Error('secret not logged'),{name:'TimeoutError'}):null;
   const pass={reviewed:true,identity:'PASS',view:'PASS',contamination:'PASS',issues:[],confidence:'LOW'};oss.visionResult=mode==='malformed'?{invalid:true}:{SIDE:pass,BACK:pass,CROSS_VIEW:pass};
   const r=await mv.visionMultiViewQuality({...cmd,fastReportId:fast.id,confirmExternalInspection:true},7);assert.equal(r.pipeline.decisions.BACK,'HUMAN_REVIEW');assert.equal(r.automaticAcceptance,false);assert.equal(r.pipeline.retryPolicy.automaticExecutionEnabled,false);
   if(mode!=='low')assert.equal(r.pipeline.visionEscalation,'FAILED');
  }
- assert.deepEqual(await truth(),before);assert.equal(oss.visionCalls,3);assert.equal((await db('o_v04AssetIntegrity')).length,9);
+ assert.deepEqual(await truth(),before);assert.equal(oss.visionCalls,3);assert.equal((await db('o_v04AssetIntegrity')).length,11);
 });
 
 test('QA034 explicit escalation denies clear Fast verdict and changed artifact before any provider call',async t=>{
@@ -2690,4 +2692,33 @@ test('QA034 explicit escalation denies clear Fast verdict and changed artifact b
  fs.writeFileSync(path.join(oss.testDir,'v04-multiview',String(cmd.projectId),cmd.experimentId,execution.BACK.artifact.artifactId+'.png'),'broken');
  await assert.rejects(mv.visionMultiViewQuality({...cmd,fastReportId:fast.id,confirmExternalInspection:true},7),e=>e.code==='INTEGRITY_INPUT_STALE');assert.equal(oss.modelCalls.length,0);
  const bad=await mv.fastMultiViewQuality(cmd,7);assert.equal(bad.pipeline.fast.BACK.status,'CLEAR_GLOBAL_DEFECT');assert.equal(bad.pipeline.decisions.BACK,'REGENERATE');assert.equal(bad.pipeline.retryPolicy.automaticExecutionEnabled,false);
+});
+
+test('QA034H1 staged native/JSON probes fail closed, classify stage timeout and never silently retry',async()=>{
+ const m=loadSource(path.join(root,'src/v04/visionCapability.ts'),null),images=[{view:'MAIN',bytes:Buffer.from('x'),mimeType:'image/jpeg'},{view:'SIDE',bytes:Buffer.from('x'),mimeType:'image/jpeg'},{view:'BACK',bytes:Buffer.from('x'),mimeType:'image/jpeg'}];let calls=[];
+ const session={invoke:async i=>{calls.push(i);return {text:i.messages[0].content[0].text.includes('subjectCount')?JSON.stringify({subjectCount:1,confidence:'HIGH'}):i.messages[0].content[0].text.includes('sameSubject')?JSON.stringify({sameSubject:true,obviousStructuralAnomaly:false,uncertain:false}):'1'};},invokeObject:async i=>{calls.push(i);return {object:i.messages[0].content[0].text.includes('sameSubject')?{sameSubject:true,obviousStructuralAnomaly:false,uncertain:false}:{subjectCount:1,confidence:'HIGH'}};}};
+ const native=await m.probeVisionCapability(session,images);assert.equal(native.state,'INTEGRITY_VISION_READY');assert.equal(calls.length,3);assert.ok(calls.every(c=>c.maxRetries===0));assert.equal(calls[0].messages[0].content.filter(c=>c.type==='image').length,1);assert.equal(calls[2].messages[0].content.filter(c=>c.type==='image').length,3);
+ calls=[];assert.equal((await m.probeVisionCapability(session,images,'JSON_TEXT')).state,'INTEGRITY_VISION_READY');assert.equal(calls.length,3);
+ session.invokeObject=async()=>{throw Object.assign(Error('response_format schema unsupported'),{name:'UnsupportedFunctionalityError'});};assert.equal((await m.probeVisionCapability(session,images)).errorCode,'VISION_STRUCTURED_OUTPUT_UNSUPPORTED');
+ session.invoke=async()=>{throw Object.assign(Error('aborted'),{name:'TimeoutError'});};const timeout=await m.probeVisionCapability(session,images);assert.equal(timeout.errorCode,'VISION_SINGLE_IMAGE_TIMEOUT');assert.equal(timeout.apiCallCount,1);
+ assert.equal(m.visionError(Object.assign(Error(),{name:'TimeoutError'}),'multi'),'VISION_MULTI_IMAGE_TIMEOUT');assert.throws(()=>m.strictVisionJson('some prose {"subjectCount":1}'));assert.throws(()=>m.strictVisionJson('```json\n{}\n```'));
+});
+
+test('QA034H1 derivatives are bounded JPEG and preserve original bytes; config cache invalidates',async t=>{
+ const {db,mv,cmd,png,oss}=await qaFixture(t),m=loadSource(path.join(root,'src/v04/visionCapability.ts'),db),crypto=require('crypto'),before=crypto.createHash('sha256').update(png).digest('hex'),images=await m.inspectionDerivatives([{view:'MAIN',bytes:png,mimeType:'image/png'}]);assert.ok(images[0].audit.width<=512&&images[0].audit.height<=512);assert.equal(images[0].mimeType,'image/jpeg');assert.equal(crypto.createHash('sha256').update(png).digest('hex'),before);
+ const fast=await mv.fastMultiViewQuality(cmd,7),body={...cmd,fastReportId:fast.id,confirmExternalInspection:true};await assert.rejects(mv.visionMultiViewQuality(body,7),e=>e.code==='INTEGRITY_VISION_PREFLIGHT_REQUIRED');assert.equal(oss.modelCalls.length,0);
+ const a=await mv.preflightMultiViewVision(body,7);assert.equal(a.pipeline.capability.state,'INTEGRITY_VISION_READY');assert.equal(oss.probeCalls,3);assert.equal((await mv.preflightMultiViewVision(body,7)).id,a.id);assert.equal(oss.probeCalls,3);
+ await db('o_vendorConfig').where({id:'fake'}).update({inputValues:'{"endpoint":"changed"}'});const b=await mv.preflightMultiViewVision(body,7);assert.notEqual(b.id,a.id);assert.notEqual(b.pipeline.configSignature,a.pipeline.configSignature);assert.equal(oss.probeCalls,6);
+});
+
+test('QA034H2 local six-question compiler is conservative for clean/duplicate/local defect/occlusion/fantasy/vehicle',async()=>{
+ const local=loadSource(path.join(root,'src/v04/localFastVision.ts'),null),fast=loadSource(path.join(root,'src/v04/fastIntegrityGate.ts'),null),base={checks:Object.fromEntries(fast.requiredVisualChecks.map(k=>[k,'PASS'])),confidence:'HIGH',localizedDefects:[]};
+ const check=async dto=>(await fast.fastIntegrityGate([],{}, {state:'AVAILABLE',inspect:async()=>local.compileLocalObservation(dto,'BACK')})).status;
+ assert.equal(await check(base),'PASS');assert.equal(await check({...base,checks:{...base.checks,SUBJECT_COUNT:'FAIL'}}),'CLEAR_GLOBAL_DEFECT');assert.equal(await check({...base,checks:{...base.checks,VIEW:'FAIL'}}),'CLEAR_GLOBAL_DEFECT');assert.equal(await check({...base,checks:{...base.checks,CONTAMINATION:'FAIL'}}),'CLEAR_GLOBAL_DEFECT');
+ assert.equal(await check({...base,checks:{...base.checks,PART_STRUCTURE:'FAIL'},localizedDefects:[{check:'PART_STRUCTURE',region:'hand',description:'obvious localized malformed hand'}]}),'CLEAR_LOCAL_DEFECT');
+ assert.equal(await check({...base,confidence:'MEDIUM'}),'SUSPECT');assert.equal(await check({...base,checks:{...base.checks,PART_STRUCTURE:'UNKNOWN'}}),'SUSPECT');assert.equal(await check({...base,checks:{SUBJECT_COUNT:'PASS'}}),'SUSPECT');assert.equal(local.localInspectorConfiguration(),null,'test runtime is not silently AVAILABLE');
+ // Known fantasy appendages and occluded limbs are policy evidence, not fabricated observations.
+ assert.equal(await check(base),'PASS');assert.equal(await check({...base,checks:{...base.checks,PART_STRUCTURE:'FAIL'}}),'CLEAR_GLOBAL_DEFECT');
+ assert.equal(await check({checks:base.checks,confidence:'high',LocalizedDefects:[]}),'PASS');
+ assert.throws(()=>local.compileLocalObservation({...base,localizedDefects:[{check:'ATTACHMENT',region:'foot',description:'detached'}]},'BACK'),/CONTRADICTORY/);
 });
