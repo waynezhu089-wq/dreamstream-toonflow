@@ -29,7 +29,7 @@ Source evidence includes project Creative units, active asset revisions/relation
 
 ## Engineering verification
 
-- Backend focused: `node --test --test-name-pattern=Director tests/v04-pilot.test.cjs`: 4 matching tests passed (other tests filtered).
+- Backend focused: `node --test --test-name-pattern=DIR031B tests/v04-pilot.test.cjs`: 4 matching tests passed (other tests filtered).
 - Backend full: `node --test tests/*.test.cjs`: 386 total; 380 passed, 6 configured optional live benchmarks skipped, 0 failed.
 - Backend `npx tsc --noEmit`: passed.
 - Backend `npm run build`: passed.
