@@ -224,7 +224,7 @@ export async function recordMultiViewIntegrity(input:unknown,actor:number){
 
 import {inspectionDerivatives,probeVisionCapability} from './visionCapability';
 import {fastAuthority} from './integrityDecisionEngine';
-import {integrityVisionConfiguration} from './visionIntegrityAdapter';
+import {integrityVisionConfiguration,minimalEscalationBrief} from './visionIntegrityAdapter';
 import {createLocalFastVisionAdapter} from './localFastVision';
 const PIPELINE_VERSION='integrity.pipeline.1';
 const emptyInspection=()=>({reviewed:false,identity:'UNKNOWN',view:'UNKNOWN',contamination:'UNKNOWN',issues:[]});
@@ -247,9 +247,9 @@ async function captureQuality(trx:Knex.Transaction,s:z.infer<typeof command>,act
  for(const side of ['SIDE','BACK'])metadata[side].push({name:'SOURCE_FRESHNESS',pass:current},{name:'SUCCEEDED_SINGLE_OUTPUT',pass:e[side]?.status==='SUCCEEDED'&&!!e[side]?.artifact},{name:'TARGET_VIEW_METADATA',pass:c[side]?.brief?.targetView===(side==='SIDE'?'SIDE_ISH':'BACK_ISH')});
  return {r,c,e,context,images,metadata,dimensions,binding:qualityBinding(c,e)};
 }
-function qualityBrief(x:Awaited<ReturnType<typeof captureQuality>>,fast:any){
- const d=x.context.confirmedVisualSpec?.details??{};
- return {version:PIPELINE_VERSION,profile:x.context.integrityProfile,profileResolution:x.context.profileResolution,targetViews:['SIDE','BACK'],identityAuthority:x.context.identityAuthority,preserveFacts:x.context.mustPreserve,confirmedPhysicalFacts:Object.fromEntries(['speciesOrForm','bodyStructure','anatomy','vehicleType','mainStructure'].filter(k=>typeof d[k]==='string').map(k=>[k,d[k]])),fictionalOverride:'Confirmed fictional identity overrides ordinary priors; not visible is not missing.',intentionalAsymmetry:x.context.allowedAsymmetry,questions:requiredVisualChecks,fastEvidence:fast,artifactHashes:x.binding.artifacts};
+function qualityBrief(x:Awaited<ReturnType<typeof captureQuality>>,fast:any,target:'SIDE'|'BACK'|'ALL'){
+ if(target!=='ALL')return minimalEscalationBrief(x.context,fast,target);
+ return {version:'integrity.fine-brief.1',assetProfile:x.context.integrityProfile,MAIN:'identity reference',target:'ALL',targets:{SIDE:minimalEscalationBrief(x.context,fast,'SIDE'),BACK:minimalEscalationBrief(x.context,fast,'BACK')}};
 }
 async function appendQuality(trx:Knex.Transaction,s:z.infer<typeof command>,actor:number,x:Awaited<ReturnType<typeof captureQuality>>,pipeline:any,reports:any){
  const id=randomUUID(),createdAt=Date.now(),result={inspector:'SHADOW_PIPELINE',context:x.context,reports,decisions:pipeline.decisions,repairProposals:makeRepairProposals(reports,x.binding,x.c.identityLock),automaticAcceptance:false,pipeline};
@@ -273,7 +273,7 @@ export async function visionMultiViewQuality(input:unknown,actor:number){
   parent.fast=Object.fromEntries(['SIDE','BACK'].map(view=>[view,fastAuthority(parent.fast[view],x.context.integrityProfile,view,human.find(r=>r.reports?.[view]?.reviewed)?.decisions[view])]));
   const targets=s.targetView==='ALL'?['SIDE','BACK']:[s.targetView];
   if(!s.forceShadow&&!targets.some(view=>parent.fast[view].escalationRequired))deny('INTEGRITY_ESCALATION_NOT_NEEDED','已有验证范围内的结论；Professional 可显式请求影子复核');
-  const inspectionKey=createHash('sha256').update(JSON.stringify({binding:x.binding,targetView:s.targetView,configSignature:prepared.signature,briefVersion:'integrity.shadow-brief.2'})).digest('hex');
+  const inspectionKey=createHash('sha256').update(JSON.stringify({binding:x.binding,targetView:s.targetView,configSignature:prepared.signature,briefVersion:'integrity.shadow-brief.3'})).digest('hex');
   if(x.images.length!==3||Object.values(x.metadata).some(checks=>checks.some(c=>!c.pass)))deny('INTEGRITY_INPUT_STALE','图像或来源无法可靠核对，不发送 API');
   const replay=await trx(INTEGRITY_TABLE).where(cmd).whereRaw("json_extract(reportJson,'$.pipeline.inspectionKey') = ? AND json_extract(reportJson,'$.pipeline.kind') = 'VISION'",[inspectionKey]).orderByRaw("CASE WHEN json_extract(reportJson,'$.pipeline.phase')='COMPLETED' THEN 0 ELSE 1 END").orderBy('createdAt','desc').orderBy('id','desc').first();
   if(replay)return {replay:{id:replay.id,...JSON.parse(replay.reportJson)},x,parent,capability:null};
@@ -282,7 +282,7 @@ export async function visionMultiViewQuality(input:unknown,actor:number){
   if(capability?.state!=='INTEGRITY_VISION_READY')deny('INTEGRITY_VISION_PREFLIGHT_REQUIRED','请先完成该视觉配置的能力预检；不会直接发送完整检查');
   const started=await appendQuality(trx,cmd,actor,x,{...parent,kind:'VISION',phase:'STARTED',inspectionKey,forceShadow:s.forceShadow,targetView:s.targetView,configSignature:prepared.signature,fastReportId:s.fastReportId,visionEscalation:'STARTED',decisions:{SIDE:'HUMAN_REVIEW',BACK:'HUMAN_REVIEW',CROSS_VIEW:'HUMAN_REVIEW'},shadowMode:true},{SIDE:emptyInspection(),BACK:emptyInspection(),CROSS_VIEW:emptyInspection()});return {x,parent,started,capability,inspectionKey};
  });if(admitted.replay)return admitted.replay;
- const brief=qualityBrief(admitted.x,admitted.parent.fast),vision=await inspectIntegrityVision(s.projectId,brief,admitted.x.images,{prepared,transportMode:admitted.capability.transportMode,targetView:s.targetView}),reports={SIDE:emptyInspection(),BACK:emptyInspection(),CROSS_VIEW:emptyInspection(),...vision.reports};
+ const brief=qualityBrief(admitted.x,admitted.parent.fast,s.targetView),vision=await inspectIntegrityVision(s.projectId,brief,admitted.x.images,{prepared,transportMode:admitted.capability.transportMode,targetView:s.targetView}),reports={SIDE:emptyInspection(),BACK:emptyInspection(),CROSS_VIEW:emptyInspection(),...vision.reports};
  const decisions:any={},authority:any={};for(const view of ['SIDE','BACK']){const d=integrityDecision(admitted.parent.fast[view],vision.reports?.[view]?{confidence:vision.reports[view].confidence,report:vision.reports[view]}:null);decisions[view]=d.result;authority[view]=d.decisionAuthority;}decisions.CROSS_VIEW=vision.reports?.CROSS_VIEW?.confidence==='HIGH'?repairDecision(vision.reports.CROSS_VIEW):'HUMAN_REVIEW';authority.CROSS_VIEW=vision.reports?'VISION_API':'HUMAN';
  return q.transaction(async trx=>{await checked(trx,cmd,actor);const now=await captureQuality(trx,cmd,actor),current=integrityFresh(now.binding,admitted.x.binding)&&Object.values(now.metadata).every(checks=>checks.every(c=>c.pass));if(!current)for(const view of Object.keys(decisions))decisions[view]='HUMAN_REVIEW';
   return appendQuality(trx,cmd,actor,admitted.x,{...admitted.parent,kind:'VISION',phase:'COMPLETED',inspectionKey:admitted.inspectionKey,forceShadow:s.forceShadow,targetView:s.targetView,configSignature:prepared.signature,fastReportId:s.fastReportId,visionEscalation:vision.status==='SUCCEEDED'?'USED':'FAILED',visionAudit:vision.audit,inspectionBrief:brief,decisions,decisionAuthority:authority,freshness:current?'CURRENT':'STALE',metrics:{...admitted.parent.metrics,apiEscalationCount:1,apiEscalationRate:1},guardFeedback:{version:'generation.guard-feedback.1',proposalOnly:true,promotionAuthorized:false,issueIds:Object.values(reports).flatMap(r=>r.issues.map((i:any)=>i.id))},shadowMode:true},reports);});
