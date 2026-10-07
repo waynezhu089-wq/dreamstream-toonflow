@@ -147,7 +147,8 @@ export async function enqueueDraftImage(input: unknown) {
 }
 
 function publicJob(job: any) {
-  return { id: job.id, projectId: job.projectId, scriptId: job.scriptId, canonicalKey: job.canonicalKey,
+  const s=JSON.parse(job.inputSnapshotJson);
+  return {packageId:s.packageId??null,packageStage:s.packageStage??null, id: job.id, projectId: job.projectId, scriptId: job.scriptId, canonicalKey: job.canonicalKey,
     sourceAssetRevision: job.sourceAssetRevision, draftHash: job.draftHash, generationIntent: job.generationIntent,
     executorProfile: job.executorProfile, executionPurpose: job.executionPurpose ?? (job.executorProfile === Z_IMAGE_TURBO_SUBJECT_DRAFT_V1 ? "SUBJECT_MAIN_PREVIEW" : null),
     workflowVersion: job.workflowVersion, status: job.status,

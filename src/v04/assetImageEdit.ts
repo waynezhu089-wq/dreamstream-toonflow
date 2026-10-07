@@ -35,7 +35,7 @@ async function capture(trx:Knex.Transaction,scope:{projectId:number;scriptId:num
  const asset=await trx('o_v04Asset').where({projectId:scope.projectId,canonicalKey:intent.canonicalKey,status:'ACTIVE'}).first();
  if(!asset)throw new PilotError('PILOT_TARGET_INVALID','请先选择有效素材',404);
  if(asset.sourcePolicy!=='AI_ALLOWED'||['BRAND','UI'].includes(asset.category)||['BRAND_MARK','UI_REFERENCE'].includes(asset.assetKind))throw new PilotError('PILOT_REAL_REFERENCE_ONLY','真实品牌和界面不能通过 AI 重绘',409);
- const jobs=await trx('o_v04StudioAssetDraftJob').where({...scope,canonicalKey:asset.canonicalKey,sourceAssetRevision:asset.revision,status:'SUCCEEDED'}).orderBy('createdAt','desc').limit(100);
+ const jobs=await trx('o_v04StudioAssetDraftJob').where({...scope,canonicalKey:asset.canonicalKey,sourceAssetRevision:asset.revision,status:'SUCCEEDED'}).whereRaw("COALESCE(json_extract(inputSnapshotJson, '$.packageStage'), '') != 'DRAFT_KREA'").orderBy('createdAt','desc').limit(100);
  const rejected=await trx('o_v04Decision').where({projectId:scope.projectId,scriptId:scope.scriptId,category:'ASSET_IMAGE_EDIT',status:'REJECTED'}).limit(300);
  const rejectIds=new Set(rejected.map((r:any)=>r.subjectKey));
  const eligible=jobs.filter((j:any)=>!rejectIds.has(j.id));
@@ -69,6 +69,13 @@ export async function enqueueAssetImageEdit(scope:{projectId:number;scriptId:num
  const intent=mainPipeline?{...parsed,...(parsed.editMode!=='DERIVE_VIEW'?{targetRole:'EDIT_CANDIDATE' as const}:{}),sourceFocus:'BODY' as const}:parsed;
  if(mainPipeline&&intent.editMode==='DERIVE_VIEW'&&(intent.sourceAttachmentId||parentCandidateId))throw new PilotError('PILOT_MAIN_REQUIRED','派生视角必须使用当前主图',409);
  const snapshot=await q.transaction(trx=>capture(trx,scope,intent,parentCandidateId,mainPipeline));
+
+ if(mainPipeline){
+  const requestId=userMessageId;
+  const result=await q.transaction(async trx=>{const context=await captureAutoAssetReadContext(trx,scope),asset=context.assets.find(a=>a.canonicalKey===intent.canonicalKey)!;const spec=preparedSpec(context,asset,[])??compileVisualSemantic({...asset,identityAnchors:JSON.parse(asset.identityAnchors),mustPreserve:JSON.parse(asset.mustPreserve),forbiddenChanges:JSON.parse(asset.forbiddenChanges)},{});return reconcileAutoAssetsInTransaction(trx,{...scope,items:[{canonicalKey:asset.canonicalKey,sourceAssetRevision:asset.revision,spec}],canonicalKeys:[intent.canonicalKey],...(intent.editMode==='DERIVE_VIEW'?{}:{regenerateKey:intent.canonicalKey,requestId}),userMessageId,...(intent.editMode==='DERIVE_VIEW'?{}:{assetIntentPatch:intent.editPrompt})},intent.editMode==='DERIVE_VIEW'?null:snapshot);});
+  const admitted=result.results.find((r:any)=>r.jobId);if(!admitted)throw new PilotError('PILOT_PACKAGE_NOT_ADMITTED','资产包未能进入准备，请检查导演与视觉规格',409);
+  wakeDraftWorker();return {jobId:admitted.jobId,status:admitted.status,canonicalKey:intent.canonicalKey,applied:false,packagePending:true};
+ }
  const profile=snapshot.routing.profile;
  const source=snapshot.sourceAttachmentId?await getAgentAttachmentBytes(scope.projectId,snapshot.sourceAttachmentId):await getDraftArtifact(scope.projectId,snapshot.sourceArtifactId!);
  const referenceHashes=await Promise.all(snapshot.referenceBindings.map(async r=>{const file=await getAgentAttachmentBytes(scope.projectId,r.attachmentId);if(bytesHash(file.bytes)!==r.sha256)throw new PilotError('PILOT_REFERENCE_INVALID','参考图片内容已变化',409);return r.sha256;}));
@@ -163,7 +170,7 @@ export async function produceAssetImageEdit(job:any,freshClaim:boolean){
  }finally{await settleJobTraces(job.id);}
 }
 export async function listAssetImageCandidates(input:unknown){const scope=scopeSchema.parse(input);return q.transaction(async trx=>{
- await assertScope(trx,scope);const rows=await trx('o_v04StudioAssetDraftJob').where(scope).where(function(){this.where({generationIntent:'ASSET_IMAGE_EDIT'}).orWhereRaw("json_extract(inputSnapshotJson, '$.autoVersion') IS NOT NULL");}).orderBy('createdAt','desc').limit(100);
+ await assertScope(trx,scope);const rows=await trx('o_v04StudioAssetDraftJob').where(scope).where(function(){this.where({generationIntent:'ASSET_IMAGE_EDIT'}).orWhereRaw("json_extract(inputSnapshotJson, '$.autoVersion') IS NOT NULL");}).whereRaw("COALESCE(json_extract(inputSnapshotJson, '$.packageStage'), '') != 'DRAFT_KREA'" ).orderBy('createdAt','desc').limit(100);
  const decisions=await trx('o_v04Decision').where({...scope,category:'ASSET_IMAGE_EDIT'}).orderBy('createdAt','desc').limit(300);
  const snapshots=rows.map((j:any)=>JSON.parse(j.inputSnapshotJson)),keys=[...new Set(rows.map((j:any)=>j.canonicalKey))];
  const assets=await trx('o_v04Asset').where({projectId:scope.projectId}).whereIn('canonicalKey',keys);
@@ -176,11 +183,11 @@ export async function listAssetImageCandidates(input:unknown){const scope=scopeS
  const autoContext=rows.some((j:any)=>JSON.parse(j.inputSnapshotJson).autoVersion)?await captureAutoAssetReadContext(trx,scope):undefined;
  return Promise.all(rows.map(async(j:any,i:number)=>{const s=snapshots[i],asset=assets.find((a:any)=>a.canonicalKey===j.canonicalKey),spec=specs.find((a:any)=>a.canonicalKey===j.canonicalKey);
   const current=s.autoVersion?await autoJobFresh(j,trx,autoContext):sourceIsCurrent(j,s,asset,spec,s.sourceAttachmentId?attachmentSources.find((p:any)=>p.id===s.sourceAttachmentId):sources.find((p:any)=>p.id===s.sourceJobId),refs,decisions.some((d:any)=>d.subjectKey===s.sourceJobId&&d.status==='REJECTED'),suitableBaseline(baselines,j.canonicalKey,s.pipelineVersion?'BODY':s.intent.targetRole==='FACE_HERO'?'FACE':s.intent.targetRole==='FULL_BODY_BACK'?'BACK':s.intent.sourceFocus));
-  return {id:j.id,assetName:asset?.name??'素材',canonicalKey:j.canonicalKey,sourceAssetRevision:j.sourceAssetRevision,userMessageId:s.userMessageId,parentCandidateId:s.parentCandidateId,sourceArtifactId:s.sourceArtifactId,targetRole:j.executionPurpose,automatic:!!s.autoVersion,generationIntent:j.generationIntent,startedAt:j.startedAt??null,completedAt:j.completedAt??null,updatedAt:j.updatedAt,status:j.status==='SUCCEEDED'&&!current?'STALE':j.status,outputs:JSON.parse(j.outputsJson),errorMessage:j.errorMessage,decision:decisions.find((d:any)=>d.subjectKey===j.id)?.status??null,createdAt:j.createdAt};}));
+  return {packageId:s.packageId??null,packageStage:s.packageStage??null,id:j.id,assetName:asset?.name??'素材',canonicalKey:j.canonicalKey,sourceAssetRevision:j.sourceAssetRevision,userMessageId:s.userMessageId,parentCandidateId:s.parentCandidateId,sourceArtifactId:s.sourceArtifactId,targetRole:j.executionPurpose,automatic:!!s.autoVersion,generationIntent:j.generationIntent,startedAt:j.startedAt??null,completedAt:j.completedAt??null,updatedAt:j.updatedAt,status:j.status==='SUCCEEDED'&&!current?'STALE':j.status,outputs:JSON.parse(j.outputsJson),errorMessage:j.errorMessage,decision:decisions.find((d:any)=>d.subjectKey===j.id)?.status??null,createdAt:j.createdAt};}));
 });}
 async function candidatePlan(trx:Knex.Transaction,data:z.infer<typeof jobRequest>){
  await assertScope(trx,data);const job=await trx('o_v04StudioAssetDraftJob').where({id:data.jobId,projectId:data.projectId,scriptId:data.scriptId,status:'SUCCEEDED'}).first();
- if(!job||!(JSON.parse(job.inputSnapshotJson).autoVersion?await autoJobFresh(job,trx):job.generationIntent==='ASSET_IMAGE_EDIT'&&await fresh(job,JSON.parse(job.inputSnapshotJson),trx)))throw new PilotError('PILOT_SOURCE_STALE','候选已过期，不能采用',409);
+ if(!job||JSON.parse(job.inputSnapshotJson).packageStage==='DRAFT_KREA'||!(JSON.parse(job.inputSnapshotJson).autoVersion?await autoJobFresh(job,trx):job.generationIntent==='ASSET_IMAGE_EDIT'&&await fresh(job,JSON.parse(job.inputSnapshotJson),trx)))throw new PilotError('PILOT_SOURCE_STALE','候选已过期，不能采用',409);
  const decisions=await trx('o_v04Decision').where({projectId:data.projectId,scriptId:data.scriptId,category:'ASSET_IMAGE_EDIT',subjectKey:job.id}).orderBy('createdAt','desc');
  if(decisions[0]?.status==='REJECTED')throw new PilotError('PILOT_CANDIDATE_REJECTED','此候选已放弃',409);
  return {job,previewHash:sha({id:job.id,draftHash:job.draftHash,outputs:job.outputsJson,decision:decisions[0]?.id??null})};

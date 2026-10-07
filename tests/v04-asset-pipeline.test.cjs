@@ -107,6 +107,14 @@ async function fixture(t) {
 }
 const asset = (name='Dreamer', category='CHAR', sourcePolicy='AI_ALLOWED') => ({ name, category, description:'calm', identityAnchors:['left eyebrow scar'], mustPreserve:['scar'], forbiddenChanges:['redraw brand text'], ownerKey:null, variantOf:null, sourcePolicy, prompt:'' });
 
+async function completePackageFixtureJob(f,job){
+ const id=require('crypto').randomUUID(),bytes=await require('sharp')({create:{width:80,height:120,channels:3,background:'#ccddee'}}).png().toBuffer();
+ const target=path.join(f.oss.testDir,'v04-draft-artifacts',String(f.scope.projectId),id+'.png');fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,bytes);
+ const role=job.executionPurpose==='ASSET_MAIN_PREVIEW'||job.executionPurpose==='SUBJECT_MAIN_PREVIEW'?'MAIN_PREVIEW':job.executionPurpose;
+ await f.db('o_v04StudioDraftArtifact').insert({artifactId:id,jobId:job.id,projectId:f.scope.projectId,role,mimeType:'image/png',extension:'png',width:80,height:120,createdAt:Date.now()});
+ await f.db('o_v04StudioAssetDraftJob').where({id:job.id}).update({status:'SUCCEEDED',outputsJson:JSON.stringify([{artifactId:id,role,mimeType:'image/png',width:80,height:120,quality:{status:'PASS_COARSE'}}]),completedAt:Date.now()});return id;
+}
+
 async function mvFixture(t){
  const f=await fixture(t),{db,oss,cache,service}=f,load=n=>loadSource(path.join(root,'src/v04/'+n+'.ts'),db,cache,oss);
  await load('directorAssetABSchema').initializeDirectorABSchema(db);await load('multiViewSchema').initializeMultiViewSchema(db);await load('integritySchema').initializeIntegritySchema(db);
@@ -140,6 +148,33 @@ async function attach(f,key='CHAR-003'){
  const id=require('crypto').randomUUID(),bytes=await require('sharp')({create:{width:128,height:128,channels:3,background:'#607080'}}).png().toBuffer(),target=path.join(f.oss.testDir,'v04-conversation',String(f.scope.projectId),id+'.png');fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,bytes);
  await f.db('o_v04AgentAttachment').insert({id,...f.scope,messageId:require('crypto').randomUUID(),contextJson:'{}',filePath:`/v04-conversation/${f.scope.projectId}/${id}.png`,originalName:'test.png',mimeType:'image/png',bytes:bytes.length,sha256:require('crypto').createHash('sha256').update(bytes).digest('hex'),purpose:'CONVERSATIONAL_REFERENCE',createdAt:Date.now()});return {...f.scope,canonicalKey:key,attachmentId:id,role:'GENERAL'};
 }
+
+test('034A package admission pins Krea draft -> Klein main -> same-package views; adoption preserves freshness',async t=>{
+ const f=await abFixture(t),auto=f.load('autoAsset'),scope={...f.scope,canonicalKeys:['CHAR-003']};
+ await auto.reconcileAutoAssets(scope);let rows=await f.db('o_v04StudioAssetDraftJob').where(f.scope).orderBy('createdAt','desc');
+ const rootJob=rows.find(j=>JSON.parse(j.inputSnapshotJson).packageStage==='DRAFT_KREA');assert.equal(rootJob.executorProfile,'KREA2_T2I_ASSET_V1');
+ const draftId=await completePackageFixtureJob(f,rootJob);await auto.reconcileAutoAssets(scope);rows=await f.db('o_v04StudioAssetDraftJob').where(f.scope);
+ const main=rows.find(j=>JSON.parse(j.inputSnapshotJson).packageStage==='CANONICAL_MAIN_KLEIN');assert.equal(main.executorProfile,'KLEIN_ASSET_VIEW_V1');assert.equal(JSON.parse(main.inputSnapshotJson).sourceArtifactId,draftId);
+ assert.equal(rows.filter(j=>JSON.parse(j.inputSnapshotJson).packageStage==='MULTIVIEW_KLEIN').length,0);
+ const mainId=await completePackageFixtureJob(f,main);await auto.reconcileAutoAssets(scope);rows=await f.db('o_v04StudioAssetDraftJob').where(f.scope);
+ const views=rows.filter(j=>JSON.parse(j.inputSnapshotJson).packageStage==='MULTIVIEW_KLEIN');assert.equal(views.length,2);for(const j of views){assert.equal(JSON.parse(j.inputSnapshotJson).sourceArtifactId,mainId);assert.equal(JSON.parse(j.inputSnapshotJson).packageId,JSON.parse(main.inputSnapshotJson).packageId);await completePackageFixtureJob(f,j);}
+ const edit=f.load('assetImageEdit');assert.equal((await edit.listAssetImageCandidates(f.scope)).some(j=>j.id===rootJob.id),false);await assert.rejects(edit.previewAssetImageCandidate({...f.scope,jobId:rootJob.id}),e=>e.code==='PILOT_SOURCE_STALE');
+ const p=await edit.previewAssetImageCandidate({...f.scope,jobId:main.id});await edit.acceptAssetImageCandidate({...f.scope,jobId:main.id,previewHash:p.previewHash});
+ for(const j of [main,...views])assert.equal(await auto.autoJobFresh(j),true,'adopting same package must not fence siblings');
+ const beforeDerive=(await f.db('o_v04StudioAssetDraftJob')).length;const derived=await edit.enqueueAssetImageEdit(f.scope,{canonicalKey:'CHAR-003',editMode:'DERIVE_VIEW',targetRole:'FULL_BODY_BACK',editPrompt:'Prepare the complete view package'},require('crypto').randomUUID(),undefined,true);assert.equal(derived.packagePending,true);assert.equal((await f.db('o_v04StudioAssetDraftJob')).length,beforeDerive,'view request reuses current package without changing intent');
+ const beforeReconcile=(await f.db('o_v04StudioAssetDraftJob')).length;await auto.reconcileAutoAssets(scope);assert.equal((await f.db('o_v04StudioAssetDraftJob')).length,beforeReconcile,'Director reference continuity must not duplicate package views');
+ const coverage=await auto.autoAssetCoverage(f.scope);assert.equal(coverage.items.find(i=>i.canonicalKey==='CHAR-003').firstDraftStatus,'READY');
+ const requestId=require('crypto').randomUUID();await auto.reconcileAutoAssets({...scope,regenerateKey:'CHAR-003',requestId,assetIntentPatch:'Preserve identity; refine fin contours'});const count=(await f.db('o_v04StudioAssetDraftJob')).length;await auto.reconcileAutoAssets({...scope,regenerateKey:'CHAR-003',requestId,assetIntentPatch:'Preserve identity; refine fin contours'});assert.equal((await f.db('o_v04StudioAssetDraftJob')).length,count);
+ for(const j of [main,...views]){assert.equal((await f.db('o_v04StudioAssetDraftJob').where({id:j.id}).first()).status,'STALE');assert.ok(await f.db('o_v04StudioDraftArtifact').where({jobId:j.id}).first());}
+});
+
+test('034A upstream context ignores reference-adoption Director IDs but reacts to semantic/script/spec/compiler evidence',()=>{
+ const load=n=>loadSource(path.join(root,'src/v04/'+n+'.ts'),null,new Map(),null),compiler=load('assetGenerationContext');
+ const a={canonicalKey:'CHAR-001',revision:1,assetKind:'HUMAN_CHARACTER',sourcePolicy:'AI_ALLOWED'},d={current:{id:'d1'},intent:{globalVisualDNA:{artStyle:'cinematic'},narrativeVisualRoles:[]}},creative={treatment:'Dream story',script:'Same boy'},spec={mustPreserve:['barefoot']};
+ const one=compiler.compileAssetGenerationContext(a,spec,creative,d,'');assert.equal(compiler.compileAssetGenerationContext(a,spec,creative,{...d,current:{id:'inherited'}},'').upstreamHash,one.upstreamHash);
+ for(const other of [compiler.compileAssetGenerationContext(a,spec,{...creative,script:'changed'},d,''),compiler.compileAssetGenerationContext(a,{mustPreserve:['boots']},creative,d,''),compiler.compileAssetGenerationContext(a,spec,creative,{...d,intent:{...d.intent,globalVisualDNA:{artStyle:'changed'}}},'')])assert.notEqual(other.upstreamHash,one.upstreamHash);
+ const prompt=load('assetPipelinePrompt').compilePipelineAssetPrompt(a,{...spec,identityAnchors:[],forbiddenChanges:[]},'SUBJECT_MAIN_PREVIEW',null,one);assert.match(prompt.renderedPrompt,/Director Visual DNA.*Narrative context.*Asset narrative role/s);assert.match(prompt.renderedPrompt,/Translate the supplied draft/);assert.match(prompt.renderedPrompt,/no extra people.*UI residue/s);
+});
 test('033A MAIN-only reference confirmation appends Director continuity, immutable history and replay',async t=>{
  const f=await abFixture(t),d=f.load('directorBible'),old=await f.db('o_v04DirectorVersion').first(),projection=await f.db('o_v04DirectorProjection').first(),input=await attach(f),b=f.load('assetImageBaseline');
  const p=await b.previewImageBaseline(input);await b.confirmImageBaseline({...input,previewHash:p.previewHash});
