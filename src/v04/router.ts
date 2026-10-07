@@ -47,12 +47,14 @@ router.use(async (req, res, next) => {
 
 function endpoint(route: string, run: (body: any, req: express.Request) => Promise<unknown>) {
   router.post(route, async (req, res) => {
-    try { res.json({ code: 200, data: await run(req.body, req), message: "成功" }); }
+    try { const data:any=await run(req.body,req);if(route==='/studio/assets/generate-all')console.info('[V04 AssetPreparation][Result]',{at:Date.now(),requestId:req.body?.requestId,status:data?.status,batchId:data?.batchId});res.json({ code: 200, data, message: "成功" }); }
     catch (e: any) {
       const status = e instanceof ZodError ? 400 : e instanceof PilotError ? e.status : e instanceof DraftComfyError ? 409 : 500;
       const code = e instanceof ZodError ? "PILOT_INPUT_INVALID" : e instanceof PilotError || e instanceof DraftComfyError ? e.code : "PILOT_FAILED";
       if (status >= 500 && !(e instanceof PilotError)) console.error("[V04 Pilot][InternalFailure]", { code, errorName: e?.name ?? "Error" });
-      res.status(status).json({ code, message: e instanceof PilotError || e instanceof DraftComfyError ? e.message : e instanceof ZodError ? "请求参数无效" : "操作失败，请查看后端日志",
+      const preparationRequestId=route==='/studio/assets/generate-all'&&typeof req.body?.requestId==='string'&&/^[a-f0-9-]{36}$/i.test(req.body.requestId)?req.body.requestId:null;
+      if(route==='/studio/assets/generate-all')console.warn('[V04 AssetPreparation][Rejected]',{requestId:preparationRequestId,status,code});
+      res.status(status).json({ code,...(preparationRequestId?{requestId:preparationRequestId}:{}), message: e instanceof PilotError || e instanceof DraftComfyError ? e.message : e instanceof ZodError ? "请求参数无效" : "操作失败，请查看后端日志",
         ...(e instanceof StudioTurnFailure ? { userMessageId: e.userMessageId, terminal: e.terminal,
           retryAllowed: e.retryAllowed, checkStatusUseful: e.checkStatusUseful, correlationId: e.correlationId } : {}) });
     }

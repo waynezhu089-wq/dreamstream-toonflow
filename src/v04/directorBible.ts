@@ -179,13 +179,19 @@ async function latest(trx: Knex.Transaction, projectId: number) {
     .first();
 }
 // Read-only seam: experiment capture shares its caller's SQLite snapshot.
+function sourceChangeReason(current:any,captured:any){
+ const before=JSON.parse(current.evidenceJson)?.truthConstraints;
+ const names:Record<string,string>={creativeUnits:'影片创意/剧本',assets:'素材定义',confirmedSpecs:'已确认视觉规格',references:'素材参考',storyboards:'分镜'};
+ const changed=before?Object.keys(names).filter(k=>directorCanonical(before[k]??null)!==directorCanonical(captured.source[k]??null)).map(k=>names[k]):[];
+ return changed.length?changed.join('、'):'影片创意或素材来源';
+}
 export async function captureCurrentDirectorForExperiment(trx: Knex.Transaction, scope: Scope) {
   const current = await latest(trx, scope.projectId);
   if (!current || current.scriptId !== scope.scriptId || current.status !== "CURRENT")
     deny("DIRECTOR_AB_NOT_READY", "需要当前制作单元已确认的导演版本");
   const captured = await capture(trx, scope);
   if (current.sourceHash !== captured.sourceHash)
-    deny("DIRECTOR_AB_NOT_READY", "导演来源已变化，请先审阅导演版本");
+    deny("DIRECTOR_AB_NOT_READY", `导演来源已变化（${sourceChangeReason(current,captured)}），请先审阅并重新确认导演版本`);
   return { current, intent: directorIntentSchema.parse(content(current)) };
 }
 
@@ -693,7 +699,7 @@ export async function readDirector(input: unknown, actor: number) {
         accepted.unitProjection = { emotionalArc: [], shotDramaticIntents: [] };
       accepted.staleReason =
         accepted.status === "STALE"
-          ? "影片创意或素材来源已变化，需要重新确认"
+          ? `${sourceChangeReason(current,original)}已变化，需要重新确认`
           : null;
     }
     const obsolete = await confirmedDirectorAncestors(trx, scope);

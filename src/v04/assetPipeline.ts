@@ -54,15 +54,17 @@ export async function generateAllAssets(input:unknown,actor:number){
    const initial=await q('o_v04Decision').where({...scope,category,status:'INITIAL_STARTED'}).first();
    if(initial)return prepareInitialProject(scope,actor);
  }
+ const replay=data.requestId?await q('o_v04Decision').where({...scope,category}).whereRaw("json_extract(content, '$.requestId') = ?",[data.requestId]).orderBy('createdAt','desc').first():null;
+ if(replay)return {accepted:true,status:'REPLAYED',replayed:true,requestId:data.requestId,phase:replay.status,batchId:JSON.parse(replay.content).batchId??replay.id};
  const director=await q.transaction(trx=>captureCurrentDirectorForExperiment(trx,scope));
  const preparationId=randomUUID();
  const claimed=await q.transaction(async trx=>{await trx('o_script').where({id:scope.scriptId,projectId:scope.projectId}).update({id:scope.scriptId});
  const latest=await trx('o_v04Decision').where({...scope,category}).orderBy('createdAt','desc').orderBy('id','desc').first();
- if(latest?.status==='PREPARING'&&Date.now()-latest.createdAt<1800000)return false;
- const sameRequest=data.requestId?await trx('o_v04Decision').where({...scope,category}).whereRaw("json_extract(content, '$.requestId') = ?",[data.requestId]).first():null;if(sameRequest)return false;
- const prior=await trx('o_v04Decision').where({...scope,category,status:'ADMITTED'}).whereRaw("json_extract(content, '$.directorRevision') = ?",[director.current.directorVersion]).first();if(prior&&!data.regenerate)return false;
- await trx('o_v04Decision').insert({id:preparationId,...scope,category,subjectType:'PROJECT',subjectKey:String(scope.projectId),status:'PREPARING',content:JSON.stringify({directorRevision:director.current.directorVersion,requestId:data.requestId??null}),sourceMessageIds:'[]',supersedesDecisionId:null,createdAt:Date.now(),acceptedAt:null});return true;});
- if(!claimed)return {accepted:true,inProgress:true};
+ if(latest?.status==='PREPARING'&&Date.now()-latest.createdAt<1800000)return {accepted:false,status:'ALREADY_RUNNING',inProgress:true,requestId:JSON.parse(latest.content).requestId??null,batchId:latest.id};
+ const sameRequest=data.requestId?await trx('o_v04Decision').where({...scope,category}).whereRaw("json_extract(content, '$.requestId') = ?",[data.requestId]).first():null;if(sameRequest)return {accepted:true,status:'REPLAYED',replayed:true,requestId:data.requestId,batchId:JSON.parse(sameRequest.content).batchId??sameRequest.id,phase:sameRequest.status};
+ const prior=await trx('o_v04Decision').where({...scope,category,status:'ADMITTED'}).whereRaw("json_extract(content, '$.directorRevision') = ?",[director.current.directorVersion]).first();if(prior&&!data.regenerate)return {accepted:false,status:'ALREADY_PREPARED',batchId:prior.id};
+ await trx('o_v04Decision').insert({id:preparationId,...scope,category,subjectType:'PROJECT',subjectKey:String(scope.projectId),status:'PREPARING',content:JSON.stringify({batchId:preparationId,directorRevision:director.current.directorVersion,requestId:data.requestId??null}),sourceMessageIds:'[]',supersedesDecisionId:null,createdAt:Date.now(),acceptedAt:null});return true;});
+ if(claimed!==true)return claimed;
  void (async()=>{const failures:any[]=[];try{
    const context=await q.transaction(trx=>captureAutoAssetReadContext(trx,scope));
    const eligible=context.assets.filter(a=>(!data.canonicalKey||a.canonicalKey===data.canonicalKey)&&a.sourcePolicy==='AI_ALLOWED'&&!['BRAND','UI'].includes(a.category));
@@ -77,15 +79,18 @@ export async function generateAllAssets(input:unknown,actor:number){
      const current=await captureCurrentDirectorForExperiment(trx,scope);
      if(current.current.id!==director.current.id)throw new PilotError('DIRECTOR_SOURCE_STALE','视觉方向已变化，请重新准备',409);
      const results={results:[] as any[]};if(data.regenerate){for(const asset of eligible){const one=await reconcileAutoAssetsInTransaction(trx,{...scope,items,canonicalKeys:[asset.canonicalKey],regenerateKey:asset.canonicalKey,requestId:data.requestId});results.results.push(...one.results);}}else results.results.push(...(await reconcileAutoAssetsInTransaction(trx,{...scope,items})).results);
-     await journal(scope,'ADMITTED',{directorRevision:director.current.directorVersion,requestId:data.requestId??null,failures,results:results.results},trx);
+     await journal(scope,'ADMITTED',{batchId:preparationId,directorRevision:director.current.directorVersion,requestId:data.requestId??null,failures,results:results.results},trx);
    });wakeDraftWorker();
  }catch(e:any){await q.transaction(async trx=>{
    await trx('o_script').where({id:scope.scriptId,projectId:scope.projectId}).update({id:scope.scriptId});
    const head=await trx('o_v04Decision').where({...scope,category}).orderBy('createdAt','desc').orderBy('id','desc').first();
-   if(head?.id===preparationId)await journal(scope,'ATTENTION',{failures,errorCode:e instanceof PilotError?e.code:'ASSET_PREPARATION_FAILED'},trx);
+   if(head?.id===preparationId)await journal(scope,'ATTENTION',{batchId:preparationId,requestId:data.requestId??null,failures,errorCode:e instanceof PilotError?e.code:'ASSET_PREPARATION_FAILED'},trx);
  });}})();
- return {accepted:true};
+ return {accepted:true,status:'SUBMITTED',requestId:data.requestId??null,batchId:preparationId,phase:'PREPARING'};
 }
-export async function assetPipelineState(input:unknown,actor:number){const scope=scopeSchema.parse(input);await authorize(scope,actor);
+export async function assetPipelineState(input:unknown,actor:number){const data=scopeSchema.extend({requestId:z.string().uuid().optional()}).strict().parse(input);const scope={projectId:data.projectId,scriptId:data.scriptId};await authorize(scope,actor);
  const rows=await q('o_v04Decision').where({...scope,category}).orderBy('createdAt','desc').orderBy('id','desc').limit(30);
- return {latest:rows[0]?{...JSON.parse(rows[0].content),phase:rows[0].status}:null,coverage:await autoAssetCoverage(scope),history:rows.map(r=>({id:r.id,phase:r.status,createdAt:r.createdAt,detail:JSON.parse(r.content)}))};}
+ let blocker:any=null;try{await q.transaction(trx=>captureCurrentDirectorForExperiment(trx,scope));}catch(e:any){if(e instanceof PilotError)blocker={code:e.code,message:e.message};else throw e;}
+ const matching=data.requestId?await q('o_v04Decision').where({...scope,category}).whereRaw("json_extract(content, '$.requestId') = ?",[data.requestId]).orderBy('createdAt','desc').first():null;
+ const present=(row:any)=>row?{...JSON.parse(row.content),id:row.id,createdAt:row.createdAt,phase:row.status}:null;
+ return {blocker,runtime:{protocol:'asset.prepare-feedback.1',pid:process.pid,revision:process.env.DS_RUNTIME_BACKEND_SHA??null},request:present(matching),latest:present(rows[0]),coverage:await autoAssetCoverage(scope),history:rows.map(r=>({id:r.id,phase:r.status,createdAt:r.createdAt,detail:JSON.parse(r.content)}))};}

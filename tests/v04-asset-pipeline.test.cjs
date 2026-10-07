@@ -248,3 +248,22 @@ test('033A superseded preparation cannot admit jobs or overwrite the newer phase
  await Promise.race([done,new Promise((_,reject)=>{const timer=setTimeout(()=>reject(Error('preparation did not finish')),3000);timer.unref();})]);
  assert.deepEqual(await f.db('o_v04StudioAssetDraftJob'),before);const state=await api.assetPipelineState(f.scope,7);assert.equal(state.latest.phase,'PREPARING');assert.equal(state.history[0].id,replacement);assert.equal(state.history.some(r=>r.phase==='ADMITTED'||r.phase==='ATTENTION'),false);
 });
+
+
+test('034A feedback distinguishes new admission, replay and active batch; preserves request identity',async t=>{
+ const f=await abFixture(t),api=f.load('assetPipeline');f.load('studioDraftImage').wakeDraftWorker=()=>{};
+ const req=require('crypto').randomUUID(),other=require('crypto').randomUUID(),id=require('crypto').randomUUID();
+ await f.db('o_v04Decision').insert({id,...f.scope,category:'ASSET_PIPELINE_SETUP',subjectType:'PROJECT',subjectKey:String(f.scope.projectId),status:'PREPARING',content:JSON.stringify({requestId:req,batchId:id}),sourceMessageIds:'[]',createdAt:Date.now()});
+ const running=await api.generateAllAssets({...f.scope,regenerate:true,requestId:other},7);assert.equal(running.status,'ALREADY_RUNNING');assert.equal(running.accepted,false);
+ const before=await f.db('o_v04StudioAssetDraftJob');const replay=await api.generateAllAssets({...f.scope,regenerate:true,requestId:req},7);assert.equal(replay.status,'REPLAYED');assert.equal(replay.batchId,id);assert.deepEqual(await f.db('o_v04StudioAssetDraftJob'),before);
+ await f.db('o_v04Creative').where(f.scope).update({version:2});assert.equal((await api.generateAllAssets({...f.scope,regenerate:true,requestId:req},7)).status,'REPLAYED');
+ await assert.rejects(api.generateAllAssets({...f.scope,regenerate:true,requestId:other},7),e=>e.code==='DIRECTOR_AB_NOT_READY');assert.deepEqual(await f.db('o_v04StudioAssetDraftJob'),before);
+ const failedId=require('crypto').randomUUID();await f.db('o_v04Decision').insert({id:failedId,...f.scope,category:'ASSET_PIPELINE_SETUP',subjectType:'PROJECT',subjectKey:String(f.scope.projectId),status:'ATTENTION',content:JSON.stringify({requestId:req,batchId:id,errorCode:'VISUAL_PREPARATION_FAILED'}),sourceMessageIds:'[]',createdAt:Date.now()+1});
+ const state=await api.assetPipelineState({...f.scope,requestId:req},7);assert.equal(state.request.errorCode,'VISUAL_PREPARATION_FAILED');assert.equal(state.blocker.code,'DIRECTOR_AB_NOT_READY');assert.equal(state.runtime.protocol,'asset.prepare-feedback.1');
+});
+test('034A newly submitted batch carries requestId through admitted journal; no replay regeneration',async t=>{
+ const f=await abFixture(t),api=f.load('assetPipeline');f.load('studioDraftImage').wakeDraftWorker=()=>{};f.load('visualSpec').proposeVisualSpecs=async()=>({candidates:[],failures:[]});
+ const body={...f.scope,regenerate:true,requestId:require('crypto').randomUUID()},r=await api.generateAllAssets(body,7);assert.equal(r.status,'SUBMITTED');assert.equal(r.phase,'PREPARING');assert.equal(r.requestId,body.requestId);
+ let state;for(let n=0;n<300;n++){state=await api.assetPipelineState({...f.scope,requestId:body.requestId},7);if(state.request?.phase!=='PREPARING')break;await new Promise(r=>setTimeout(r,10));}
+ assert.equal(state.request.phase,'ADMITTED');assert.equal(state.request.batchId,r.batchId);const before=await f.db('o_v04StudioAssetDraftJob');assert.equal((await api.generateAllAssets(body,7)).status,'REPLAYED');assert.deepEqual(await f.db('o_v04StudioAssetDraftJob'),before);
+});
